@@ -58,7 +58,9 @@ pass as hard gates; unblock dogfoods its own repo (issues imported from `bd` via
 NFR-1 (perf budgets — hybrid gate, D34), NFR-2 (250k CI / 1M manual under the child-per-client topology, D14+D31), **NFR-3 (no hot-spin —
 contention lab in M0 before any crate depends on storage)**, NFR-4/5 (atomic export + reliability gates),
 NFR-6 (zero git), NFR-9 (`forbid(unsafe_code)`, pinned actions), NFR-14 (stdout/stderr discipline),
-NFR-15 (acyclic layering), NFR-16 (Storage contract suite), NFR-18 (MCP untrusted-input boundary).
+NFR-15 (acyclic layering), NFR-16 (Storage contract suite), NFR-18 (MCP untrusted-input boundary),
+**NFR-19 (on-disk backward compatibility — a released binary opens an earlier release's database by
+migrating it forward; minted at v1.0.1 by D46, and the requirement whose absence let the defect ship).**
 
 ### Crates touched (all 12)
 `unblock-model`, `unblock-error`, `unblock-policy`, `unblock-storage` (libsql, local default — `features = ["core"]`;
@@ -167,12 +169,30 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   untouched.
   It **ships in this SAME 1.0.1 cut as a co-requisite of `ub-lp9.20`/D44**, per Miguel's ruling: D44 strictly
   increases exposure to this class, so a release carrying D44 without it would ship a wider hole than GA did.
-- **Missing forward-migration for the comments schema** (P1) — the D37 comments tables need a forward migration
-  so long-lived DBs (not just fresh-created ones) pick up the schema and a comment is **durably stored** there
-  too (the D-feedback "editing an applied migration drifts long-lived DBs" lesson — ship a *forward* migration,
-  never an in-place edit). Independent of D42 and mergeable in either order; **hard constraint: that migration
-  must NOT `ALTER TABLE ADD COLUMN dependencies.metadata` / `.thread_id`** — both are BASELINE-v1 and already
-  present, so it would hard-error on every existing DB.
+- **Missing forward-migration for the comments schema** (P1 — mints **D46**, tracked as `ub-lp9.13`) — the two
+  D37 `comments` columns shipped as an IN-PLACE edit of the baseline DDL, so a database written before
+  2026-07-17 is stamped `user_version = 1` exactly like a GA one while still carrying a five-column `comments`
+  table: every hydrated read fails, and `unblock migrate` (`applied:false`) plus `unblock doctor` (`healthy`)
+  both report success while it does. (The D-feedback "editing an applied migration drifts long-lived DBs"
+  lesson — ship a *forward* migration, never an in-place edit; D46 is what finally makes that rule executable
+  in this crate.) **The fix this bullet originally implied — bump the version and ALTER — does NOT work, and
+  that is measured rather than argued:** a version-keyed unconditional `ALTER TABLE comments ADD COLUMN
+  updated_at` hard-errors with `duplicate column name` on every database created since 2026-07-17, GA's
+  included, because BOTH shapes carry the same stamp. D46 keeps the `user_version` ladder, bumps it to `2`, and
+  writes step 2 as an explicitly ONE-TIME shape-sensing reconcile — the only step that will ever inspect before
+  it acts — so that from step 3 onward a stamped version implies a known shape (spine §3.2). **It also FREEZES
+  the embedded DDL at the baseline shape:** the two columns are removed from the `CREATE TABLE` and exist only
+  as step 2, and every column added in future is a step too — so a fresh install reaches the current shape by
+  running the ladder, which means every install exercises every step and a broken step can no longer hide
+  behind a working `CREATE TABLE` (which is exactly how this defect survived). It also ends the
+  false green (a database that cannot serve a single read stops reporting healthy) and pins the DDL's content,
+  so the next in-place edit is a red BUILD instead of a field failure. Independent of D42 and mergeable in
+  either order; **hard constraint, CONFIRMED and still binding: that migration must NOT `ALTER TABLE ADD COLUMN
+  dependencies.metadata` / `.thread_id`** — both are BASELINE-v1 and already present, so it would hard-error on
+  every existing DB. **As written that constraint was INCOMPLETE:** it names the two columns that are
+  universally present and misses that `comments.updated_at` is present in HALF the population under the SAME
+  stamp — which is the general rule D46 states, that no step may add a column that may already exist under the
+  version it advances from.
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
   self-update promise is exercised, not just unit-asserted.
@@ -190,7 +210,7 @@ SIGNATURE and every implementor's METHOD SET unchanged — no `impl Storage` blo
 method — while the SHIPPED libsql `create_issue` BODY does gain those guards) and `unblock-mcp` (L7 — the optional-and-rejected `deps[].issue_id`,
 the wire descriptions and the contract bump); within D44's own scope `unblock-cli` and `unblock-sync` gain tests only. **D45 is the WIDEST of the five and the one that finally moves L0:** it spans `unblock-model` (L0 — the single case-insensitive `external:` predicate, the only layer both `unblock-storage` and `unblock-engine` may depend on, plus the new `DiagnosticKind` variant), `unblock-storage` (L2 — the batch-aware target-existence guard in the SHARED per-record insert body plus its `add_dependency`/`apply_reparent` siblings, and one new internal `StorageError` variant on an EXISTING `ErrorCode`), `unblock-sync` (L3 — the exporter must stop emitting an edge whose target row it dropped; **CODE, not tests only**), `unblock-engine` (L5 — the composed dangling-edge listing, its fold into `doctor`, and the `create_bulk` `external:` relaxation), `unblock-mcp` (L7 — the new `dangling` diagnostics action + the contract bump) and `unblock-cli` (L7 — the `doctor` report fold). **`unblock-health` is deliberately NOT touched by D45** — D29 clause F3 keeps `run_doctor` pure, non-async and storage-free, and D45 preserves that clause by composing the DB-derived findings in the engine instead of reversing a second shipped clause. D42 carries an
 **additive `contract_version` bump to `unblock.mcp.v1.6`** (D35 permits additive `.M` bumps inside 1.x,
-so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. **D43 carries NO contract bump at all** — it mints no `ErrorCode` and moves no schema byte, so `unblock.mcp.v1.6` stands and `CONTRACT_HASH` is not re-pinned. **D44 carries a FURTHER additive bump to `unblock.mcp.v1.7`** with its own `CONTRACT_HASH` re-pin (relaxing `$defs/DepInput.issue_id` out of `required` and rewriting its description both move `schema_bundle()` bytes), mints no `ErrorCode`, and — like D42 clause 4(iii) — ratifies a behavioural break in a patch release: every GA-schema-valid `issue create` document carrying `deps[].issue_id` now returns `VALIDATION_FAILED` with zero writes, because on that path no such payload ever did what its author asked. **D45 carries a FURTHER additive bump again, to `unblock.mcp.v1.8`**, with its own `CONTRACT_HASH` re-pin: the new `dangling` action adds a `oneOf` arm to the `diagnostics` tool INPUT, its OUTPUT's `DiagnosticKind` gains an enum member, and the tool DESCRIPTION is rewritten to name the new action — all three move published bytes, and a tool description is version-coupled in its `capabilities()` copy. D45 mints no `ErrorCode` either (the refusal rides the existing `ISSUE_NOT_FOUND`), adds no MCP tool (the 8-tool budget stands, full and unmoved) and changes no `Storage` trait signature. Per D35 an additive `.M` inside 1.x is non-breaking, so all three bumps stay patch-eligible. D42 also **inverts a
+so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. **D43 carries NO contract bump at all** — it mints no `ErrorCode` and moves no schema byte, so `unblock.mcp.v1.6` stands and `CONTRACT_HASH` is not re-pinned. **D44 carries a FURTHER additive bump to `unblock.mcp.v1.7`** with its own `CONTRACT_HASH` re-pin (relaxing `$defs/DepInput.issue_id` out of `required` and rewriting its description both move `schema_bundle()` bytes), mints no `ErrorCode`, and — like D42 clause 4(iii) — ratifies a behavioural break in a patch release: every GA-schema-valid `issue create` document carrying `deps[].issue_id` now returns `VALIDATION_FAILED` with zero writes, because on that path no such payload ever did what its author asked. **D45 carries a FURTHER additive bump again, to `unblock.mcp.v1.8`**, with its own `CONTRACT_HASH` re-pin: the new `dangling` action adds a `oneOf` arm to the `diagnostics` tool INPUT, its OUTPUT's `DiagnosticKind` gains an enum member, and the tool DESCRIPTION is rewritten to name the new action — all three move published bytes, and a tool description is version-coupled in its `capabilities()` copy. D45 mints no `ErrorCode` either (the refusal rides the existing `ISSUE_NOT_FOUND`), adds no MCP tool (the 8-tool budget stands, full and unmoved) and changes no `Storage` trait signature. **D46 carries a FOURTH additive bump, to `unblock.mcp.v1.9`**, with its own `CONTRACT_HASH` re-pin — and it is the least obvious of them, which is why it is written down rather than left to be discovered: D46 is a STORAGE decision whose on-disk schema never enters the published bundle, but it attaches a self-correction hint to the stale-schema failure, and a per-code `hint_shape` is PUBLISHED in `capabilities().error_codes`. So `SchemaMismatch` moves off `none` onto `contextual_text`, `capabilities()` moves by more than `contract_version`, and `schema_bundle()` moves only by its own `contract_version` field. D46 mints no `ErrorCode` either (the hint rides the existing `SCHEMA_MISMATCH`), adds no MCP tool and leaves the 0–8 exit table byte-unchanged. Per D35 an additive `.M` inside 1.x is non-breaking, so **all four** bumps stay patch-eligible. D42 also **inverts a
 shipped test that asserted a silent drop was correct** — `unknown_sections_ignored` becomes
 `unknown_section_rejected`. And together they **newly reject SEVEN previously-accepted input classes**: (1) an unknown or
 misspelled **tool argument** on any of the 8 tools; (2) an **unrecognized (or empty) `### ` markdown section**
@@ -552,7 +572,7 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 | Defer/undefer (FR-3) | ● | | | | | | | |
 | Query: list/ready/blocked/search/count/stale (FR-4) | ● | | | ◐ milestone filter | | | | |
 | Typed deps + graph (FR-5) | ● | ◐ D44 create-declared edges + ◐ D45 guarded blocker targets (5 paths) | | | | | | |
-| Comments — full CRUD add/list/update/delete (FR-6, D37) | ● | ◐ comments forward migration | | | | | | |
+| Comments — full CRUD add/list/update/delete (FR-6, D37) | ● | ◐ D46 comments forward migration | | | | | | |
 | Labels (rename/list-all) / epic rollups (FR-6) | | | ● | | | | | |
 | JSONL export/import (FR-7/8) | ● | ◐ D45 export corpus closed under its blockers | | ◐ milestones/goals layout (lock design point) | | | | ◐ DB-only option |
 | `bd` one-shot import (FR-26) | ● | | | | | | | |
@@ -597,12 +617,12 @@ not feature-landing): ● substantial work in that release · ◐ incidental / h
 | Crate | v1 | v1.0.1 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 | v2+ |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | `unblock-model` | ● | ◐ | ● | ● | ◐ | | ◐ | |
-| `unblock-error` | ● | | ● | | ◐ | | ◐ | |
+| `unblock-error` | ● | ◐ D46 | ● | | ◐ | | ◐ | |
 | `unblock-policy` | ● | | ● | ◐ | | | ● | |
 | `unblock-storage` | ● | ● | ◐ | ● | ● | | ● | ◐ |
 | `unblock-sync` | ● | ● | ◐ | | ◐ | | ◐ | ◐ |
 | `unblock-health` | ● lite | | ● full | | ● | | ● | |
-| `unblock-config` | ● subset | | ● full | | ● | | | |
+| `unblock-config` | ● subset | ◐ D46 | ● full | | ● | | | |
 | `unblock-engine` | ● | ● | ● | ● | ● | | ● | |
 | `unblock-render` | ● | | ● | ◐ | | | ◐ | |
 | `unblock-mcp` | ● | ● | ● | ● | ◐ | | ● | ◐ |
@@ -620,7 +640,9 @@ Notes:
   web-era ◐ was the retired HTTP-serving touch). It is minted only at v1.4 lock, when PRD §8.1 grows; until
   then the 12-crate set is unchanged.
 - **`v1.0.1`** is the maintenance-patch column (§1, PRD §4 D41 + **D42**): `unblock-storage` ● carries the
-  comments forward-migration **and the D42 `dependencies` 7-column bind (`metadata`/`thread_id`)**,
+  comments forward-migration (**D46**, tracked as `ub-lp9.13` — the `user_version` ladder bumped `1`→`2` with a
+  one-time shape-sensing step 2, the migrate/doctor false green closed, and a content pin over the embedded DDL)
+  **and the D42 `dependencies` 7-column bind (`metadata`/`thread_id`)**,
   `unblock-mcp` the D43 duplicate-key scanning transport + the D42 argument-boundary error-channel + strict-args fix + the three `create_bulk`
   rejections, `unblock-cli` ◐ the end-to-end `unblock update` smoke **plus the D42 wire-level error-channel
   matrix (tests only)**. **`unblock-engine` ● carries the D44 one-transaction
@@ -642,12 +664,25 @@ Notes:
   fold. **Two cells deliberately do NOT move.** `unblock-health` stays blank: D29 clause F3 keeps
   `run_doctor` pure, non-async and storage-free, and D45 preserves that clause by composing the DB-derived
   findings in the engine — moving the cell without moving the code would be a lie, and moving the code would
-  reverse a second shipped clause. `unblock-error` stays blank: D45 mints no `ErrorCode`; its new variant is
-  an internal `StorageError` mapped onto the existing `ISSUE_NOT_FOUND`.
-  The column still adds no FR and re-tiers nothing (D44 strengthens
-  the FR-1a and FR-5 acceptance criteria, and D45 strengthens FR-5, FR-7, FR-15 and FR-16, rather than
-  adding a requirement) — but with six crates carrying work it is **no longer sparse**, and that framing is
-  retired here rather than restated.
+  reverse a second shipped clause. `unblock-error` stayed blank through D45: D45 mints no `ErrorCode`; its new variant is
+  an internal `StorageError` mapped onto the existing `ISSUE_NOT_FOUND`. **D46 MOVES that cell to ◐ and adds
+  TWO crates to the column, `unblock-error` and `unblock-config`** — not by minting a code (it mints none
+  either) but by moving one PUBLISHED
+  byte on an existing one: `SchemaMismatch`'s `hint_shape` goes from `none` to `contextual_text` so the
+  stale-schema failure can carry a self-correction hint, which re-blesses `unblock-error`'s quadruple golden
+  and, through `capabilities().error_codes`, carries `unblock-mcp`'s additive `unblock.mcp.v1.8`→`v1.9` bump
+  with a `CONTRACT_HASH` re-pin. `unblock-config` joins for TWO arms — the count moved with Miguel's 2026-08-03 ruling (PRD §4 D46 clause (10)), and the second is stated here because the earlier framing said ONE. First, its `ConfigError` must FORWARD that hint
+  on `DbOpenFailed`/`MigrationFailed` the way it already forwards `code()`, because the migration runs
+  implicitly on OPEN and that boundary would otherwise drop the hint the bump was paid for. Second, that same open facade must READ the `PRAGMA user_version` stamp BEFORE it migrates and carry it on `WorkspaceContext`, because it is the only place the pre-repair value still exists — without it `unblock migrate` reports a green `2`→`2` `applied:false` on the very database D46 repairs, and **`unblock-cli` ◐ therefore gains CODE for D46 and not tests only** (its `migrate` command composes the report from that stamp plus the engine outcome; the cell stays ◐ — a shipped command's printed values change, no command, flag or exit code does). `unblock-health` stays blank for D46 as well, and for the same D29 clause F3
+  reason: the two new `doctor` schema-version findings are DB-derived and are composed in the ENGINE.
+  **The column adds no FR, but it NO LONGER "re-tiers nothing" — D46 MINTS `NFR-19`** (on-disk backward
+  compatibility: a released binary opens an earlier release's database by migrating it forward), because
+  nothing in the tree obliged that, which is the root cause of the defect class rather than of one instance.
+  D44 strengthens the FR-1a and FR-5 acceptance criteria, D45 strengthens FR-5, FR-7, FR-15 and FR-16, and D46
+  strengthens FR-16 and NFR-16 while adding NFR-19 — so with **eight** crates carrying work, named so the
+  count is checkable against the matrix above rather than trusted (`unblock-model`, `unblock-error`,
+  `unblock-storage`, `unblock-sync`, `unblock-config`, `unblock-engine`, `unblock-mcp`, `unblock-cli`), the
+  column is **no longer sparse**, and that framing is retired here rather than restated.
 - **100% Rust, no Node:** the TUI adds **no npm/Node build stage** to `dist` and **no `ui` Cargo feature** —
   `cargo-deny` covers the whole tree and the binary gains no npm supply-chain surface. (The web dashboard's
   npm/Node ecosystem lives in the separate v2+ commercial PRO product — roadmap §7 — not the OSS tree.)

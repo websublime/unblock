@@ -73,7 +73,7 @@ CONTRACT_RE='unblock\.mcp\.v1\.8'
 # required: the ci-cd prose now names the range instead of quoting it, and its row moved to REQUIRE_ROW
 # below, anchored on the class-(a) statement itself. Neither alone is enough — prose drifts back, and an
 # anchor on a line carrying two occurrences would be satisfied by the wrong one.
-RANGE_RE='D1\.\.D45'
+RANGE_RE='D1\.\.D46'
 
 # The FAMILY the knob belongs to — ANY published contract id, current or retired. This is not a second
 # copy of the knob: it is what makes an `EXCLUSIVE` row (below) able to say "no OTHER version literal

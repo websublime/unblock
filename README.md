@@ -231,8 +231,8 @@ The `unblock` binary is lifecycle/ops only — domain features are MCP tools. Se
 | Command | Description |
 |---|---|
 | `unblock mcp` | Run the MCP stdio server (the primary product surface, FR-20) |
-| `unblock migrate` | Ensure the workspace database schema is current and report the from→to delta (FR-16) |
-| `unblock doctor` | Run read-only health diagnostics on the workspace (doctor-lite, FR-16) |
+| `unblock migrate` | Bring the workspace database schema to the version this build expects and report the from→to delta; a database written by an older release is migrated forward, a database newer than this build is refused rather than opened (FR-16, D46) |
+| `unblock doctor` | Run read-only health diagnostics on the workspace, including the schema version observed on disk against the one this build expects (doctor-lite, FR-16, D46) |
 | `unblock version` | Print version / build metadata (no workspace, no network) |
 | `unblock init` | Scaffold a new `.unblock/` workspace (config + migrated empty database, FR-14) |
 | `unblock agents` | Write / refresh the managed `AGENTS.md` MCP-wiring block (FR-14) |
