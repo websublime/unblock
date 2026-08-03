@@ -296,6 +296,16 @@ jobs:
       # spelling-independent landing keyed on a durable identifier. It also self-tests its allow-list
       # and every one of its five rule tables.
       - run: scripts/checks/ub-lp9.25-dangling-blocker-claims.sh
+      # D46 (`ub-lp9.13`) required landings: D46's class guard is THREE `const` assertions (the DDL
+      # content digest, the ladder contiguity, and the binding of the sentinel's column set to the
+      # ladder's newest step), so a violation is a red BUILD — but nothing in the tree notices their
+      # DELETION, and the negative question ("did anyone edit the frozen DDL?") is unwritable. This
+      # step asserts the positive: the three assertions, both schema-version constants BY VALUE, the
+      # step's own column tuples, the pre-open stamp in the two files that capture and consume it,
+      # the decision id in the tracker export, and the live D-range at its three prose sites.
+      # Positive-only by design — D46 retires no framing, so it carries no negative sweep and needs no
+      # allow-list. Specified in ci-cd-and-distribution.md §2.1 (the D46 sub-check).
+      - run: scripts/checks/d46-schema-migration-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
