@@ -176,8 +176,8 @@ codes this report cites, listed so the report resolves without the session.
 | id | what it is (in words) | where it lives (file:line / doc § / issue id) |
 |----|-----------------------|-----------------------------------------------|
 | clause (10) | The D46 sub-decision that makes `unblock migrate` report the stamp observed BEFORE the facade's own migration | `docs/PRD.md` §4, the D46 row; consumed at `crates/unblock-cli/src/commands/migrate.rs:39` |
-| P-row | A required-landing row of a `scripts/checks/` guard script: a presence predicate over a named file | `scripts/checks/d46-schema-migration-claims.sh:96` (the `REQUIRE` table) |
-| Q-row | A row-anchored landing of the same script: at least one line must match the anchor, and every anchored line must match the requirement | `scripts/checks/d46-schema-migration-claims.sh:117` (the `REQUIRE_ROW` table) |
+| P-row | A required-landing row of a `scripts/checks/` guard script: a presence predicate over a named file | `scripts/checks/d46-schema-migration-claims.sh:105` (the `REQUIRE` table) |
+| Q-row | A row-anchored landing of the same script: at least one line must match the anchor, and every anchored line must match the requirement | `scripts/checks/d46-schema-migration-claims.sh:133` (the `REQUIRE_ROW` table) |
 | range knob | The shell variable in each shipped check script holding the LIVE decision-id range, in its two spellings | `scripts/checks/d46-schema-migration-claims.sh:65-66` and the two sibling scripts |
 | ruling sixteen | Miguel's standing ruling that the bump-site count stops being a numeral in prose and becomes an enumeration a script checks | `docs/PROCESS.md` §3; issue `ub-lp9.13`, the Verify-gate comment of 2026-08-03 |
 | ruling seventeen | Miguel's standing ruling that the run report and the tracker re-export belong to the tracking step | `docs/PROCESS.md` §6; issue `ub-lp9.13`, the same comment |
@@ -188,11 +188,11 @@ codes this report cites, listed so the report resolves without the session.
   map, Decide rulings, four gate verdicts, Verify outcome) and this report is the depth behind them.
 - Decision: `docs/PRD.md` §4, the D46 row (SUPERSEDES the D37 clause that said no migration was needed).
 - Interface: `docs/plans/01-design-spine.md` §3.2 (`Storage::migrate`) and §5.4 (the contract ledger).
-- Key files: `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-storage/src/libsql/schema.rs`,
-  `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-storage/src/libsql/migrations.rs`,
-  `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-config/src/context.rs`,
-  `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-cli/src/commands/migrate.rs`,
-  `/Users/ramosmig/Public/WS-Labs/unblock/scripts/checks/d46-schema-migration-claims.sh`.
+- Key files: `crates/unblock-storage/src/libsql/schema.rs`,
+  `crates/unblock-storage/src/libsql/migrations.rs`,
+  `crates/unblock-config/src/context.rs`,
+  `crates/unblock-cli/src/commands/migrate.rs`,
+  `scripts/checks/d46-schema-migration-claims.sh`.
 - Prior related run-reports: [2026-08-01-dangling-blocker-spec](2026-08-01-dangling-blocker-spec.md) and
   [2026-08-01-dangling-blocker-impl](2026-08-01-dangling-blocker-impl.md) — the sibling decision in the
   same v1.0.1 slot, whose guard script this one is modelled on.
