@@ -645,7 +645,9 @@ impl ErrorCode {
     //   upgrade the binary — the D46 backward direction, see §3.2 clause (vi). A fixed per-code text
     //   would be wrong for one of them, so the hint is composed per failure rather than per code: it
     //   says WHAT HAPPENED (the stamp found, the version expected, and — on the lying-stamp path — the
-    //   columns actually missing) and WHAT TO RUN. THE PRODUCTION SITE, named: a new `hint()` on
+    //   columns actually missing) and WHAT TO RUN — which on the lying-stamp path is a stamp RESET
+    //   followed by `unblock migrate`, never `unblock migrate` alone (§3.2 clause (v)). THREE texts,
+    //   not two, because the STALE direction itself has two states. THE PRODUCTION SITE, named: a new `hint()` on
     //   `impl CodedError for StorageError` (`unblock-storage`, `src/error.rs`), rendering the failing
     //   variant's own fields — and `ConfigError` FORWARDS it on `DbOpenFailed`/`MigrationFailed`, the
     //   way it already forwards `code()`, because the D46 step runs implicitly on OPEN and that
@@ -890,11 +892,39 @@ pub trait Storage: Send + Sync {
     //      a bounded per-step POSTCONDITION: its result never decides which DDL to run (only step 2 ever
     //      decides anything from a probe), and it is NOT a conformance comparison of the live schema
     //      against SCHEMA_SQL — that is deliberately out of scope (PRD §4, D46).
+    //      "THE NEWEST STEP'S OWN COLUMNS" IS ENFORCED, NOT ASSERTED (Verify gate, 2026-08-03). The
+    //      sentinel probes ONE column set — step 2's, `COMMENTS_STEP_COLUMNS` — and that set IS the
+    //      newest step's own only while the newest step is the comments reconcile. The gate found the
+    //      two bound to drift apart the day a step 3 lands, and the resolution ruled here is TO MAKE
+    //      THE CODE MATCH THIS PROMISE rather than to weaken the promise: a `const` assertion beside
+    //      MIGRATIONS refuses to compile a ladder whose newest step is not the one the sentinel
+    //      witnesses, so this sentence holds as FACT for every tree that builds, and a step-3 author
+    //      must EITHER extend the sentinel to witness its own postcondition OR amend this clause —
+    //      deliberately, at that moment. The alternative (a per-step witness DESCRIPTOR: a table name
+    //      plus a column list on every step) was REJECTED: no non-column step can populate it, so it
+    //      degrades silently to a no-op sentinel for that version, and it adds a per-step surface the
+    //      clause (6) content pin does not hash — trading a stated bound for a hidden one.
     //      THE ERROR CARRIES A HINT (NORMATIVE — D46). "Actionable" is delivered literally: the failure
     //      attaches a `StructuredError.hint` (§2.4) saying WHAT HAPPENED and WHAT TO RUN — the stamp
     //      found, the version this build expects, the columns actually missing on the lying-stamp path,
-    //      and the ONE command that repairs it. It is NOT a per-code constant, because this code also
-    //      serves the opposite direction ((vi)) where the remedy is the opposite instruction.
+    //      and a recovery THE PRODUCT CAN ACTUALLY PERFORM IN THAT STATE. It is NOT a per-code
+    //      constant, because this code also serves the opposite direction ((vi)) where the remedy is
+    //      the opposite instruction.
+    //      THE LYING-STAMP TEXT IS ITS OWN, AND `Migration` BRANCHES ON `from == to` (Miguel's
+    //      ruling, 2026-08-03, after the Verify gate). The variant is SHARED: a genuine step failure
+    //      carries two DIFFERENT versions and is correctly told to run `unblock migrate`; the sentinel
+    //      carries the SAME version twice, because the stamp it fired on already equals CURRENT. On
+    //      THAT state `unblock migrate` alone is not a remedy at all — `run_migrations` skips the
+    //      whole ladder at that stamp, so the advised command re-emits this identical error forever,
+    //      which is the class the paragraph below forbids by name. The lying-stamp text therefore
+    //      (a) names the state truthfully — the STAMP is the false thing, not the ladder, since the
+    //      stamp claims a version whose columns are absent; (b) gives the recovery that WORKS —
+    //      reset the stamp to BASELINE_SCHEMA_VERSION with a single `PRAGMA user_version` write, THEN
+    //      run `unblock migrate`; and (c) says why that is safe — step 2 INSPECTS before it acts and
+    //      adds only the columns actually missing, leaving every existing row untouched. There is NO
+    //      in-product rescue verb for this state (the export path is broken by the same stale shape),
+    //      so the honest instruction IS the remedy the user gets, and it may not be replaced by a
+    //      command that returns this error again.
     //      WHO COMPOSES IT — named, because "at the site" names nothing: a NEW `hint()` method on
     //      `impl CodedError for StorageError` (crate `unblock-storage`, `src/error.rs`, beside the
     //      existing `code()`/`context()` arms), rendering the FIELDS of the failing variant —
@@ -3164,8 +3194,19 @@ the ONE `AGENTS.md` byte that moves is the derived contract line, so `unblock ag
 snapshot twin re-blessed, but no table row changes. D46 mints **no** `ErrorCode` (the hint rides the
 EXISTING `SchemaMismatch`, and `StorageError::Migration` already maps onto it), so `ErrorCode::ALL` stays
 at 36 and the 0–8 exit-code table (§2.3) is untouched; D46 adds **no** MCP tool (the RK-3 budget §6.6
-stands at 8 ≤ 8) and **no** resource, prompt or public API surface — `Storage::migrate` and
-`Storage::schema_version` keep their shipped signatures, the ladder and the step kind being crate-private.
+stands at 8 ≤ 8) and **no** resource or prompt. **It DOES widen ONE crate's public surface, corrected
+here after the 2026-08-03 Verify gate found this sentence claiming otherwise:** `unblock-storage` gains
+the crate-root `pub const CURRENT_SCHEMA_VERSION: i64` (`crates/unblock-storage/src/lib.rs`), and the
+widening is **AUTHORISED, not incidental** — `Session::doctor()` (§4.1) must report the version THIS
+BUILD expects, that value exists nowhere else, and the alternatives are all worse and all already ruled
+out: a new trait method is forbidden two clauses above, composing the finding in the CLI is forbidden by
+§5b (`doctor` invents no second read path), and a literal `2` in L5 is the fourth un-pinned copy of the
+version that `docs/plans/crates/unblock-cli.md` names as the bad option. It is the same mechanical
+consequence PRD §4 D46 already carves out for `WorkspaceContext`'s additive public field: an implementer
+may not be forced to choose between obeying a charter and having a workspace that compiles. **No semver
+event follows** — every `unblock-*` crate is workspace-internal and unpublished (only the `unblock`
+binary ships), so no downstream consumer exists to break. What does NOT move is the TRAIT: `Storage::migrate`
+and `Storage::schema_version` keep their shipped signatures, and the ladder and the step kind stay crate-private.
 Per D35 an additive `.M` bump inside 1.x is NON-breaking, so this ships in a PATCH release, and the bump
 rides the IMPLEMENTATION commit with the code constant and the re-blessed goldens — never a spec-only
 commit ahead of them — because `options.rs`, `public_api.rs`, `README.md`, the crate plan's declaring row
