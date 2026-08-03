@@ -70,6 +70,16 @@ pub struct WorkspaceContext {
     pub paths: ConfigPaths,
     /// Which discovery tier bound the workspace dir (D39 — ADDITIVE). The CLI reports it at startup.
     pub source: WorkspaceSource,
+    /// The `PRAGMA user_version` this facade observed **BEFORE** it migrated (D46 clause (10) —
+    /// ADDITIVE; `0` on a never-migrated database).
+    ///
+    /// **This is the only moment the pre-repair stamp still exists.** Because this facade migrates on
+    /// open (FR-9 single open path), every later reader — `Session::migrate` included — sees the
+    /// POST-repair stamp, which is exactly why `unblock migrate` could not report the delta it exists
+    /// to report. The cli `migrate` command copies this value out before `Session::open` consumes the
+    /// context; the engine IGNORES it (`Session::open` destructures it to `_`), so no L4→L5 contract
+    /// moves — the same additive shape D39's `source` takes.
+    pub schema_version_before_migrate: i64,
 }
 
 /// The fully-resolved per-workspace config: the merged [`WorkspaceConfig`], the resolved actor, the
@@ -136,8 +146,9 @@ pub async fn open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError
 /// # Errors
 ///
 /// As [`open_workspace`], plus:
-/// - [`ConfigError::DbOpenFailed`] if `open_local` fails (forwards the inner storage code).
-/// - [`ConfigError::MigrationFailed`] if `migrate()` fails (forwards the inner storage code).
+/// - [`ConfigError::DbOpenFailed`] if `open_local` — or the D46 pre-migration `schema_version()`
+///   read — fails (forwards the inner storage code, and since D46 its hint).
+/// - [`ConfigError::MigrationFailed`] if `migrate()` fails (forwards the inner storage code + hint).
 pub async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError> {
     open_with_storage_from(Some(start), &CliOverrides::default()).await
 }
@@ -205,6 +216,18 @@ async fn open_with_storage_from(
     let storage = LibsqlStorage::open_local(&paths.db_path, config.write_lock_timeout_ms())
         .await
         .context(DbOpenFailedSnafu)?;
+    // D46 clause (10) — RECORD THE PRE-REPAIR STAMP. This is the ONE place it is still observable:
+    // the next line migrates, so every later reader (including `Session::migrate`) sees the
+    // POST-repair value. It is the EXISTING pure `Storage::schema_version()` read (in the trait since
+    // D27/AF-2, so no trait surface moves), wrapped with the SAME `DbOpenFailedSnafu` `open_local`
+    // uses one line above: it belongs to that same "establish a usable handle" step and runs BEFORE
+    // the ladder, so `MigrationFailed` would mis-label it — and no third `ConfigError` variant is
+    // minted. A `.unwrap_or(0)`-style fallback is FORBIDDEN (clippy-legal and silently wrong): a read
+    // failure laundered into `0` is indistinguishable from a genuinely never-migrated database, so
+    // every open would report `0` -> CURRENT `applied: true` — a fabricated "applied" manufactured
+    // out of an error, on precisely the report D46 exists to make honest.
+    let schema_version_before_migrate =
+        storage.schema_version().await.context(DbOpenFailedSnafu)?;
     // migrate() sets up the schema (two explicit calls — DbOpenFailed wraps open, MigrationFailed
     // wraps migrate).
     storage.migrate().await.context(MigrationFailedSnafu)?;
@@ -218,5 +241,6 @@ async fn open_with_storage_from(
         config: config.into_resolved(),
         paths,
         source,
+        schema_version_before_migrate,
     })
 }

@@ -101,6 +101,49 @@ async fn open_with_storage_opens_migrates_and_yields_a_usable_storage() {
     );
 }
 
+/// **D46 clause (10) — the facade records the PRE-MIGRATION stamp, and this is the ONE place it is
+/// still observable.**
+///
+/// `0` on a never-migrated directory (the file does not exist yet, so `open_local` creates it
+/// unstamped); the current version on a RE-open, because the first open already migrated it. The
+/// storage itself is at the current version in BOTH cases — which is exactly why the cli `migrate`
+/// command cannot source its delta from `Session::migrate`.
+///
+/// MUTANT KILLED: moving the `schema_version()` read to AFTER `storage.migrate()` — the first open
+/// then reports the post-repair stamp instead of `0`, and the two halves become indistinguishable.
+///
+/// MUTANT KILLED: `.unwrap_or(0)`-ing a failing read — not observable here, but the re-open half
+/// pins the non-zero value a default-to-zero fallback would destroy.
+#[tokio::test]
+async fn open_with_storage_records_the_stamp_observed_before_migrating() {
+    let workspace = fresh_workspace();
+
+    let first = open_with_storage(workspace.path())
+        .await
+        .expect("first open");
+    assert_eq!(
+        first.schema_version_before_migrate, 0,
+        "a never-migrated workspace is unstamped BEFORE the facade migrates it"
+    );
+    let migrated = first
+        .storage
+        .schema_version()
+        .await
+        .expect("schema_version after the facade migrated");
+    assert!(
+        migrated > first.schema_version_before_migrate,
+        "the facade genuinely advanced it ({} -> {migrated})",
+        first.schema_version_before_migrate
+    );
+    drop(first);
+
+    let second = open_with_storage(workspace.path()).await.expect("re-open");
+    assert_eq!(
+        second.schema_version_before_migrate, migrated,
+        "on a re-open the pre-migration stamp is already current — nothing moves"
+    );
+}
+
 #[tokio::test]
 async fn open_workspace_errors_when_no_workspace_exists() {
     let root = tempfile::tempdir().expect("tempdir");

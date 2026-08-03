@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.8",
+  "contract_version": "unblock.mcp.v1.9",
   "issue": {
     "input": {
       "$defs": {

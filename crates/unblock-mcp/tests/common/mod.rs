@@ -43,6 +43,7 @@ pub async fn session() -> Arc<Session> {
         config,
         paths,
         source: WorkspaceSource::WalkUp,
+        schema_version_before_migrate: 0,
     };
     Arc::new(
         Session::open(ctx, SessionConfig::default())
@@ -79,6 +80,7 @@ pub async fn session_recording() -> (Arc<Session>, Arc<recording::RecordingStora
         config,
         paths,
         source: WorkspaceSource::WalkUp,
+        schema_version_before_migrate: 0,
     };
     let session = Arc::new(
         Session::open(ctx, SessionConfig::default())
@@ -653,6 +655,7 @@ pub async fn session_gated(n: usize) -> (Arc<Session>, gated::Gate) {
         config,
         paths,
         source: WorkspaceSource::WalkUp,
+        schema_version_before_migrate: 0,
     };
     let session = Arc::new(
         Session::open(ctx, SessionConfig::default())
@@ -943,6 +946,7 @@ pub async fn session_failing_list() -> Arc<Session> {
         config,
         paths,
         source: WorkspaceSource::WalkUp,
+        schema_version_before_migrate: 0,
     };
     Arc::new(
         Session::open(ctx, SessionConfig::default())

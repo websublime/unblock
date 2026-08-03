@@ -33,14 +33,20 @@ pub enum ConfigError {
         start: PathBuf,
     },
 
-    /// Opening the libsql database failed (wraps [`unblock_storage::LibsqlStorage::open_local`]).
+    /// Establishing a usable database handle failed — [`unblock_storage::LibsqlStorage::open_local`]
+    /// **or**, since D46 clause (10), the pre-migration [`unblock_storage::Storage::schema_version`]
+    /// read that runs on the very next line.
+    ///
+    /// That read belongs to this same "establish a usable handle" step and runs BEFORE the ladder, so
+    /// labelling it `MigrationFailed` would be wrong; a THIRD variant is deliberately not minted (it
+    /// would need its own `code()` and `hint()` arms for no gain — see `src/context.rs`).
     ///
     /// Forwards the inner [`StorageError`]'s own code (typically
     /// [`StorageError::Backend`] → [`ErrorCode::DatabaseError`]) — config does **not** hardcode it,
-    /// so a lock/backend cause keeps its honest code.
+    /// so a lock/backend cause keeps its honest code — and, since D46, its `hint()` too.
     #[snafu(display("failed to open the workspace database: {source}"))]
     DbOpenFailed {
-        /// The underlying storage failure from `open_local`.
+        /// The underlying storage failure from `open_local` (or the pre-migration version read).
         source: StorageError,
     },
 
@@ -121,6 +127,33 @@ impl CodedError for ConfigError {
             Self::InvalidValue { .. } => ErrorCode::ConfigError,
         }
     }
+
+    /// **D46 (v1.0.1) — the ONE change this crate's error type carries, and it is plumbing, not
+    /// policy:** forward the inner [`StorageError`]'s own hint on the two storage-wrapping variants,
+    /// mirroring EXACTLY the `code()` forward those two already share.
+    ///
+    /// **Why it is REQUIRED rather than tidy.** D46 clause (5) makes the migration run IMPLICITLY ON
+    /// OPEN, and that path is this crate's open facade (`src/context.rs`). With only `code()`
+    /// implemented, the `CodedError` trait DEFAULT `hint() -> None` discards the stale-schema hint
+    /// composed in `unblock-storage` before `StructuredError` is built — so the contract would
+    /// publish `SchemaMismatch`'s `hint_shape: contextual_text` (paid for with the
+    /// `unblock.mcp.v1.8` → `unblock.mcp.v1.9` bump) while the user on the normative path received no
+    /// hint: this decision's own failure mode wearing the contract's clothes.
+    ///
+    /// Every other variant keeps the trait default `None`. No variant is added, no `ErrorCode` moves,
+    /// and no exit code changes.
+    fn hint(&self) -> Option<String> {
+        match self {
+            Self::DbOpenFailed { source } | Self::MigrationFailed { source } => source.hint(),
+            // Enumerated rather than a catch-all `_`, for the same reason `code()` is: a future
+            // variant must DECLARE whether it carries a hint.
+            Self::WorkspaceNotFound { .. }
+            | Self::ActorUnresolved
+            | Self::Parse { .. }
+            | Self::Io { .. }
+            | Self::InvalidValue { .. } => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +223,73 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::SchemaMismatch);
         // spine §2.3: SchemaMismatch is a Database-category code -> exit 2.
         assert_eq!(err.code().exit_code(), 2);
+    }
+
+    /// **D46 — the two storage-wrapping variants forward the inner `StorageError`'s HINT, and this
+    /// crate is the ONLY reason it survives the implicit-on-open boundary.**
+    ///
+    /// MUTANT KILLED: deleting the `hint()` impl (or its two-variant arm) — the `CodedError` trait
+    /// default `hint() -> None` swallows the storage-composed text and the `StructuredError` the L7
+    /// boundary builds arrives with `hint: None`. That is the contract publishing
+    /// `SchemaMismatch: contextual_text` — bought with the `unblock.mcp.v1.9` bump — with nothing
+    /// behind it on the normative path.
+    #[test]
+    fn db_open_and_migration_failures_forward_the_storage_hint() {
+        use unblock_error::StructuredError;
+
+        let inner = StorageError::Migration {
+            from: 2,
+            to: 2,
+            reason: "the `comments` table is missing the column(s) updated_at, redacted_at that \
+                     schema version 2 adds"
+                .to_string(),
+        };
+        let expected = inner.hint().expect("storage composes the hint");
+
+        for wrapped in [
+            ConfigError::MigrationFailed {
+                source: StorageError::Migration {
+                    from: 2,
+                    to: 2,
+                    reason:
+                        "the `comments` table is missing the column(s) updated_at, redacted_at \
+                             that schema version 2 adds"
+                            .to_string(),
+                },
+            },
+            ConfigError::DbOpenFailed {
+                source: StorageError::SchemaMismatch {
+                    found: 3,
+                    expected: 2,
+                },
+            },
+        ] {
+            assert!(
+                wrapped.hint().is_some(),
+                "{wrapped:?} must forward its source's hint"
+            );
+            // The forwarded text survives the bridge the L7 boundary actually builds.
+            let structured: StructuredError = (&wrapped).into();
+            assert_eq!(structured.hint, wrapped.hint());
+        }
+
+        assert_eq!(
+            ConfigError::MigrationFailed { source: inner }
+                .hint()
+                .as_deref(),
+            Some(expected.as_str()),
+            "forwarded VERBATIM — config composes no text of its own"
+        );
+
+        // Every other variant keeps the trait default.
+        assert_eq!(ConfigError::ActorUnresolved.hint(), None);
+        assert_eq!(
+            ConfigError::WorkspaceNotFound {
+                start: PathBuf::from("/tmp/nowhere")
+            }
+            .hint(),
+            None
+        );
     }
 
     #[test]

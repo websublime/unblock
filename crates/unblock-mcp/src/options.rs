@@ -34,7 +34,8 @@ use tokio_util::sync::CancellationToken;
 /// OUTPUT schemas gains 2 properties (`updated_at`/`redacted_at`) — so existing schema bytes move
 /// too, not merely a new pair) → `unblock.mcp.v1.6` (v1.0.1/D42 — see the clause below) →
 /// `unblock.mcp.v1.7` (v1.0.1/D44 — see the second clause below) → `unblock.mcp.v1.8`
-/// (v1.0.1/D45 — see the third clause below).
+/// (v1.0.1/D45 — see the third clause below) → `unblock.mcp.v1.9` (v1.0.1/D46 — see the fourth
+/// clause below).
 /// The `unblock.mcp.vN[.M]` family preserves the contract-id convention while the `.M` revision
 /// marks an additive contract change within the v1 product.
 ///
@@ -84,7 +85,26 @@ use tokio_util::sync::CancellationToken;
 /// actions, so the managed `AGENTS.md` table gains a `dangling` action row and must be REGENERATED
 /// by `unblock agents` in this same commit, never hand-edited. Per D35 an additive `.M` bump inside
 /// 1.x is NON-breaking, so this too ships in the v1.0.1 patch — it is not a 2.0.0 event).
-pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.8";
+///
+/// `unblock.mcp.v1.9` (v1.0.1/D46 — the FORWARD MIGRATION for the D37 `comments` columns. D46 is
+/// otherwise a STORAGE decision that moves nothing published; what forces this bump is ONE
+/// byte-class, worth naming precisely: D46 attaches a self-correction HINT to the stale-schema
+/// failure, which moves `ErrorCode::SchemaMismatch` off `HintShape::None` onto `ContextualText`
+/// (spine §2.2). `hint_shape` rides the `capabilities()` error map, so `capabilities()` moves by that
+/// descriptor AND by `contract_version`, and `schema_bundle()` moves by its `contract_version` line —
+/// the FR-12 hash-coupled gate fires BY DESIGN. `ContextualText` rather than `StaticText` is a FACT
+/// about the code, not a preference: ONE code serves TWO OPPOSITE directions (a database BELOW this
+/// build must be told to run `unblock migrate`; one ABOVE it to upgrade the binary), so the hint is
+/// composed per failure — in `unblock-storage`, forwarded through `ConfigError`. D46 mints NO
+/// `ErrorCode` (`ErrorCode::ALL` stays at 36 and the 0–8 exit-code table is byte-unchanged), adds NO
+/// tool (the RK-3 budget stands at 8 ≤ 8), and moves NO tool schema: `schema_bundle()`'s per-tool
+/// input/output bytes are otherwise identical. `agents_digest()` does NOT move — it deliberately
+/// omits `hint_shape` — so the managed `AGENTS.md` error TABLE is byte-identical and only its derived
+/// contract line changes. The storage schema never enters the published bundle and `MigrateOutcome`
+/// sits outside the contract surface (spine §5.4), so the hint shape is D46's ONLY published
+/// movement. Per D35 an additive `.M` bump inside 1.x is NON-breaking, so this too ships in the
+/// v1.0.1 patch — it is not a 2.0.0 event, and it is the FOURTH such bump in this same slot).
+pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.9";
 
 /// The pinned SHA-256 digest of the ordered two-document tuple `(capabilities(), schema_bundle())` —
 /// the HASH-COUPLED half of the FR-12 drift gate (D22 widened by D25, `tests/contract_suite.rs`).
@@ -100,11 +120,13 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.8";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-// D45 (v1.0.1) re-pin: the `diagnostics` INPUT gained a `{"kind":"dangling"}` `oneOf` arm, its
-// OUTPUT's `$defs/DiagnosticKind` gained an enum member and the tool DESCRIPTION was rewritten — two
-// axes on `schema_bundle()` plus one on `capabilities()`, so the gate fired BY DESIGN and this pin
-// moved WITH the `unblock.mcp.v1.8` bump and the two re-blessed goldens, never alone.
-pub const CONTRACT_HASH: &str = "a8d8c3cc6d8e12db65073c1103e63754a2f88c38e396839f5d18e6f7abdbbf9c";
+// D46 (v1.0.1) re-pin: `ErrorCode::SchemaMismatch` moved off `HintShape::None` onto
+// `ContextualText`, so its `capabilities().error_codes` descriptor changed — one axis on
+// `capabilities()` plus the `contract_version` line both documents embed. The gate fired BY DESIGN
+// and this pin moved WITH the `unblock.mcp.v1.9` bump and the two re-blessed goldens, never alone.
+// (D45 moved it last: the `diagnostics` INPUT gained a `{"kind":"dangling"}` `oneOf` arm, its
+// OUTPUT's `$defs/DiagnosticKind` gained an enum member and the tool DESCRIPTION was rewritten.)
+pub const CONTRACT_HASH: &str = "e1c71cd356c0da5f211794cafde45e84b5c95e2df328c0c96e9a5c9d73204d78";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
@@ -208,11 +230,12 @@ mod tests {
 
     #[test]
     fn contract_version_is_the_bumped_v1_id() {
-        // v1.0.1/D45: the `diagnostics` tool INPUT gains a `{"kind":"dangling"}` `oneOf` arm, its
-        // OUTPUT's `$defs/DiagnosticKind` gains an enum member, and the tool DESCRIPTION is
-        // rewritten to name the new kind — `schema_bundle()` AND `capabilities()` both move → v1.8
-        // (additive, D35; it follows v1.7, which D44's `DepInput` relaxation earned).
-        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.8");
+        // v1.0.1/D46: `ErrorCode::SchemaMismatch` moves off `HintShape::None` onto
+        // `ContextualText` (the stale-schema self-correction hint), which is a published byte in
+        // `capabilities().error_codes` — so `capabilities()` moves and `schema_bundle()` moves by
+        // the `contract_version` line → v1.9 (additive, D35; it follows v1.8, which D45's
+        // `dangling` diagnostics kind earned).
+        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.9");
     }
 
     #[test]

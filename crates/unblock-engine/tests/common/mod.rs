@@ -60,6 +60,7 @@ pub async fn session_over_in_dir(
         config,
         paths,
         source: WorkspaceSource::WalkUp,
+        schema_version_before_migrate: 0,
     };
     Session::open(ctx, cfg).await.expect("open session")
 }

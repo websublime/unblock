@@ -265,5 +265,6 @@ fn make_ctx(
         config,
         paths,
         source: WorkspaceSource::WalkUp,
+        schema_version_before_migrate: 0,
     }
 }

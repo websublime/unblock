@@ -19,7 +19,7 @@ expression: table
     "SCHEMA_MISMATCH",
     2,
     false,
-    "none"
+    "contextual_text"
   ],
   [
     "DATABASE_ERROR",

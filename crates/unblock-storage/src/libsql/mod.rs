@@ -39,6 +39,11 @@ mod schema;
 // (`unblock_storage::WriteLockGuard`) so `Storage::acquire_write_lock` can name it in its signature.
 pub use lock::WriteLockGuard;
 
+// D46: the version this build expects, surfaced (widened) at the crate root as
+// `unblock_storage::CURRENT_SCHEMA_VERSION` for the engine's advisory `doctor` finding. The i32
+// constant itself stays crate-internal — no backend width leaks into the public surface.
+pub(crate) use schema::CURRENT_SCHEMA_VERSION;
+
 // The `StorageTestkit` impl for `LibsqlStorage` lives **in-module** (gated) so it can reach the
 // `pub(super)` connection accessors (`read`/`write`) and `ids::next_child_number` without widening
 // any visibility at the crate root (resolved-decision #1). It is compiled for the crate's own tests
@@ -1173,9 +1178,11 @@ mod tests {
         );
     }
 
-    /// `migrate` stamps `user_version = 1` on a fresh DB.
+    /// `migrate` stamps `user_version = 2` on a fresh DB (D46 — the fresh arm creates the BASELINE
+    /// and then FALLS THROUGH the ladder, so a brand-new database ends at the CURRENT version having
+    /// genuinely applied step 2).
     #[tokio::test]
-    async fn migrate_stamps_user_version_one() {
+    async fn migrate_stamps_user_version_two() {
         let storage = LibsqlStorage::open_in_memory().await.expect("open");
         storage.migrate().await.expect("migrate");
         let conn = storage.read();
@@ -1183,7 +1190,7 @@ mod tests {
         let row = rows.next().await.expect("row").expect("present");
         assert_eq!(
             row.get_value(0).expect("val").as_integer().copied(),
-            Some(1)
+            Some(2)
         );
     }
 
@@ -1203,7 +1210,7 @@ mod tests {
             result,
             Err(StorageError::SchemaMismatch {
                 found: 99,
-                expected: 1
+                expected: 2
             })
         ));
     }

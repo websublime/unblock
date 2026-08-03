@@ -266,6 +266,7 @@ async fn main() {
         config,
         paths,
         source: WorkspaceSource::WalkUp,
+        schema_version_before_migrate: 0,
     };
     let session = Session::open(ctx, SessionConfig::default())
         .await

@@ -1,4 +1,14 @@
-//! Embedded canonical DDL (`SCHEMA_SQL`) and the schema-version constant.
+//! Embedded canonical DDL (`SCHEMA_SQL`) and the schema-version constants.
+//!
+//! **THE FROZEN-BASELINE DISCIPLINE (D46, v1.0.1 — read this before touching [`SCHEMA_SQL`]).**
+//! [`SCHEMA_SQL`] is FROZEN at the shape it had when the migration ladder began — it corresponds to
+//! [`BASELINE_SCHEMA_VERSION`], **not** to [`CURRENT_SCHEMA_VERSION`]. Every element added after that
+//! baseline exists ONLY as a step in [`super::migrations::MIGRATIONS`]; adding a step does NOT permit
+//! editing this DDL — the two are ALTERNATIVES, never a pair. A reader who needs the CURRENT shape
+//! replays the ladder over this baseline. A fresh database is created at the baseline, stamped
+//! `BASELINE_SCHEMA_VERSION`, and then FALLS THROUGH the ladder like any database found on disk, so
+//! there is exactly ONE path to the current shape and every fresh install exercises every step.
+//! The [`SCHEMA_CONTENT_DIGEST`] const assertion below turns an edit to this text into a red BUILD.
 //!
 //! The column order of `issues` is reproduced **verbatim** from the original
 //! `temp/beads_rust-main/src/storage/schema.rs` (model-B minimal-v1 trims, crate plan §3.3): 38
@@ -13,7 +23,7 @@
 //! live; `config/gate_results` land at v1.1). `ephemeral`/`pinned`/`is_template` are KEPT (ready
 //! gating reads them). `depends_on_id` has **no** foreign key (intentional — external refs).
 
-/// The current on-disk schema version stamped into `PRAGMA user_version`.
+/// The on-disk schema version this build expects, stamped into `PRAGMA user_version`.
 ///
 /// **`dependencies.metadata` and `dependencies.thread_id` are BASELINE-v1** — present in the
 /// original `SCHEMA_SQL` since the first shipped release, so every database ever created by any
@@ -21,16 +31,38 @@
 /// one: it would hard-error on every existing database. (They were merely never BOUND by the write
 /// side until D42; that was a code defect, not a schema gap.)
 ///
-/// v1 baseline. `MIGRATIONS` (in `migrations.rs`) is empty: v1.0.0 is the first shipped schema, so
-/// there is no prior on-disk `user_version` to migrate from in v1 (CLAUDE.md). Any database whose
+/// **D46 (v1.0.1) — `1` → `2`.** The premise this constant carried until v1.0.1 ("`MIGRATIONS` is
+/// empty: v1.0.0 is the first shipped schema, so there is no prior on-disk `user_version` to migrate
+/// from") was true of published RELEASES and false of DATABASES IN THE FIELD: D37 added the two
+/// `comments` columns by editing the baseline `CREATE TABLE` in place, so a database written before
+/// 2026-07-17 is stamped `1` exactly like a GA one and still carries a five-column `comments`. The
+/// ladder now carries its first real step and this constant names the version that step reaches;
+/// [`BASELINE_SCHEMA_VERSION`] names the version [`SCHEMA_SQL`] itself creates. Any database whose
 /// `user_version` is **greater** than this is rejected with [`crate::StorageError::SchemaMismatch`].
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 1;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 2;
 
-/// The complete canonical SQL schema (model-B minimal-v1). Applied wholesale on a fresh database.
+/// The version the embedded [`SCHEMA_SQL`] tables correspond to (D46, v1.0.1).
 ///
-/// Every statement is `CREATE … IF NOT EXISTS`, so re-applying is a no-op (the migration path stamps
-/// `user_version` separately). Statement boundaries are plain `;` at the top level — there are no
-/// string literals containing semicolons here, so `execute_batch` runs the whole script.
+/// Introduced so the literal `1` stops carrying two unrelated meanings. Under the frozen-baseline
+/// discipline the correspondence is true BY CONSTRUCTION and stays true: the DDL never gains a
+/// post-baseline element, so a database created from it is exactly at this version and reaches
+/// [`CURRENT_SCHEMA_VERSION`] by running [`super::migrations::MIGRATIONS`] — the same ladder a
+/// database found on disk runs. The covered range is `BASELINE_SCHEMA_VERSION + 1 ..=
+/// CURRENT_SCHEMA_VERSION`, asserted contiguous and non-empty in `migrations.rs`.
+pub(crate) const BASELINE_SCHEMA_VERSION: i32 = 1;
+
+/// The complete canonical SQL schema at [`BASELINE_SCHEMA_VERSION`] (model-B minimal-v1). Applied
+/// wholesale on a fresh database, which is then stamped at the BASELINE and run through the ladder.
+///
+/// **FROZEN (D46, v1.0.1).** This text no longer describes the CURRENT schema and must not be edited
+/// to make it do so: post-baseline columns live only in migration steps (see the module docs). The
+/// [`SCHEMA_CONTENT_DIGEST`] assertion makes an edit here a compile error — on ANY edit, not only on
+/// one that forgot a version bump or a step.
+///
+/// Every statement is `CREATE … IF NOT EXISTS`, so re-applying is a no-op — and, precisely because
+/// of that, **re-applying it can never ADD a column**: re-application is not a repair mechanism, a
+/// step is. Statement boundaries are plain `;` at the top level — there are no string literals
+/// containing semicolons here, so `execute_batch` runs the whole script.
 pub(crate) const SCHEMA_SQL: &str = r"
     -- Issues table.
     -- Column order is FROZEN to match the original bd schema (model-B trims applied): the
@@ -148,17 +180,13 @@ pub(crate) const SCHEMA_SQL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_labels_label ON labels(label);
     CREATE INDEX IF NOT EXISTS idx_labels_issue ON labels(issue_id);
 
-    -- Comments (rows exist v1; surfaced v1.1).
+    -- Comments — the BASELINE five-column shape (D46: `updated_at`/`redacted_at` live in step 2).
     CREATE TABLE IF NOT EXISTS comments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         issue_id TEXT NOT NULL,
         author TEXT NOT NULL,
         text TEXT NOT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        -- D37 — provenance-preserving edit (D-D) / soft-redact (D-E). Both nullable and part of
-        -- the BASELINE schema: CURRENT_SCHEMA_VERSION stays 1 and MIGRATIONS stays empty.
-        updated_at DATETIME,
-        redacted_at DATETIME,
         FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id);
@@ -199,13 +227,143 @@ pub(crate) const SCHEMA_SQL: &str = r"
     );
 ";
 
+// ---------------------------------------------------------------------------------------------
+// D46 clause (6) — THE CLASS GUARD: a const-evaluated CONTENT PIN.
+// ---------------------------------------------------------------------------------------------
+
+/// FNV-1a 64-bit offset basis.
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+/// FNV-1a 64-bit prime.
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Fold `bytes` into an FNV-1a 64-bit accumulator (`const fn` so the whole digest is const-evaluated).
+const fn fold_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+        i += 1;
+    }
+    hash
+}
+
+/// Fold an `i32` (little-endian) into the accumulator.
+const fn fold_i32(hash: u64, value: i32) -> u64 {
+    fold_bytes(hash, &value.to_le_bytes())
+}
+
+/// Fold a single byte into the accumulator.
+const fn fold_u8(hash: u64, value: u8) -> u64 {
+    fold_bytes(hash, &[value])
+}
+
+/// The const-evaluated digest over [`SCHEMA_SQL`] + [`CURRENT_SCHEMA_VERSION`] + the ladder.
+///
+/// **What the LADDER half hashes (D46 clause (6), settled by the decision — not an implementer
+/// choice):** each step's VERSION and its step-KIND discriminant, plus the SQL TEXT of any
+/// [`MigrationKind::Sql`](super::migrations::MigrationKind::Sql) step. The one-time historical step
+/// is UNPARAMETERISED — its `ALTER`s live in a function body — so today the ladder half is version +
+/// discriminant only. The clause is written for the FIRST future `Sql` step, whose in-place edit
+/// must then redden exactly as a DDL edit does: the "never edit an applied step in place" rule this
+/// crate already claimed, finally executable.
+///
+/// It is deliberately NOT generated by a build script, an `include!`, an `env!` or any codegen
+/// reading these same constants — that would make the pin self-satisfying.
+const SCHEMA_CONTENT_DIGEST: u64 = {
+    let hash = fold_bytes(FNV_OFFSET_BASIS, SCHEMA_SQL.as_bytes());
+    let hash = fold_i32(hash, CURRENT_SCHEMA_VERSION);
+    let hash = fold_i32(hash, BASELINE_SCHEMA_VERSION);
+    let mut hash = hash;
+    let steps = super::migrations::MIGRATIONS;
+    let mut i = 0;
+    while i < steps.len() {
+        hash = fold_i32(hash, steps[i].version);
+        hash = fold_u8(hash, steps[i].kind.discriminant());
+        hash = match steps[i].kind {
+            super::migrations::MigrationKind::Sql(sql) => fold_bytes(hash, sql.as_bytes()),
+            super::migrations::MigrationKind::CommentsColumnsReconcile => hash,
+        };
+        i += 1;
+    }
+    hash
+};
+
+/// The HAND-BLESSED digest literal (D46 clause (6)).
+///
+/// **Re-blessing this is the mechanism, not a side effect.** Any edit to [`SCHEMA_SQL`], to
+/// [`CURRENT_SCHEMA_VERSION`]/[`BASELINE_SCHEMA_VERSION`], or to the ladder's shape moves
+/// [`SCHEMA_CONTENT_DIGEST`] and turns the BUILD red — including a bump that DID add a step, because
+/// a step and a DDL edit are ALTERNATIVES, never a pair. Reaching green after touching the DDL
+/// therefore requires deliberately re-blessing this number, which is exactly the moment a reviewer
+/// sees the frozen baseline being broken.
+///
+/// **How to obtain a new value** (a `const` assertion takes a string LITERAL and formats nothing, so
+/// it can only ever print "assertion failed", never the computed digest): add a TEMPORARY,
+/// UNCOMMITTED `#[test]` in this module that prints [`SCHEMA_CONTENT_DIGEST`] at runtime, read it
+/// under `cargo test -- --nocapture`, transcribe it here, then DELETE the test. Leaving any readout
+/// in the tree — a build script, an `include!`, an `env!`, or a committed test that writes the
+/// literal — would make the pin self-satisfying.
+///
+/// Blessed ONCE, at the D46 implementation commit, over the POST-revert state of that same commit:
+/// the five-column baseline `comments` table, `CURRENT_SCHEMA_VERSION = 2`, and the one-step ladder.
+const BLESSED_SCHEMA_CONTENT_DIGEST: u64 = 0xf764_6f13_a7e9_95ba;
+
+const _: () = assert!(
+    SCHEMA_CONTENT_DIGEST == BLESSED_SCHEMA_CONTENT_DIGEST,
+    "D46 clause (6): SCHEMA_SQL / the schema-version constants / the MIGRATIONS ladder changed \
+     without re-blessing BLESSED_SCHEMA_CONTENT_DIGEST. SCHEMA_SQL is FROZEN at the baseline: a new \
+     column belongs in a forward step, never in this DDL. If the change is legitimate, read the new \
+     digest out with a throwaway #[test] (see BLESSED_SCHEMA_CONTENT_DIGEST's docs) and transcribe it."
+);
+
 #[cfg(test)]
 mod tests {
-    use super::CURRENT_SCHEMA_VERSION;
+    use super::{BASELINE_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION};
 
+    /// The stamp this build writes (D46: `1` → `2`). A by-VALUE pin — moving it is deliberate.
     #[test]
-    fn schema_version_is_one() {
-        assert_eq!(CURRENT_SCHEMA_VERSION, 1);
+    fn schema_version_is_two() {
+        assert_eq!(CURRENT_SCHEMA_VERSION, 2);
+    }
+
+    /// The DDL's own version (D46 clause (1)) — the version `SCHEMA_SQL` creates, distinct from the
+    /// version this build expects. The non-empty covered range they imply is asserted at COMPILE time
+    /// by the ladder-contiguity `const` block in `migrations.rs`, which no annotation can silence.
+    #[test]
+    fn baseline_is_one() {
+        assert_eq!(BASELINE_SCHEMA_VERSION, 1);
+    }
+
+    /// **D46 clause (1) — the FROZEN BASELINE, asserted POSITIVELY on the shape rather than by a
+    /// spelling sweep.** The embedded `comments` CREATE TABLE has exactly FIVE columns and the two
+    /// D37 columns appear NOWHERE in this DDL: they exist only in step 2.
+    ///
+    /// MUTANT KILLED: re-adding `updated_at DATETIME` / `redacted_at DATETIME` to the baseline
+    /// `comments` table (the D37 in-place edit D46 reverts) — which would also hard-error
+    /// `duplicate column name` on every fresh install once step 2 ran.
+    #[test]
+    fn baseline_comments_table_is_the_five_column_shape() {
+        let ddl = super::SCHEMA_SQL;
+        let start = ddl
+            .find("CREATE TABLE IF NOT EXISTS comments")
+            .expect("the baseline DDL creates `comments`");
+        let body = &ddl[start..];
+        let end = body.find(");").expect("the CREATE TABLE is terminated");
+        let create = &body[..end];
+
+        for column in ["id", "issue_id", "author", "text", "created_at"] {
+            assert!(
+                create.contains(column),
+                "the baseline `comments` table must keep its column `{column}`"
+            );
+        }
+        for post_baseline in ["updated_at", "redacted_at"] {
+            assert!(
+                !create.contains(post_baseline),
+                "`{post_baseline}` is a POST-baseline column: it belongs in step 2, never in \
+                 SCHEMA_SQL (D46 clause (1) — the frozen-baseline discipline)"
+            );
+        }
     }
 
     #[test]

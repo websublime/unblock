@@ -1,8 +1,12 @@
 //! `unblock migrate` (D27/AF-2) + `unblock doctor` (HEALTH-LITE, D29/F4) end-to-end.
 //!
-//! - migrate: a fresh workspace is already migrated on open, so the FIRST `migrate` reports the real
-//!   schema (`schema_from == schema_to == 1`, `applied == false` — the honest idempotent signal, not
-//!   a phantom applied-list), and a SECOND run reports identically (idempotent). Report shape pinned.
+//! - migrate (D46 clause (10)): the command reports the stamp observed BEFORE its own open, so all
+//!   THREE cases are pinned here and get the SAME treatment. An `unblock init`-built workspace is
+//!   ALREADY-CURRENT (`init` opened through the same facade, which migrated), so it reports
+//!   `schema_from == schema_to == 2`, `applied == false` — `applied: false` means "the stamp did not
+//!   move across THIS run's own open", NOT "nothing was wrong". A NEVER-MIGRATED workspace
+//!   (`.unblock/config.toml`, no `unblock.db`) reports `0` -> `2`, `applied: true`. A STALE workspace
+//!   (five-column `comments`, stamped `1`) reports `1` -> `2`, `applied: true`. Report shape pinned.
 //! - doctor (T3.3): the cli ROUTES through the wired `Session::doctor()` — a clean DB → `health:
 //!   healthy` + `integrity: ok` (no file-state anomalies), exit 0. A corrupted DB → exit 2 (db bucket)
 //!   — the corruption is surfaced as a `DATABASE_ERROR` structured error (the deterministic corruption
@@ -14,12 +18,14 @@ mod common;
 use common::{Workspace, detail, json_report};
 use serde_json::Value;
 
+/// An `init`-built workspace is ALREADY CURRENT — `init` opened it through the same config facade,
+/// which migrated it — so the stamp observed BEFORE this run's own open is already `2` and nothing
+/// moves (D46 clause (10); the pre-ruling reason, "the facade outran `Session::migrate`", is retired
+/// and is now false).
 #[test]
-fn migrate_fresh_reports_current_schema_and_is_idempotent() {
+fn migrate_on_an_already_current_workspace_reports_no_move_and_is_idempotent() {
     let ws = Workspace::init();
 
-    // First migrate: the config facade already migrated on open, so this reports the current schema
-    // with `applied == false` (honest — nothing was advanced by THIS call).
     let first = json_report(&ws, &["migrate", "--output", "json"]);
     assert_eq!(
         first["kind"], "info",
@@ -27,18 +33,18 @@ fn migrate_fresh_reports_current_schema_and_is_idempotent() {
     );
     assert_eq!(
         detail(&first, "schema_from"),
-        Some("1"),
-        "on-disk schema before"
+        Some("2"),
+        "the stamp observed BEFORE this run's own open — already current"
     );
     assert_eq!(
         detail(&first, "schema_to"),
-        Some("1"),
+        Some("2"),
         "on-disk schema after"
     );
     assert_eq!(
         detail(&first, "applied"),
         Some("false"),
-        "no advance post-open"
+        "the stamp did not move across this run's own open"
     );
     // The database finding names the workspace DB (a path — assert it ends with the db filename).
     assert!(
@@ -48,23 +54,27 @@ fn migrate_fresh_reports_current_schema_and_is_idempotent() {
 
     // Second migrate: idempotent — identical from/to/applied.
     let second = json_report(&ws, &["migrate", "--output", "json"]);
-    assert_eq!(detail(&second, "schema_from"), Some("1"));
-    assert_eq!(detail(&second, "schema_to"), Some("1"));
+    assert_eq!(detail(&second, "schema_from"), Some("2"));
+    assert_eq!(detail(&second, "schema_to"), Some("2"));
     assert_eq!(detail(&second, "applied"), Some("false"));
 }
 
-#[test]
-fn migrate_report_shape_is_snapshot_pinned() {
-    let ws = Workspace::init();
+/// Run `unblock migrate --output json` and return the report with the volatile `database` path
+/// redacted to a stable token, so a snapshot pins the SHAPE (kind + finding labels + schema/applied
+/// values) rather than a tempdir path.
+fn migrate_report_json(ws: &Workspace) -> Value {
     let out = ws
         .cmd()
         .args(["migrate", "--output", "json"])
         .output()
         .expect("run migrate");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "migrate must succeed; stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let mut report: Value = serde_json::from_slice(&out.stdout).expect("valid JSON migrate report");
-    // The `database` detail is an absolute tempdir path — redact it to a stable token so the snapshot
-    // pins the SHAPE (kind + finding labels + schema/applied values) without the volatile path.
     if let Some(findings) = report["findings"].as_array_mut() {
         for f in findings {
             if f["label"] == "database" {
@@ -72,7 +82,106 @@ fn migrate_report_shape_is_snapshot_pinned() {
             }
         }
     }
-    insta::assert_json_snapshot!("migrate_report_fresh", report);
+    report
+}
+
+/// The ALREADY-CURRENT report shape (D46 clause (3) item (a) — RENAMED from
+/// `…__migrate_report_fresh.snap`, because D46 gives "fresh" the OPPOSITE meaning: a never-migrated
+/// database now reports `0` -> `2` `applied: true`, pinned by the cell below).
+#[test]
+fn migrate_report_shape_on_an_already_current_workspace_is_snapshot_pinned() {
+    let ws = Workspace::init();
+    insta::assert_json_snapshot!("migrate_report_already_current", migrate_report_json(&ws));
+}
+
+/// **D46 clause (10) — the NEVER-MIGRATED direction, which this command could not show AT ALL before.**
+///
+/// The fixture needs no libsql: a `.unblock/` carrying `config.toml` and NO `unblock.db`, so the
+/// facade's own `open_local` creates the file at stamp `0`, the ladder then runs (a fresh database
+/// reaches the current shape THROUGH step 2 under the frozen-baseline discipline), and the command
+/// reports the pre-open stamp it captured.
+///
+/// MUTANT KILLED: sourcing `schema_from` from `MigrateOutcome.from` again — which is exactly the
+/// pre-ruling code. `Session::migrate` runs AFTER the facade migrated, so it would observe `2` and
+/// this cell would read `2` -> `2` `applied: false`.
+#[test]
+fn migrate_on_a_never_migrated_workspace_reports_zero_to_current_applied() {
+    let ws = Workspace::init();
+    remove_database(&ws);
+
+    let report = migrate_report_json(&ws);
+    assert_eq!(
+        detail(&report, "schema_from"),
+        Some("0"),
+        "an unstamped, not-yet-created database reads 0 BEFORE the facade migrates; report: {report}"
+    );
+    assert_eq!(detail(&report, "schema_to"), Some("2"));
+    assert_eq!(
+        detail(&report, "applied"),
+        Some("true"),
+        "the stamp genuinely moved across this run's own open; report: {report}"
+    );
+    insta::assert_json_snapshot!("migrate_report_never_migrated", report);
+}
+
+/// **D46 — the STALE direction: the case this whole decision exists for.**
+///
+/// A workspace whose `comments` table is the five-column pre-D37 shape while its stamp says `1` —
+/// indistinguishable by `user_version` from a GA database, and unable to serve a single hydrated
+/// read. `unblock migrate` repairs it and reports `1` -> `2` `applied: true` (exit 0), the
+/// pre-existing comment row survives with both new columns NULL, and the same workspace then serves
+/// the hydrated read that failed before.
+///
+/// MUTANT KILLED: emptying the ladder (`MIGRATIONS: &[]`) — the stale database stays five-column, the
+/// hydrated read keeps failing and `schema_to` never reaches `2`.
+///
+/// MUTANT KILLED: making step 2 unconditional (a version-keyed `ALTER` with no sensing) — this cell
+/// still passes, but every ALREADY-CURRENT cell above hard-errors `duplicate column name`, which is
+/// the measured behaviour on every database created since 2026-07-17.
+#[test]
+fn migrate_on_a_stale_workspace_repairs_it_and_reports_the_real_delta() {
+    let ws = Workspace::init();
+    seed_issue(&ws, "ub-stale");
+    seed_comment(
+        &ws,
+        "ub-stale",
+        "a comment written before the columns existed",
+    );
+    make_comments_table_stale(&ws);
+
+    // Precondition: the fixture really is the broken state (five columns, stamped 1).
+    assert_eq!(
+        comments_columns(&ws).len(),
+        5,
+        "the fixture is the 5-column shape"
+    );
+    assert_eq!(stamped_user_version(&ws), 1, "…while the stamp claims 1");
+
+    let report = migrate_report_json(&ws);
+    assert_eq!(
+        detail(&report, "schema_from"),
+        Some("1"),
+        "the pre-open stamp — the stale database's own lie; report: {report}"
+    );
+    assert_eq!(detail(&report, "schema_to"), Some("2"));
+    assert_eq!(
+        detail(&report, "applied"),
+        Some("true"),
+        "the ladder genuinely ran; report: {report}"
+    );
+
+    // The repair is additive: the pre-existing row survives, with both new columns NULL.
+    assert_eq!(comments_columns(&ws).len(), 7, "the two columns are back");
+    let comments = read_comments(&ws, "ub-stale");
+    assert_eq!(comments.len(), 1, "the pre-existing comment row survived");
+    assert_eq!(
+        comments[0].body,
+        "a comment written before the columns existed"
+    );
+    assert!(
+        comments[0].updated_at.is_none() && comments[0].redacted_at.is_none(),
+        "an ADD COLUMN leaves the existing row NULL — no recreate-and-copy, which would be data loss"
+    );
 }
 
 #[test]
@@ -102,6 +211,163 @@ fn migrate_on_a_future_schema_db_exits_2_with_schema_mismatch() {
         value["code"], "SCHEMA_MISMATCH",
         "a future user_version maps to the SCHEMA_MISMATCH code (D27/AF-2)"
     );
+}
+
+/// **D46 — the LYING-STAMP path: a database AT the current version whose shape is not the current
+/// shape.** The sentinel turns what used to be an opaque `DATABASE_ERROR` on every hydrated read
+/// (with `migrate` reporting `applied:false` exit 0 and `doctor` reporting `healthy` exit 0 — three
+/// lies) into a typed exit-2 refusal that NAMES the missing columns and carries a self-correction
+/// HINT.
+///
+/// **This is the cell that proves the hint survives the IMPLICIT-ON-OPEN boundary**, not merely that
+/// `StorageError` composes one: the failure happens inside the config facade's own `migrate()` at
+/// open, so the text reaching stdout has passed through `ConfigError`.
+///
+/// MUTANT KILLED: deleting the sentinel (`witness_newest_step`) — the command exits 0 claiming
+/// success on a database that cannot serve a read.
+///
+/// MUTANT KILLED: deleting the `ConfigError::hint()` forwarding arm — the trait default
+/// `hint() -> None` swallows it and `hint` arrives `null`, which is the contract publishing
+/// `contextual_text` with nothing behind it.
+#[test]
+fn a_lying_stamp_exits_2_with_a_hint_that_names_the_repair_and_the_missing_columns() {
+    let ws = Workspace::init();
+    // Current stamp (2) + stale shape (5 columns) — the state the stamp alone cannot detect.
+    drop_comment_columns(&ws);
+    assert_eq!(
+        stamped_user_version(&ws),
+        2,
+        "the stamp still claims current"
+    );
+
+    let out = ws
+        .cmd()
+        .args(["migrate", "--output", "json"])
+        .output()
+        .expect("run migrate on a lying-stamp db");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a shape fault is never reported as a green delta; stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let value: Value =
+        serde_json::from_slice(&out.stdout).expect("valid JSON structured error on stdout (FR-11)");
+    assert_eq!(
+        value["code"], "SCHEMA_MISMATCH",
+        "onto the EXISTING code — D46 mints none"
+    );
+    let hint = value["hint"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the failure must carry a hint; payload: {value}"));
+    assert!(
+        hint.contains("unblock migrate"),
+        "the hint must name the ONE command that repairs it: {hint}"
+    );
+    assert!(
+        hint.contains("updated_at") && hint.contains("redacted_at"),
+        "the hint must name the columns actually missing: {hint}"
+    );
+    let lowered = hint.to_lowercase();
+    assert!(
+        !lowered.contains("re-import") && !lowered.contains("reimport"),
+        "`sync export` is itself broken by a stale `comments` table — that advice is invalid: {hint}"
+    );
+}
+
+/// Delete the workspace database (and its WAL sidecars), leaving `.unblock/config.toml` behind — the
+/// NEVER-MIGRATED fixture. The facade's own `open_local` recreates the file at stamp `0`.
+fn remove_database(ws: &Workspace) {
+    let db = ws.db_path();
+    for suffix in ["", "-wal", "-shm"] {
+        let mut path = db.clone().into_os_string();
+        path.push(suffix);
+        let _ = std::fs::remove_file(std::path::PathBuf::from(path));
+    }
+    assert!(!db.exists(), "the never-migrated fixture has no unblock.db");
+}
+
+/// Revert the `comments` table to its five-column pre-D37 shape AND stamp `user_version = 1` — the
+/// STALE fixture: exactly what a build before 2026-07-17 left on disk.
+///
+/// **Why the columns are DROPPED from a real `init`-built database rather than re-created from a
+/// duplicated historical DDL const:** the workspace this cell drives must be a genuine product
+/// workspace (every table, index and `config.toml` as `unblock init` writes them), and a second copy
+/// of the 38-column baseline DDL living in the cli crate could drift into testing a fiction. The
+/// FROZEN HISTORICAL DDL const lives in exactly ONE place, `unblock-storage/tests/migrations.rs`,
+/// which is the cell its crate plan assigns it to. Dropping the two post-baseline columns cannot
+/// silently become "create a fresh one" — the mutation this construction guards against — because a
+/// no-op step 2 leaves them dropped and every assertion above goes red.
+fn make_comments_table_stale(ws: &Workspace) {
+    drop_comment_columns(ws);
+    stamp_user_version(&ws.db_path(), 1);
+}
+
+/// Drop the two post-baseline `comments` columns via raw libsql, leaving the stamp untouched.
+fn drop_comment_columns(ws: &Workspace) {
+    let rt = runtime();
+    rt.block_on(async {
+        let database = libsql::Builder::new_local(ws.db_path())
+            .build()
+            .await
+            .expect("open the workspace db");
+        let conn = database.connect().expect("connect");
+        for column in ["updated_at", "redacted_at"] {
+            conn.execute(&format!("ALTER TABLE comments DROP COLUMN {column}"), ())
+                .await
+                .unwrap_or_else(|e| panic!("drop {column}: {e}"));
+        }
+    });
+}
+
+/// The `comments` column names, in ordinal order, read straight off the file.
+fn comments_columns(ws: &Workspace) -> Vec<String> {
+    let rt = runtime();
+    rt.block_on(async {
+        let database = libsql::Builder::new_local(ws.db_path())
+            .build()
+            .await
+            .expect("open the workspace db");
+        let conn = database.connect().expect("connect");
+        let mut rows = conn
+            .query("PRAGMA table_info(comments)", ())
+            .await
+            .expect("table_info");
+        let mut columns = Vec::new();
+        while let Some(row) = rows.next().await.expect("row") {
+            if let libsql::Value::Text(name) = row.get_value(1).expect("name") {
+                columns.push(name);
+            }
+        }
+        columns
+    })
+}
+
+/// The `PRAGMA user_version` currently on the file.
+fn stamped_user_version(ws: &Workspace) -> i64 {
+    let rt = runtime();
+    rt.block_on(async {
+        let database = libsql::Builder::new_local(ws.db_path())
+            .build()
+            .await
+            .expect("open the workspace db");
+        let conn = database.connect().expect("connect");
+        let mut rows = conn.query("PRAGMA user_version", ()).await.expect("uv");
+        let row = rows.next().await.expect("row").expect("present");
+        row.get_value(0)
+            .expect("value")
+            .as_integer()
+            .copied()
+            .expect("integer")
+    })
+}
+
+/// A tiny current-thread runtime for the raw-libsql fixtures (the harness itself is sync).
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a current-thread runtime")
 }
 
 /// Stamp `PRAGMA user_version = <version>` on the workspace DB via a raw libsql open (the same bundled
@@ -302,6 +568,43 @@ fn doctor_lists_a_planted_dangling_edge_yet_exits_0() {
     );
 }
 
+/// **D46 — `doctor` reports BOTH schema numbers, and its exit rule is byte-identical.**
+///
+/// The two findings are asserted BY VALUE on a workspace this test just created, so both integers are
+/// known — **but NOT against `unblock_storage::CURRENT_SCHEMA_VERSION`.** The cell writes the CLI's
+/// OWN observable instead: it runs `unblock migrate --output json` against the same workspace and
+/// asserts both doctor findings equal that report's `schema_to`, and equal each other. The version is
+/// then asserted once and read twice, and the only literal in play is the one the re-blessed migrate
+/// snapshot in this same test binary already pins.
+///
+/// MUTANT KILLED: dropping either finding from the engine fold — the lookup returns `None`.
+///
+/// NO "flips the exit on a stamp mismatch" mutant is claimed, and the reason is stated so it is not
+/// re-added as an oversight: a stamp mismatch is UNREACHABLE from this command by construction (the
+/// facade migrates on open, and a stamp ABOVE the build's is refused at open before `doctor` runs at
+/// all). A mutant that cannot fire proves nothing; the exit rule's protection stays where it already
+/// is — `doctor_exit`'s own mutation pin.
+#[test]
+fn doctor_reports_the_observed_and_expected_schema_versions_and_still_exits_0() {
+    let ws = Workspace::init();
+
+    let migrate = migrate_report_json(&ws);
+    let expected = detail(&migrate, "schema_to").expect("the migrate report names schema_to");
+
+    // `json_report` asserts exit 0, so a passing call already proves these findings are ADVISORY.
+    let report = json_report(&ws, &["doctor", "--output", "json"]);
+    assert_eq!(
+        detail(&report, "schema_version"),
+        Some(expected),
+        "the stamp OBSERVED on disk; report: {report}"
+    );
+    assert_eq!(
+        detail(&report, "schema_expected"),
+        Some(expected),
+        "the version THIS BUILD expects; report: {report}"
+    );
+}
+
 /// Create one real issue through the engine (the same `Session` the CLI opens), so the only
 /// fabricated thing in the workspace is the edge planted next.
 fn seed_issue(ws: &Workspace, id: &str) {
@@ -332,6 +635,47 @@ fn seed_issue(ws: &Workspace, id: &str) {
         session.create(&issue).await.expect("create the issue");
         drop(session);
     });
+}
+
+/// Open a `Session` over `ws` through the SAME config facade the CLI dispatches through. The caller
+/// drops it before spawning any CLI child, so no connection outlives the call.
+async fn open_session(ws: &Workspace) -> unblock_engine::Session {
+    use unblock_config::{CliOverrides, open_with_storage_with_cli};
+    use unblock_engine::{Session, SessionConfig};
+
+    let overrides = CliOverrides::new().with_dir(ws.unblock_dir());
+    let ctx = open_with_storage_with_cli(&overrides)
+        .await
+        .expect("open the workspace via the config facade");
+    Session::open(ctx, SessionConfig::default())
+        .await
+        .expect("open a session")
+}
+
+/// Add one comment through the real engine (so nothing about the row is fabricated).
+fn seed_comment(ws: &Workspace, issue_id: &str, body: &str) {
+    runtime().block_on(async {
+        let session = open_session(ws).await;
+        session
+            .add_comment(issue_id, body)
+            .await
+            .expect("add the comment");
+        drop(session);
+    });
+}
+
+/// The HYDRATED comment read — the read a five-column `comments` table breaks, run through the real
+/// engine over the real workspace.
+fn read_comments(ws: &Workspace, issue_id: &str) -> Vec<unblock_model::Comment> {
+    runtime().block_on(async {
+        let session = open_session(ws).await;
+        let comments = session
+            .list_comments(issue_id)
+            .await
+            .expect("the hydrated comment read must succeed after the repair");
+        drop(session);
+        comments
+    })
 }
 
 /// Insert a dependency row DIRECTLY, bypassing every guard — the only way to reach the
