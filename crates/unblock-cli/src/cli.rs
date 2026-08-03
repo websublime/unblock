@@ -94,6 +94,13 @@ pub enum Command {
     /// Run the MCP stdio server (the primary product surface, FR-20).
     Mcp(McpArgs),
     /// Ensure the workspace database schema is current and report the from→to delta (FR-16).
+    ///
+    /// Migration is FORWARD-ONLY and it MOVES the on-disk schema version, so an OLDER `unblock`
+    /// meeting a database this command has migrated refuses to open it (exit 2, `SCHEMA_MISMATCH`)
+    /// instead of misreading a shape it does not understand — upgrade every binary that shares this
+    /// workspace. The on-disk schema is not part of the version-stable CLI surface (D35), so this
+    /// direction ships in a patch release; it is stated here rather than left to be inferred from
+    /// silence (D46 clause (8)).
     Migrate(MigrateArgs),
     /// Run read-only health diagnostics on the workspace (doctor-lite, FR-16).
     Doctor(DoctorArgs),
