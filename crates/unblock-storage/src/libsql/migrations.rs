@@ -128,6 +128,32 @@ const _: () = {
     );
 };
 
+// THE SENTINEL'S SUBJECT, bound to the ladder rather than asserted in prose (Verify gate,
+// 2026-08-03). `witness_newest_step` probes `COMMENTS_STEP_COLUMNS`, while the `Storage::migrate`
+// contract (spine §3.2 clause (v)) promises the NEWEST step's OWN columns. Those two agree today
+// and would silently diverge the day a step 3 lands — the sentinel would go on witnessing step 2
+// while the contract claimed otherwise, which is a doc-vs-code lie of exactly the kind D46 exists
+// to end. The RESOLUTION RULED HERE IS "make the CODE match the promise", and this is the
+// mechanism: the promise holds as FACT for every tree that compiles, because a tree in which it
+// stops holding does not compile.
+//
+// The alternative — a per-step witness DESCRIPTOR (a table name + a column list on every step) — was
+// REJECTED: no non-column step (an index, a backfill) can populate it, so it degrades silently to a
+// no-op sentinel for that version, and it would add a per-step surface the clause (6) content pin
+// does NOT hash. A const assertion adds no surface, cannot degrade, and forces the choice at the
+// exact moment a step 3 is written.
+const _: () = {
+    let newest = &MIGRATIONS[MIGRATIONS.len() - 1];
+    assert!(
+        newest.kind.discriminant() == MigrationKind::CommentsColumnsReconcile.discriminant(),
+        "D46 clause (v): `witness_newest_step` witnesses COMMENTS_STEP_COLUMNS, which IS the newest \
+         step's own column set only while the newest step is the one-time comments reconcile. A new \
+         newest step must EITHER extend the sentinel to witness its own postcondition OR amend the \
+         `Storage::migrate` contract that promises the newest step's columns — deliberately, here, \
+         not by discovering in the field that the sentinel witnesses a step two versions old."
+    );
+};
+
 /// Read the database's `PRAGMA user_version`.
 ///
 /// A fresh, unstamped database reports `0`.
@@ -209,6 +235,11 @@ pub(crate) async fn run_migrations(conn: &Connection) -> Result<(), StorageError
 /// where the ladder ran" is precisely the complement of the defect.
 ///
 /// `found` is the stamp observed on entry, so the returned error names what the caller actually met.
+///
+/// **The subject is [`COMMENTS_STEP_COLUMNS`], and that IS "the newest step's own columns" as a
+/// compile-enforced fact, not as a claim:** the `const` block beside [`MIGRATIONS`] refuses to build
+/// a ladder whose newest step is not the comments reconcile, so this function cannot silently fall
+/// behind the ladder (Verify gate, 2026-08-03 — "make the code match the promise").
 async fn witness_newest_step(conn: &Connection, found: i32) -> Result<(), StorageError> {
     let present = comments_columns(conn).await?;
     let missing: Vec<&str> = COMMENTS_STEP_COLUMNS

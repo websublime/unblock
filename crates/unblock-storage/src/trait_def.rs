@@ -109,11 +109,30 @@ pub trait Storage: Send + Sync {
     /// missing. It is a bounded per-step POSTCONDITION: its result never decides which DDL to run
     /// (only step 2 ever decides anything from a probe), and it is NOT a conformance comparison of
     /// the live schema against `SCHEMA_SQL` — that is deliberately out of scope (PRD §4, D46).
+    /// **"THE NEWEST STEP'S OWN COLUMNS" IS COMPILE-ENFORCED, NOT ASSERTED** (Verify gate,
+    /// 2026-08-03): the sentinel probes ONE set — step 2's `COMMENTS_STEP_COLUMNS` — which IS the
+    /// newest step's own only while the newest step is the comments reconcile, so a `const` assertion
+    /// beside `MIGRATIONS` refuses to compile a ladder where that stops being true. The ruling was to
+    /// make the CODE match this promise rather than to weaken the promise; a step-3 author must
+    /// therefore EITHER extend the sentinel to witness its own postcondition OR amend this clause,
+    /// deliberately, at that moment. (A per-step witness DESCRIPTOR was rejected: no non-column step
+    /// can populate it, so it degrades silently to a no-op, and it adds a surface the content pin
+    /// does not hash.)
     /// **THE ERROR CARRIES A HINT (NORMATIVE).** "Actionable" is delivered literally: the failure
     /// attaches a `StructuredError.hint` saying WHAT HAPPENED (the stamp found, the version this
-    /// build expects, the columns actually missing) and WHAT TO RUN. It is NOT a per-code constant,
+    /// build expects, the columns actually missing) and WHAT TO RUN — **a recovery the product can
+    /// actually perform in that state.** It is NOT a per-code constant,
     /// because this code also serves the opposite direction ((vi)), where the remedy is the opposite
-    /// instruction. It is composed by `impl CodedError for StorageError`'s `hint()`
+    /// instruction. **`Migration` itself carries TWO states and the text BRANCHES on `from == to`**
+    /// (Miguel's ruling, 2026-08-03): a genuine step failure names two DIFFERENT versions and IS
+    /// repaired by `unblock migrate`, while the sentinel names the SAME version twice — and there
+    /// `unblock migrate` is no remedy at all, since the ladder is skipped at that stamp and the
+    /// advised command would re-emit this identical error forever. The lying-stamp text instead names
+    /// the STAMP as the false thing, gives the recovery that works (reset `PRAGMA user_version` to
+    /// `BASELINE_SCHEMA_VERSION`, THEN run `unblock migrate`) and says why it is safe (the step
+    /// inspects before acting and adds only what is missing, leaving every row untouched). There is
+    /// no in-product rescue verb for this state — the export path is broken by the same stale shape —
+    /// so that honest instruction IS the remedy. It is composed by `impl CodedError for StorageError`'s `hint()`
     /// (`crate::StorageError`, `src/error.rs`) from the failing variant's own fields, which
     /// `src/libsql/migrations.rs` populates. On the (iv) implicit-on-open path `ConfigError` FORWARDS
     /// `source.hint()` on its `DbOpenFailed`/`MigrationFailed` variants — without that arm the trait

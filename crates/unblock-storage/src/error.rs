@@ -18,6 +18,8 @@ use serde_json::{Map, Value};
 use snafu::Snafu;
 use unblock_error::{CodedError, ErrorCode, sanitize_message};
 
+use crate::libsql::BASELINE_SCHEMA_VERSION;
+
 /// The backend-agnostic error returned by every [`crate::Storage`] method (spine §2.1/§3.1).
 ///
 /// Each variant maps to exactly one [`ErrorCode`] via the [`CodedError`] impl below (the L7
@@ -231,17 +233,51 @@ impl CodedError for StorageError {
     /// re-import" is invalid while the shape is stale, because `sync export` is itself among the
     /// tools a stale `comments` table breaks.
     ///
+    /// **`Migration` SERVES TWO STATES AND THE TEXT BRANCHES ON THEM (Miguel's ruling, 2026-08-03,
+    /// after the Verify gate).** The variant is shared, and its two version fields are what tell the
+    /// states apart: on a GENUINE step failure `from != to` (the ladder ran, or tried to, between two
+    /// different versions), and `unblock migrate` IS the remedy — that arm is unchanged. On the
+    /// LYING-STAMP path (`src/libsql/migrations.rs`'s sentinel) `from == to == CURRENT`, and advising
+    /// `unblock migrate` there would advise a command that CANNOT repair the state: `run_migrations`
+    /// skips the whole ladder at that stamp, so a re-run re-emits this identical error forever. That
+    /// is the class the [`crate::Storage::migrate`] contract forbids by name, so the lying-stamp text
+    /// says instead (i) WHAT IS ACTUALLY WRONG — the stamp claims this build's version while the
+    /// columns that version adds are absent, so the STAMP is the false thing, not the ladder;
+    /// (ii) THE ONE RECOVERY THAT WORKS — reset the stamp to [`BASELINE_SCHEMA_VERSION`] with a single
+    /// `PRAGMA user_version` write, then run `unblock migrate`; and (iii) WHY THAT IS SAFE — step 2
+    /// INSPECTS the table before acting and adds only the columns actually absent, leaving every
+    /// existing row untouched. **There is deliberately no in-product rescue verb for this state**:
+    /// the export path is broken by the same stale shape (`sync export` reads `comments`), so an
+    /// honest, executable instruction is the entire remedy the user gets — which is exactly why it
+    /// may not be replaced by a command that returns this error again.
+    ///
     /// Every other variant keeps the trait default (`None`), so no other code's published
     /// `hint_shape` moves. **It only reaches a user because `unblock-config` FORWARDS it** on
     /// `DbOpenFailed`/`MigrationFailed` — the D46 step runs implicitly on open, and that boundary
     /// would otherwise drop it.
     fn hint(&self) -> Option<String> {
         match self {
-            Self::Migration { from, to, reason } => Some(format!(
-                "the workspace database is at schema version {from}, but this build expects {to} \
-                 ({reason}). Run `unblock migrate` in this workspace to bring it forward; the \
-                 repair is additive and keeps every existing row."
-            )),
+            Self::Migration { from, to, reason } => Some(if from == to {
+                // THE LYING STAMP. `unblock migrate` is skipped wholesale at this stamp, so naming it
+                // alone would name a command that re-emits this same error forever.
+                format!(
+                    "the workspace database is STAMPED at schema version {from} — the version this \
+                     build expects — but the columns that version adds are absent ({reason}). The \
+                     STAMP is what is wrong, not the migration ladder, so running `unblock migrate` \
+                     on its own CANNOT repair it: every forward step is skipped at this stamp and \
+                     this same error is returned again. To recover: reset the stamp to the baseline \
+                     version with one `PRAGMA user_version = {BASELINE_SCHEMA_VERSION}` write \
+                     against this database file, then run `unblock migrate` in this workspace. That \
+                     is safe — the step INSPECTS the table before it acts and adds only the columns \
+                     actually missing, leaving every existing row untouched."
+                )
+            } else {
+                format!(
+                    "the workspace database is at schema version {from}, but this build expects \
+                     {to} ({reason}). Run `unblock migrate` in this workspace to bring it forward; \
+                     the repair is additive and keeps every existing row."
+                )
+            }),
             Self::SchemaMismatch { found, expected } => Some(format!(
                 "the workspace database is at schema version {found}, which is NEWER than the {expected} \
                  this build understands — it was written by a newer `unblock`. Upgrade this binary \
@@ -621,17 +657,28 @@ mod tests {
 
     /// **D46 — the stale-schema hint is composed HERE, and it is the one that must reach the user.**
     ///
-    /// `Migration` (the stale / lying-stamp direction) names the repair command AND the missing
-    /// column(s) its `reason` carries; `SchemaMismatch` (the newer-than-build direction) carries the
-    /// OPPOSITE instruction and never names the migrate command; the two texts DIFFER; and the hint
-    /// survives the bridge into `StructuredError`.
+    /// `Migration` serves TWO states and the text BRANCHES on its own version fields (Miguel's
+    /// ruling, 2026-08-03): a GENUINE step failure (`from != to`) is told to run `unblock migrate`,
+    /// while the LYING-STAMP state (`from == to`, the sentinel's own error) is told the truth — the
+    /// STAMP is wrong, `unblock migrate` alone is skipped at that stamp and cannot repair it, so the
+    /// recovery is to reset `PRAGMA user_version` to the baseline FIRST and migrate after.
+    /// `SchemaMismatch` (the newer-than-build direction) carries the OPPOSITE instruction and never
+    /// names the migrate command; every text DIFFERS; and the hint survives the bridge into
+    /// `StructuredError`.
     ///
     /// MUTANTS KILLED: deleting the `Migration` arm (the hint is `None` — a published
-    /// `ContextualText` shape with nothing behind it, this decision's own failure mode); collapsing
-    /// the two directions onto one constant text (the `assert_ne` fires, and the `SchemaMismatch`
-    /// text would then tell an out-of-date reader to run `unblock migrate`, which cannot help);
-    /// dropping `reason` from the rendering (the missing-column assertion fires); advising
-    /// "export and re-import", which a stale `comments` table itself breaks.
+    /// `ContextualText` shape with nothing behind it, this decision's own failure mode); **collapsing
+    /// the two `Migration` states back onto ONE text — i.e. restoring the shipped
+    /// "at schema version {from}, but this build expects {to} … Run `unblock migrate`" on the
+    /// lying-stamp path, which advises a command the product CANNOT perform in that state (the ladder
+    /// is skipped at that stamp, so the advised command re-emits this identical error): the
+    /// lying-stamp assertions below fire, because that text names neither `PRAGMA user_version` nor
+    /// the baseline stamp to reset to**; swapping the branch condition (the genuine-failure
+    /// assertions fire on a text telling a mid-ladder failure to hand-edit its stamp); collapsing the
+    /// two DIRECTIONS onto one constant text (the `assert_ne` fires, and the `SchemaMismatch` text
+    /// would then tell an out-of-date reader to run `unblock migrate`, which cannot help); dropping
+    /// `reason` from the rendering (the missing-column assertion fires); advising "export and
+    /// re-import", which a stale `comments` table itself breaks.
     #[test]
     fn schema_hints_are_composed_and_carry_opposite_remedies() {
         let stale = StorageError::Migration {
@@ -645,12 +692,53 @@ mod tests {
             .hint()
             .expect("the stale-schema failure carries a hint");
         assert!(
+            stale_hint.contains("PRAGMA user_version = 1"),
+            "the lying-stamp recovery is a stamp RESET to the baseline, and it must be executable \
+             as written: {stale_hint}"
+        );
+        assert!(
             stale_hint.contains("unblock migrate"),
-            "the stale direction must name the ONE command that repairs it: {stale_hint}"
+            "…followed by the migrate that then has work to do: {stale_hint}"
+        );
+        assert!(
+            stale_hint.contains("STAMP is what is wrong"),
+            "the state must be named truthfully — the stamp lies, the ladder did not fail: \
+             {stale_hint}"
+        );
+        assert!(
+            stale_hint.contains("INSPECTS"),
+            "…and why the reset is safe: the step senses the table and adds only what is missing: \
+             {stale_hint}"
+        );
+        assert!(
+            !stale_hint.contains("but this build expects"),
+            "the retired text claimed a version DELTA where both numbers are the same, and advised \
+             a command that cannot repair this state: {stale_hint}"
         );
         assert!(
             stale_hint.contains("updated_at") && stale_hint.contains("redacted_at"),
             "the hint must name the columns actually missing: {stale_hint}"
+        );
+
+        // The OTHER state of the SAME variant: a genuine mid-ladder step failure, where the two
+        // versions differ and `unblock migrate` IS the remedy. Its advice must NOT have been
+        // rewritten wholesale into the stamp-reset instruction.
+        let step_failure = StorageError::Migration {
+            from: 1,
+            to: 2,
+            reason: "the forward steps ended stamped at user_version 1, not 2".to_string(),
+        };
+        let step_hint = step_failure
+            .hint()
+            .expect("a step failure carries a hint too");
+        assert!(
+            step_hint.contains("Run `unblock migrate`") && !step_hint.contains("PRAGMA"),
+            "a REAL step failure keeps its existing advice — the stamp is honest there, so hand-\
+             editing it would be wrong: {step_hint}"
+        );
+        assert_ne!(
+            stale_hint, step_hint,
+            "one variant, two states — the text branches on `from == to`"
         );
 
         let newer = StorageError::SchemaMismatch {
@@ -673,7 +761,7 @@ mod tests {
             "one code, two opposite remedies — which is why the published shape is ContextualText"
         );
 
-        for hint in [&stale_hint, &newer_hint] {
+        for hint in [&stale_hint, &step_hint, &newer_hint] {
             let lowered = hint.to_lowercase();
             assert!(
                 !lowered.contains("re-import") && !lowered.contains("reimport"),

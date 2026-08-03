@@ -229,6 +229,11 @@ fn migrate_on_a_future_schema_db_exits_2_with_schema_mismatch() {
 /// MUTANT KILLED: deleting the `ConfigError::hint()` forwarding arm — the trait default
 /// `hint() -> None` swallows it and `hint` arrives `null`, which is the contract publishing
 /// `contextual_text` with nothing behind it.
+///
+/// MUTANT KILLED (2026-08-03 ruling): collapsing `StorageError`'s two `Migration` states back onto
+/// the single shipped text, which on THIS state advises `unblock migrate` alone — a command that
+/// re-emits this identical error forever, because the ladder is skipped at this stamp. The recovery
+/// assertions below name the stamp reset, which that text does not carry.
 #[test]
 fn a_lying_stamp_exits_2_with_a_hint_that_names_the_repair_and_the_missing_columns() {
     let ws = Workspace::init();
@@ -261,8 +266,14 @@ fn a_lying_stamp_exits_2_with_a_hint_that_names_the_repair_and_the_missing_colum
         .as_str()
         .unwrap_or_else(|| panic!("the failure must carry a hint; payload: {value}"));
     assert!(
-        hint.contains("unblock migrate"),
-        "the hint must name the ONE command that repairs it: {hint}"
+        hint.contains("PRAGMA user_version = 1") && hint.contains("unblock migrate"),
+        "the recovery that WORKS reaches the user end-to-end: reset the lying stamp to the \
+         baseline, then migrate (Miguel's ruling, 2026-08-03): {hint}"
+    );
+    assert!(
+        hint.contains("STAMP is what is wrong"),
+        "…and it names the state truthfully rather than reporting a delta between two identical \
+         numbers: {hint}"
     );
     assert!(
         hint.contains("updated_at") && hint.contains("redacted_at"),
