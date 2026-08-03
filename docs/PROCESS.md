@@ -37,12 +37,13 @@ tool. **Never simplify the solution to make progress; if you reach that point, s
   bump** (D29 F5-A: "an ADDENDUM to D29, NOT a new D-id — the D1..D29 range is unchanged"). A change **driven by a
   NEW, separately-motivated decision** rides **that decision's own new D-id**, recorded with **reciprocal cross-refs
   in BOTH rows** (new row "SUPERSEDES/CORRECTS Dnn clause X"; old row an inline "SUPERSEDED/amended by Dnn" note —
-  never a silent overwrite), and minting the new D-id triggers the **D-range bump** at **5 sites, all in the SAME
+  never a silent overwrite), and minting the new D-id triggers the **D-range bump** at **7 sites, all in the SAME
   commit** — the 3 prose sites (`CLAUDE.md`, ci-cd §2.1(a), the `xtask/src/doc_lint.rs` comment, whose tokenizer
   alternation moves with its prose) **plus the live-range knob of each shipped required check script**
-  (`scripts/checks/d44-create-deps-claims.sh` `RANGE_RE`, and `scripts/checks/ub-lp9.25-dangling-blocker-claims.sh`
-  `RANGE_RE` + `RANGE_ALT_RE`). The knobs track the LIVE range, never a frozen historical one, and both scripts are
-  steps of the required `doc-lint` job — so a cascade that stops at the 3 prose sites turns two required steps red
+  (`scripts/checks/d44-create-deps-claims.sh` `RANGE_RE`; `scripts/checks/ub-lp9.25-dangling-blocker-claims.sh`
+  `RANGE_RE` + `RANGE_ALT_RE`; `scripts/checks/d46-schema-migration-claims.sh` `RANGE_RE` + `RANGE_ALT_RE`). The
+  knobs track the LIVE range, never a frozen historical one, and all three scripts are
+  steps of the required `doc-lint` job — so a cascade that stops at the 3 prose sites turns three required steps red
   for a reason unrelated to their own decisions. *(Distinct coupling, opposite commit: those same scripts also pin
   the live `CONTRACT_VERSION` through a `CONTRACT_RE` knob, which moves with the IMPLEMENTATION commit that changes
   the code constant — see ci-cd §2.1.)* A clause **reversal that falls out of a new decision rides
