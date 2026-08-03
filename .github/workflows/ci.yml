@@ -302,7 +302,8 @@ jobs:
       # DELETION, and the negative question ("did anyone edit the frozen DDL?") is unwritable. This
       # step asserts the positive: the three assertions, both schema-version constants BY VALUE, the
       # step's own column tuples, the pre-open stamp in the two files that capture and consume it,
-      # the decision id in the tracker export, and the live D-range at its three prose sites.
+      # the decision id in the tracker export, and the live D-range at every file the count-free
+      # `docs/PROCESS.md` §3 enumeration names — the prose sites AND each sibling script's knob.
       # Positive-only by design — D46 retires no framing, so it carries no negative sweep and needs no
       # allow-list. Specified in ci-cd-and-distribution.md §2.1 (the D46 sub-check).
       - run: scripts/checks/d46-schema-migration-claims.sh
