@@ -227,6 +227,110 @@ async fn doctor_folds_in_a_file_state_anomaly() {
     );
 }
 
+/// **D46 — the two schema findings REPORT WHAT THEY CLAIM TO REPORT, proven where the two numbers
+/// genuinely DIFFER (Verify gate, 2026-08-03).**
+///
+/// The shipped cli cell (`crates/unblock-cli/tests/migrate_doctor.rs`) asserts both findings on a
+/// freshly-`init`ed workspace, where the observed stamp and `CURRENT_SCHEMA_VERSION` are BOTH the
+/// current version — so it pins their PRESENCE and their VALUE, but it cannot tell the two SOURCES
+/// apart: swapping `schema_version`'s source for `schema_expected`'s (or the reverse) leaves it
+/// green. Both source mutants were MEASURED alive against it. This cell is the pin that makes the
+/// pair mean something: it drives the two apart and asserts each against its own source.
+///
+/// The state is built the only way it can be — a MIGRATED file-backed workspace whose stamp is then
+/// reset to the BASELINE through a raw libsql open. It is deliberately NOT reachable through the
+/// config facade (which migrates on open, closing the gap before anything can observe it), which is
+/// why this cell owns a `Session` built directly over `LibsqlStorage` rather than over the facade.
+///
+/// MUTANT KILLED: sourcing `schema_version` from `unblock_storage::CURRENT_SCHEMA_VERSION` (the
+/// observed-stamp finding then reports 2 on a database stamped 1 — a `doctor` that cannot see the
+/// very drift D46 exists to expose, while every shipped cell stays green).
+///
+/// MUTANT KILLED: sourcing `schema_expected` from `storage.schema_version()` (the two findings
+/// collapse onto the on-disk value, so `doctor` reports the stale stamp TWICE and can never
+/// contradict itself — which is precisely the false green clause (4) forbids).
+#[cfg(feature = "health")]
+#[tokio::test]
+async fn doctor_schema_findings_report_the_stamp_and_the_build_version_separately() {
+    use std::sync::Arc;
+    use unblock_storage::{DEFAULT_WRITE_LOCK_TIMEOUT_MS, LibsqlStorage, Storage};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let workspace_dir = tmp.path().to_path_buf();
+    let unblock_dir = workspace_dir.join(".unblock");
+    std::fs::create_dir_all(&unblock_dir).expect("create .unblock");
+    let db_path = unblock_dir.join("unblock.db");
+
+    // 1. A genuinely migrated file-backed workspace (stamp == CURRENT, current shape).
+    {
+        let storage = LibsqlStorage::open_local(&db_path, DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+            .await
+            .expect("open_local");
+        storage.migrate().await.expect("migrate");
+        assert_eq!(
+            storage.schema_version().await.expect("schema_version"),
+            unblock_storage::CURRENT_SCHEMA_VERSION,
+            "the fixture starts AT the current version, so the reset below is the only difference"
+        );
+    }
+
+    // 2. Re-stamp it to the BASELINE out of band — the drift `doctor` must be able to see. The
+    //    shape is untouched, so this is a stamp-only disagreement: exactly the observable the two
+    //    findings exist to surface.
+    {
+        let database = libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .expect("raw open");
+        let conn = database.connect().expect("connect");
+        conn.query("PRAGMA user_version = 1", ())
+            .await
+            .expect("re-stamp to the baseline");
+    }
+
+    // 3. `Session::open` does NOT migrate (the config facade does, and this cell deliberately
+    //    bypasses it), so the drifted stamp survives into `doctor()`.
+    let storage = LibsqlStorage::open_local(&db_path, DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+        .await
+        .expect("reopen_local");
+    let storage: Arc<dyn Storage> = Arc::new(storage);
+    let session = common::session_over_in_dir(
+        storage,
+        SessionConfig::default(),
+        workspace_dir,
+        unblock_dir,
+    )
+    .await;
+
+    let report = session.doctor().await.expect("doctor is wired");
+    let detail = |label: &str| {
+        report
+            .findings
+            .iter()
+            .find(|f| f.label == label)
+            .map(|f| f.detail.as_str())
+    };
+    assert_eq!(
+        detail("schema_version"),
+        Some("1"),
+        "the OBSERVED stamp is read off the database, not taken from this build; findings: {:?}",
+        report.findings
+    );
+    assert_eq!(
+        detail("schema_expected"),
+        Some(unblock_storage::CURRENT_SCHEMA_VERSION.to_string().as_str()),
+        "the EXPECTED version comes from this build's constant, not from the database; findings: \
+         {:?}",
+        report.findings
+    );
+    assert_ne!(
+        detail("schema_version"),
+        detail("schema_expected"),
+        "the whole point: on a drifted database the two findings must DISAGREE — a pair that cannot \
+         disagree cannot stop `doctor` printing `healthy` beside a contradicting number"
+    );
+}
+
 #[tokio::test]
 async fn open_with_jsonl_export_knob_is_accepted() {
     // The jsonl_export knob is wired (its export body is the T2.4 seam); open must still succeed.
