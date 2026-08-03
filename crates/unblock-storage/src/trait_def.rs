@@ -47,11 +47,104 @@ pub trait Storage: Send + Sync {
     // lifecycle
     // ---------------------------------------------------------------------------------------------
 
-    /// Apply schema migrations to bring the database to the current version.
+    /// Bring the on-disk schema to the current version, idempotently, and stamp it.
     ///
-    /// Idempotent: re-running on an up-to-date database is a no-op. A database at a **newer**
-    /// version than this build is rejected with [`StorageError::SchemaMismatch`]; a failed step
-    /// surfaces [`StorageError::Migration`].
+    /// # THE MIGRATION CONTRACT (D46, v1.0.1 — NORMATIVE, spine §3.2)
+    ///
+    /// Ordered forward steps, lowest first. Note what cannot substitute for one: the embedded
+    /// `SCHEMA_SQL` is `CREATE … IF NOT EXISTS` throughout, so **re-applying it can never ADD a
+    /// column**. Re-application is not a repair mechanism; a step is.
+    ///
+    /// **(0) THE FROZEN-BASELINE DISCIPLINE — the rule a future step author needs, so read it
+    /// first.** `SCHEMA_SQL` IS FROZEN at the shape it had when the ladder began: a 5-column
+    /// `comments` table (`id, issue_id, author, text, created_at`). **ADDING A STEP DOES NOT PERMIT
+    /// EDITING `SCHEMA_SQL` — the two are ALTERNATIVES, never a pair.** Every element added after the
+    /// baseline exists ONLY as a step; the constant deliberately no longer describes the current
+    /// schema, and a reader who needs that shape REPLAYS the ladder over it. A fresh database is
+    /// created at the BASELINE, stamped `BASELINE_SCHEMA_VERSION`, and then FALLS THROUGH the ladder
+    /// like any other, so **there is exactly ONE path to the current shape and every fresh install
+    /// exercises every step.** That is the point: this defect existed because the fresh path worked
+    /// while the ladder path was never exercised even once.
+    ///
+    /// **(i) THE INVARIANT — A STAMPED VERSION IMPLIES A KNOWN SHAPE.** From step 3 onward every step
+    /// applies its DDL UNCONDITIONALLY, because the version it advances FROM denotes exactly one
+    /// physical shape. **A step MUST NOT inspect the database to decide what to do.** This is the
+    /// sentence whose absence caused the defect D46 repairs: stamp `1` was allowed to mean two
+    /// different `comments` tables, so a binary could not tell a stale database from a current one.
+    /// **(0) is what makes this PROVABLE rather than asserted:** since `SCHEMA_SQL` never carries a
+    /// post-baseline column, no fresh database can already have one, and no other creation path
+    /// exists — so a database stamped `N` has run exactly steps `BASELINE + 1 ..= N` and its shape IS
+    /// their composition. Were the DDL allowed to grow in place alongside the ladder, the first step
+    /// whose column was also added to the DDL would hard-error `duplicate column name` on every fresh
+    /// install.
+    ///
+    /// **(ii) THE ONE-TIME EXCEPTION — step 2, and NO other step, ever.** Stamp `1` covers TWO
+    /// physical shapes (`comments` with 5 columns before 2026-07-17; 7 from `v1.0.0-rc.4` on, because
+    /// D37 edited the baseline `CREATE TABLE` in place instead of shipping a step). Step 2 therefore
+    /// SENSES the shape before it acts — one `PRAGMA table_info(comments)`, adding only the columns
+    /// actually absent — and it is carried by an UNPARAMETERISED, single-purpose step kind precisely
+    /// so that a later step cannot reuse it. **The sensing is load-bearing on the LARGEST half of the
+    /// population, not a historical courtesy:** an existing GA database carries all SEVEN columns and
+    /// is stamped `1`, so under (0) it falls through the ladder and reaches step 2 with the columns
+    /// ALREADY PRESENT. Step 2 is the one step whose FROM-version does not denote one shape — the debt
+    /// it pays off. **Copying its shape into a step 3 or later is a contract violation, not a style
+    /// choice.** Once every stamp-`1` database has become stamp-`2`, (i) holds for every version this
+    /// product will ever write; there is no second exception and none may be minted.
+    ///
+    /// **(iii) ATOMICITY** — a step's DDL and its `PRAGMA user_version` write commit TOGETHER in ONE
+    /// `BEGIN IMMEDIATE`. A step that applied DDL and stamped separately could crash between them and
+    /// manufacture a third shape, which is exactly the ambiguity (i) exists to forbid.
+    ///
+    /// **(iv) WHEN IT RUNS (the D46 policy, binding on every future step).** IMPLICIT ON OPEN is
+    /// permitted ONLY for an ADDITIVE/nullable step: the config open facade already migrates on open
+    /// (FR-9 single open path) and already holds the D31 advisory `.write.lock` across the version
+    /// read and the run, so real DDL there introduces no new lock discipline. A DESTRUCTIVE,
+    /// DATA-REWRITING or LONG-RUNNING step is EXPLICIT-ONLY, gated behind the `unblock migrate`
+    /// command — it may not run inside an `unblock mcp` startup an agent never asked for. **The
+    /// STEP'S CLASS decides, never the caller's convenience.**
+    ///
+    /// **(v) A STAMP THAT LIES IS AN ERROR, never a silent read failure.** `migrate` ends on EVERY
+    /// path — including the already-at-current early return — by witnessing the NEWEST step's own
+    /// columns, returning [`StorageError::Migration`] (→ `SchemaMismatch`, exit 2) naming what is
+    /// missing. It is a bounded per-step POSTCONDITION: its result never decides which DDL to run
+    /// (only step 2 ever decides anything from a probe), and it is NOT a conformance comparison of
+    /// the live schema against `SCHEMA_SQL` — that is deliberately out of scope (PRD §4, D46).
+    /// **THE ERROR CARRIES A HINT (NORMATIVE).** "Actionable" is delivered literally: the failure
+    /// attaches a `StructuredError.hint` saying WHAT HAPPENED (the stamp found, the version this
+    /// build expects, the columns actually missing) and WHAT TO RUN. It is NOT a per-code constant,
+    /// because this code also serves the opposite direction ((vi)), where the remedy is the opposite
+    /// instruction. It is composed by `impl CodedError for StorageError`'s `hint()`
+    /// (`crate::StorageError`, `src/error.rs`) from the failing variant's own fields, which
+    /// `src/libsql/migrations.rs` populates. On the (iv) implicit-on-open path `ConfigError` FORWARDS
+    /// `source.hint()` on its `DbOpenFailed`/`MigrationFailed` variants — without that arm the trait
+    /// DEFAULT `hint() -> None` would drop it before `StructuredError` is built. The hint may NOT
+    /// advise a recovery the product cannot perform in that state: "export and re-import" is invalid
+    /// while the shape is stale, because `sync export` is itself among the tools a stale `comments`
+    /// table breaks.
+    ///
+    /// **(vi) THE TWO ENDS.** A database stamped NEWER than this build → [`StorageError::SchemaMismatch`]
+    /// — which, since D46 bumps the stamp, is a REACHABLE direction and not a hypothetical: a GA
+    /// `1.0.0` binary meeting a database this ladder moved to `2` REFUSES it with exit 2. PRD §4 D46
+    /// records that this is NOT a breaking change under D35 (D35's stable set is the MCP contract, the
+    /// CLI lifecycle surface and the 0–8 exit codes — the ON-DISK SCHEMA is not among them), and
+    /// refusing with a clear error is the CORRECT behaviour, strictly better than misreading. A
+    /// database stamped `0` that ALREADY carries tables takes the BASELINE stamp and then FALLS
+    /// THROUGH the ladder — never the current stamp directly, which would assert a shape nobody
+    /// verified and put the database beyond the reach of the very step that repairs it. Under (0)
+    /// that is ALSO the rule for a TRULY EMPTY database, so **a fresh initialisation genuinely
+    /// applies a step**: `Session::migrate` on an unmigrated store reports `from: 0`, `to: CURRENT`,
+    /// `applied: true`, and no caller may assume a fresh database applies nothing. What
+    /// `Session::migrate` SEES is not what the `unblock migrate` COMMAND reports (D46 clause (10)):
+    /// on a workspace the facade already migrated the engine still returns `from == to`,
+    /// `applied: false`, while the command renders the PRE-OPEN delta the facade recorded on
+    /// `WorkspaceContext::schema_version_before_migrate`.
+    ///
+    /// **(vii) THE OBLIGATION THIS CONTRACT DISCHARGES is NFR-19 (PRD §6):** a released binary MUST
+    /// open a database written by any earlier released binary, by migrating it forward. Before D46
+    /// nothing in the tree stated that, which is the root cause of the defect CLASS rather than of
+    /// this instance — a numbered requirement is what a test suite and a gate can cite.
+    ///
+    /// Idempotent: re-running on an up-to-date database applies no DDL (but still witnesses (v)).
     async fn migrate(&self) -> Result<(), StorageError>;
 
     /// Run `PRAGMA integrity_check`, returning the raw problem rows.
@@ -62,9 +155,13 @@ pub trait Storage: Send + Sync {
 
     /// Read the current on-disk schema version (`PRAGMA user_version`) — D27/AF-2 (T3.1, spine §3.2).
     ///
-    /// A fresh, never-migrated database reports `0`; a migrated database at the current baseline
-    /// reports `CURRENT_SCHEMA_VERSION`. This is a **pure read** (no write permit, no migration
-    /// side-effect) so the engine can report `migrate`'s from→to delta without re-opening the
+    /// A fresh, never-migrated database reports `0`; a migrated database reports
+    /// [`CURRENT_SCHEMA_VERSION`](crate::CURRENT_SCHEMA_VERSION). **Since D46 that is NOT the same as
+    /// "the version `SCHEMA_SQL` creates":** the DDL is frozen at the BASELINE and a freshly created
+    /// database reaches CURRENT by running the ladder, so `0 -> CURRENT` is a real migration even on a
+    /// brand-new file (see the [`Storage::migrate`] contract, clause (0)). This is a **pure read** (no
+    /// write permit, no migration side-effect) so the engine can report `migrate`'s from→to delta
+    /// without re-opening the
     /// database. Backend-agnostic `i64`: the on-disk value is a `PRAGMA` integer (i64 domain); the
     /// libsql impl widens its internal `i32` reader via `i64::from(..)` so no backend width leaks into
     /// the contract. Backs the engine `Session::migrate() -> MigrateOutcome` (spine §4.1).

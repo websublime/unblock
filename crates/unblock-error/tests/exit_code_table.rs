@@ -81,7 +81,10 @@ fn golden_exit_code_table() {
 
 #[test]
 fn hint_shape_counts_are_the_honest_map() {
-    // The D25/FORK-4B honest map: exactly 3 StaticText + 1 ContextualText + 1 SimilarIds; the rest None.
+    // The D25/FORK-4B honest map: exactly 3 StaticText + 2 ContextualText + 1 SimilarIds; the rest
+    // None. D46 (v1.0.1) moved `SchemaMismatch` off `None` onto `ContextualText` (1 -> 2), which is a
+    // PUBLISHED byte in the mcp `capabilities()` error map — hence the `unblock.mcp.v1.9` bump and the
+    // `CONTRACT_HASH` re-pin that ride the same commit as this count.
     let mut static_text = 0;
     let mut contextual = 0;
     let mut similar = 0;
@@ -94,7 +97,10 @@ fn hint_shape_counts_are_the_honest_map() {
         }
     }
     assert_eq!(static_text, 3, "exactly 3 StaticText codes");
-    assert_eq!(contextual, 1, "exactly 1 ContextualText code");
+    assert_eq!(
+        contextual, 2,
+        "exactly 2 ContextualText codes (ValidationFailed + D46's SchemaMismatch)"
+    );
     assert_eq!(similar, 1, "exactly 1 SimilarIds code");
 }
 

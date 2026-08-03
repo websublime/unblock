@@ -355,8 +355,19 @@ impl ErrorCode {
     /// - [`Self::StaticText`] — [`Self::InvalidStatus`] / [`Self::InvalidType`] /
     ///   [`Self::InvalidPriority`] (the `ModelError::hint` fixed constants; see [`Self::static_hint`]).
     /// - [`Self::ContextualText`] — [`Self::ValidationFailed`] (the mcp over-quota + bulk-markdown-parse
-    ///   site-composed hints; the `ModelError::ValidationFailed` aggregate itself carries none).
-    /// - [`Self::None`] — every other code (the remaining 31 of 36).
+    ///   site-composed hints; the `ModelError::ValidationFailed` aggregate itself carries none) and,
+    ///   since D46 (v1.0.1), [`Self::SchemaMismatch`] (the STALE-SCHEMA self-correction hint).
+    /// - [`Self::None`] — every other code (the remaining 30 of 36).
+    ///
+    /// **D46 — why `SchemaMismatch` is `ContextualText` and not `StaticText`**, which is a FACT about
+    /// this code rather than a preference: ONE code serves TWO OPPOSITE directions. A database BELOW
+    /// this build (or a stamp that lies about its shape) must be told to run `unblock migrate`; one
+    /// ABOVE it must be told to upgrade the binary. A fixed per-code text would be wrong for one of
+    /// them, so the hint is composed per failure — by `impl CodedError for StorageError`'s `hint()`
+    /// in `unblock-storage`, forwarded through `ConfigError`'s `DbOpenFailed`/`MigrationFailed` arms
+    /// on the implicit-on-open path. **Nothing is composed in this crate**, so `SchemaMismatch`
+    /// carries NO [`Self::static_hint`] entry and the
+    /// `hint_shape() == StaticText ⟺ static_hint().is_some()` invariant is untouched.
     ///
     /// # Examples
     ///
@@ -373,7 +384,9 @@ impl ErrorCode {
             Self::InvalidStatus | Self::InvalidType | Self::InvalidPriority => {
                 HintShape::StaticText
             }
-            Self::ValidationFailed => HintShape::ContextualText,
+            // D46 (v1.0.1): `SchemaMismatch` joins `ValidationFailed` — the stale-schema failure
+            // carries a self-correction hint composed at the storage failure site.
+            Self::ValidationFailed | Self::SchemaMismatch => HintShape::ContextualText,
             _ => HintShape::None,
         }
     }

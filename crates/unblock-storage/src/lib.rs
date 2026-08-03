@@ -64,6 +64,24 @@ pub use filters::{DeleteMode, DeletePlan, IssuePatch};
 pub use libsql::{LibsqlStorage, WriteLockGuard};
 pub use trait_def::Storage;
 
+/// The on-disk schema version THIS BUILD expects (`PRAGMA user_version`) — D46, v1.0.1.
+///
+/// Widened to the backend-agnostic `i64` that [`Storage::schema_version`] returns, so a caller can
+/// compare the two without knowing the libsql impl's internal `i32` width (spine §3.2, the same
+/// "no backend width leaks" rule the read itself carries).
+///
+/// **Why this is public.** `Session::doctor()` (L5) must report TWO advisory findings — the stamp
+/// OBSERVED on disk and the version this build EXPECTS (spine §4.1, PRD §4 D46 clause (4)) — and the
+/// second value exists only here. It is the same mechanical, compile-level consequence the D46
+/// decision row carves out for `WorkspaceContext`'s additive public field: an implementer may not be
+/// forced to choose between obeying a charter and having a workspace that compiles. It is NOT a
+/// widening "to satisfy a test": the cli `doctor` cell deliberately asserts against the `migrate`
+/// report's own `schema_to` rather than against this constant (crate plan `unblock-cli.md`).
+///
+/// **Since D46 this is NOT the version [`LibsqlStorage`]'s embedded DDL creates** — that DDL is
+/// frozen at the baseline and a fresh database reaches this version by running the migration ladder.
+pub const CURRENT_SCHEMA_VERSION: i64 = libsql::CURRENT_SCHEMA_VERSION as i64;
+
 /// The default `.unblock/.write.lock` acquire timeout, in milliseconds (D31).
 ///
 /// The `unblock-config` `write_lock_timeout_ms` key defaults to this value and threads it DOWN into

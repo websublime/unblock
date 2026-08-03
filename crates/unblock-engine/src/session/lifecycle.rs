@@ -66,6 +66,10 @@ impl Session {
             paths,
             // The D39 discovery-tier tag is surfaced by the CLI at startup, not consumed by the engine.
             source: _,
+            // D46 clause (10): the facade's PRE-migration stamp is read only by the cli `migrate`
+            // command (which copies it out before this call consumes the context), never by the
+            // engine — the same additive shape `source` takes, so no layering edge moves.
+            schema_version_before_migrate: _,
         } = ctx;
 
         let session = Self {
@@ -117,8 +121,8 @@ impl Session {
         Ok(())
     }
 
-    /// Ensure the schema is at the current baseline, idempotently, and report the from→to delta
-    /// (D27/AF-2, T3.1 — spine §4.1).
+    /// Ensure the schema is at the version this build expects, idempotently, and report the from→to
+    /// delta (D27/AF-2, T3.1 — spine §4.1).
     ///
     /// Runs **under the single write permit** (D14 — migration is a write-path op): it reads
     /// `from = storage.schema_version()` under the held permit (a consistent snapshot no interleaved
@@ -127,6 +131,19 @@ impl Session {
     /// version NEWER than this build surfaces the transparent [`StorageError::SchemaMismatch`] (→ exit
     /// 2) — never a fake success. Because the config open facade migrates on open (FR-9 single open
     /// path), `applied` is normally `false` post-open. Backs the cli `migrate` command.
+    ///
+    /// **D46 (v1.0.1) — this BODY is unchanged and `from` keeps its published meaning (the stamp THIS
+    /// call observed), but two of its outcomes move without a code change here.** `applied` becomes
+    /// `true` on its own wherever THIS call precedes the ladder — a store the config open facade did
+    /// not already migrate — and, because the frozen-baseline discipline makes even a FRESH database
+    /// reach the current shape THROUGH the ladder, a never-migrated store reports `from: 0`,
+    /// `to: CURRENT_SCHEMA_VERSION`, `applied: true`. So `applied: false` is a property of an
+    /// ALREADY-OPENED workspace, never of a fresh one. **What this method does NOT become
+    /// (D46 clause (10)):** on a facade-opened workspace `from == to` and `applied: false` still hold.
+    /// The cli `migrate` command's honest `1` → `2` `applied: true` is sourced from
+    /// `WorkspaceContext::schema_version_before_migrate`, NOT from `MigrateOutcome`; widening `from`
+    /// to mean the pre-open stamp was REJECTED, since it would make this type report a version its
+    /// own call never observed and would falsify the post-open idempotence cell.
     ///
     /// # Errors
     /// - [`EngineError::ShutdownInProgress`] if a shutdown is in progress (the permit is refused up
@@ -158,6 +175,19 @@ impl Session {
     /// onto a [`DiagnosticReport`] **reusing the existing `DiagnosticKind::Info`** (F2 — NO new model
     /// variant, no spine §1.10 / `CONTRACT_HASH` change). The cli `doctor` command routes
     /// through this wired `doctor()` from T3.3 (F4). The full 4-state taxonomy + `--repair` are **v1.1**.
+    ///
+    /// **D46 (v1.0.1) — TWO ADVISORY SCHEMA-VERSION findings are folded in here TOO, and nowhere
+    /// else.** `doctor()` additionally awaits the EXISTING pure read
+    /// [`Storage::schema_version`](unblock_storage::Storage::schema_version) and inserts the stamp
+    /// OBSERVED ON DISK (`schema_version`) then the version THIS BUILD EXPECTS (`schema_expected`), in
+    /// that fixed order — **AFTER the file-state anomalies and BEFORE the D45 dangling block, which
+    /// REMAINS the report's trailing suffix.** That placement is NORMATIVE (spine §4.1), because the
+    /// shipped suffix assertion in `crates/unblock-engine/tests/dangling.rs` is a live D45 mutation
+    /// proof: appending after the block would redden a required CI step, and relaxing the suffix to a
+    /// subsequence would retire that proof to buy nothing. The findings are ADVISORY — they report two
+    /// integers and COMPARE nothing — so `doctor_exit` and the FR-16 exit rule are byte-identical, and
+    /// a general schema-conformance check is explicitly out of scope (PRD §4, D46). `unblock-health`
+    /// is again NOT touched (D29 clause F3 preserved).
     ///
     /// **D45 — the DANGLING-dependency findings are FOLDED IN HERE, in the ENGINE.** `doctor()`
     /// additionally awaits the SAME fn the `diagnostics {kind:"dangling"}` action uses
@@ -202,6 +232,26 @@ impl Session {
             let integrity_rows = self.integrity_check().await?;
             let report = unblock_health::run_doctor(&integrity_rows, &self.health_paths())?;
             let mut diagnostic = doctor_report_to_diagnostic(&report);
+            // D46: the TWO ADVISORY schema-version rows — the stamp OBSERVED ON DISK and the version
+            // THIS BUILD EXPECTS — over the EXISTING pure `Storage::schema_version()` read (no new
+            // trait method, no write permit, no migration side-effect). Their PLACEMENT IS NORMATIVE
+            // (spine §4.1, ruled at the 2026-08-03 design gate): AFTER the file-state anomalies and
+            // BEFORE the D45 dangling block, which REMAINS the report's trailing suffix — the shipped
+            // cell `crates/unblock-engine/tests/dangling.rs` asserts that suffix and its docstring
+            // names the mutant it kills, so appending AFTER the block would redden a required CI step
+            // and relaxing the suffix to a subsequence would retire a live D45 proof for nothing.
+            // They COMPARE nothing (two integers), so the exit rule is byte-identical: `doctor` still
+            // exits non-zero only on detected corruption (FR-16). What they buy is that `doctor` can
+            // no longer print `healthy` without also printing the number that would contradict it.
+            let observed = self.storage.schema_version().await?;
+            diagnostic.findings.push(unblock_model::DiagnosticFinding {
+                label: "schema_version".to_string(),
+                detail: observed.to_string(),
+            });
+            diagnostic.findings.push(unblock_model::DiagnosticFinding {
+                label: "schema_expected".to_string(),
+                detail: unblock_storage::CURRENT_SCHEMA_VERSION.to_string(),
+            });
             // D45: the dangling-dependency fold. The SAME engine-side fn the `dangling` diagnostics
             // action calls — one home — appended AFTER the file-state anomalies, in the pinned order
             // the read's own `ORDER BY` produces. No write permit: every half is a read (FR-10).

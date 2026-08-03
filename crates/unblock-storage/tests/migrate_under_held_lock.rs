@@ -86,7 +86,7 @@ async fn migrate_under_a_held_write_lock_fails_fast() {
         .expect("migrate succeeds once the .write.lock is released");
     assert_eq!(
         migrator.schema_version().await.expect("schema_version"),
-        1,
+        2,
         "migrate advanced the fresh DB to the current schema version"
     );
 }

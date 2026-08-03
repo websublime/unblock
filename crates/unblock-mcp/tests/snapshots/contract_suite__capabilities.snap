@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: capabilities()
 ---
 {
-  "contract_version": "unblock.mcp.v1.8",
+  "contract_version": "unblock.mcp.v1.9",
   "tools": [
     {
       "name": "issue",
@@ -91,7 +91,7 @@ expression: capabilities()
       "code": "SCHEMA_MISMATCH",
       "exit_code": 2,
       "retryable": false,
-      "hint_shape": "none"
+      "hint_shape": "contextual_text"
     },
     {
       "code": "DATABASE_ERROR",

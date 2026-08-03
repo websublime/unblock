@@ -399,6 +399,7 @@ async fn session_with_prefix(storage: Arc<dyn Storage>, prefix: &str) -> Session
         config,
         paths,
         source: WorkspaceSource::WalkUp,
+        schema_version_before_migrate: 0,
     };
     Session::open(ctx, SessionConfig::default())
         .await

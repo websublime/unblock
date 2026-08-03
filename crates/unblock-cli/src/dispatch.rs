@@ -78,6 +78,7 @@ mod tests {
                 jsonl_path: tmp.path().join("issues.jsonl"),
             },
             source: WorkspaceSource::WalkUp,
+            schema_version_before_migrate: 0,
         }
     }
 

@@ -78,17 +78,18 @@ SELF='scripts/checks/ub-lp9.25-dangling-blocker-claims.sh'
 
 # The ONE knob in this file: the LIVE contract version. Change it here and nowhere else.
 #
-# D45 bumps `unblock.mcp.v1.7` -> `unblock.mcp.v1.8` (the `diagnostics` tool INPUT gains a `oneOf` arm,
-# its OUTPUT's `DiagnosticKind` gains a member, and the tool DESCRIPTION — contract bytes — is
-# rewritten), with a `CONTRACT_HASH` re-pin. Like its D44 sibling's knob this tracks the LIVE id, never
+# D46 bumps `unblock.mcp.v1.8` -> `unblock.mcp.v1.9` (`ErrorCode::SchemaMismatch` moves off
+# `HintShape::None` onto `ContextualText` — the stale-schema self-correction hint, a published byte in
+# the `capabilities()` error map), with a `CONTRACT_HASH` re-pin; D45 bumped `unblock.mcp.v1.7` ->
+# `unblock.mcp.v1.8` before it. Like its D44 sibling's knob this tracks the LIVE id, never
 # a frozen historical one: the `EXCLUSIVE` rows below fail on a STALE literal, not merely a missing one.
 #
 # THE `\\?` IS LOAD-BEARING, not decoration. RC6 pins the D44 sibling gate's own knob LINE, and that line
-# spells the id as a REGEX literal (`CONTRACT_RE='unblock\.mcp\.v1\.8'`) — i.e. with real backslash bytes
+# spells the id as a REGEX literal (`CONTRACT_RE='unblock\.mcp\.v1\.9'`) — i.e. with real backslash bytes
 # between the segments. A pattern demanding a literal `.` there would never match it, and RC6 — the one
 # row that exists to stop the sibling job going red in this very commit — would fail permanently for a
 # reason having nothing to do with the id being current. `\\?` accepts BOTH spellings, prose and regex.
-CONTRACT_RE='unblock\\?\.mcp\\?\.v1\\?\.8'
+CONTRACT_RE='unblock\\?\.mcp\\?\.v1\\?\.9'
 
 # The FAMILY the knob belongs to — ANY published contract id, current or retired. This is not a second
 # copy of the knob: it is what makes an `EXCLUSIVE` row (below) able to say "no OTHER version literal

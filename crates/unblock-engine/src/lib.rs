@@ -63,6 +63,8 @@
 //!         config,
 //!         paths,
 //!         source: WorkspaceSource::WalkUp,
+//!         // D46: this context is hand-built, not facade-opened.
+//!         schema_version_before_migrate: 0,
 //!     };
 //!
 //!     let session = Session::open(ctx, SessionConfig::default()).await.expect("open session");

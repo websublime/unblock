@@ -9,15 +9,15 @@ expression: report
       "label": "database"
     },
     {
-      "detail": "1",
+      "detail": "0",
       "label": "schema_from"
     },
     {
-      "detail": "1",
+      "detail": "2",
       "label": "schema_to"
     },
     {
-      "detail": "false",
+      "detail": "true",
       "label": "applied"
     }
   ],

@@ -53,12 +53,14 @@ SELF='scripts/checks/d44-create-deps-claims.sh'
 # one. So the moment any decision bumps the contract, those sites move and THIS required job goes red
 # for a reason having nothing to do with D44 unless this one line moves in the SAME commit. It is
 # therefore pinned to the LIVE id, never to a frozen historical one — the same discipline `RANGE_RE`
-# below already uses. D45 (v1.0.1, the dangling dependency-TARGET guard) bumped it
-# `unblock.mcp.v1.7` -> `unblock.mcp.v1.8`, and this edit rode the D45 IMPLEMENTATION commit, which is
-# where the code constant and the re-blessed goldens move (`RANGE_RE` differs: it guards prose, so it
-# rides the SPEC commit that mints the id). Both couplings are enumerated in
+# below already uses. D46 (v1.0.1, the `comments` forward migration) bumped it
+# `unblock.mcp.v1.8` -> `unblock.mcp.v1.9` (`ErrorCode::SchemaMismatch` moves off `HintShape::None`
+# onto `ContextualText` — a published byte in the `capabilities()` error map), and this edit rode the
+# D46 IMPLEMENTATION commit, which is where the code constant and the re-blessed goldens move
+# (`RANGE_RE` differs: it guards prose, so it rides the SPEC commit that mints the id). D45 bumped it
+# `unblock.mcp.v1.7` -> `unblock.mcp.v1.8` the same way. Both couplings are enumerated in
 # `docs/plans/ci-cd-and-distribution.md` §2.1 so neither is rediscovered as a mystery failure.
-CONTRACT_RE='unblock\.mcp\.v1\.8'
+CONTRACT_RE='unblock\.mcp\.v1\.9'
 
 # The LIVE D-id range, pinned at its 3 bump sites (R16/R18 file-level, RW1 ROW-ANCHORED). It tracks the
 # CURRENT range and never a frozen historical one, so minting a new D-id moves THIS ONE LINE instead of

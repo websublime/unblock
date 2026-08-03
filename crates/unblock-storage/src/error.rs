@@ -215,6 +215,61 @@ impl CodedError for StorageError {
         }
     }
 
+    /// **D46 (v1.0.1) — THE HINT COMPOSITION SITE for the stale-schema failure (spine §3.2 clause
+    /// (v), §2.2).** "Actionable" is delivered literally: the failure says WHAT HAPPENED and WHAT TO
+    /// RUN, rendered from the FIELDS of the failing variant (which `src/libsql/migrations.rs`
+    /// populates — the fields already exist and already feed `context()`, so this adds a rendering,
+    /// not a data path).
+    ///
+    /// **ONE code serves TWO OPPOSITE directions, which is why the published shape is
+    /// `HintShape::ContextualText` and not a per-code constant:** a database BELOW this build (or a
+    /// stamp that lies about its shape) must be told to run `unblock migrate`; one ABOVE it must be
+    /// told the opposite — upgrade the binary, do NOT migrate. A fixed per-code text would be wrong
+    /// for one of them.
+    ///
+    /// **It may NOT advise a recovery the product cannot perform in that state:** "export and
+    /// re-import" is invalid while the shape is stale, because `sync export` is itself among the
+    /// tools a stale `comments` table breaks.
+    ///
+    /// Every other variant keeps the trait default (`None`), so no other code's published
+    /// `hint_shape` moves. **It only reaches a user because `unblock-config` FORWARDS it** on
+    /// `DbOpenFailed`/`MigrationFailed` — the D46 step runs implicitly on open, and that boundary
+    /// would otherwise drop it.
+    fn hint(&self) -> Option<String> {
+        match self {
+            Self::Migration { from, to, reason } => Some(format!(
+                "the workspace database is at schema version {from}, but this build expects {to} \
+                 ({reason}). Run `unblock migrate` in this workspace to bring it forward; the \
+                 repair is additive and keeps every existing row."
+            )),
+            Self::SchemaMismatch { found, expected } => Some(format!(
+                "the workspace database is at schema version {found}, which is NEWER than the {expected} \
+                 this build understands — it was written by a newer `unblock`. Upgrade this binary \
+                 (`unblock update`) and retry; do NOT downgrade the database."
+            )),
+            // Enumerated rather than a catch-all `_`: a future variant must DECLARE whether it
+            // carries a hint, exactly as it must declare its `code()`. A catch-all would silently
+            // publish `None` for a variant whose failure genuinely needs guidance.
+            Self::IssueNotFound { .. }
+            | Self::CommentNotFound { .. }
+            | Self::BlockerNotFound { .. }
+            | Self::AmbiguousId { .. }
+            | Self::IdCollision { .. }
+            | Self::InvalidId { .. }
+            | Self::DatabaseLocked
+            | Self::NotInitialized
+            | Self::AlreadyInitialized
+            | Self::AlreadyClaimed { .. }
+            | Self::CycleDetected { .. }
+            | Self::DependencyNotFound
+            | Self::HasDependents { .. }
+            | Self::SelfDependency
+            | Self::DuplicateDependency
+            | Self::Backend { .. }
+            | Self::IntegrityFailed { .. } => None,
+        }
+    }
+
     // `retryable()` is intentionally the default (`code().is_retryable()`): the retryable storage
     // codes are exactly {DatabaseLocked, AlreadyClaimed, AmbiguousId} per unblock-error's pinned
     // set, and the unit tests assert that mapping holds.
@@ -562,6 +617,90 @@ mod tests {
             "issue ub-dependent declares a dependency target that does not exist: ub-ghost",
             "the user-visible string is NEUTRAL about the edge kind (the guard also covers reparent)"
         );
+    }
+
+    /// **D46 — the stale-schema hint is composed HERE, and it is the one that must reach the user.**
+    ///
+    /// `Migration` (the stale / lying-stamp direction) names the repair command AND the missing
+    /// column(s) its `reason` carries; `SchemaMismatch` (the newer-than-build direction) carries the
+    /// OPPOSITE instruction and never names the migrate command; the two texts DIFFER; and the hint
+    /// survives the bridge into `StructuredError`.
+    ///
+    /// MUTANTS KILLED: deleting the `Migration` arm (the hint is `None` — a published
+    /// `ContextualText` shape with nothing behind it, this decision's own failure mode); collapsing
+    /// the two directions onto one constant text (the `assert_ne` fires, and the `SchemaMismatch`
+    /// text would then tell an out-of-date reader to run `unblock migrate`, which cannot help);
+    /// dropping `reason` from the rendering (the missing-column assertion fires); advising
+    /// "export and re-import", which a stale `comments` table itself breaks.
+    #[test]
+    fn schema_hints_are_composed_and_carry_opposite_remedies() {
+        let stale = StorageError::Migration {
+            from: 2,
+            to: 2,
+            reason: "the `comments` table is missing the column(s) updated_at, redacted_at that \
+                     schema version 2 adds"
+                .to_string(),
+        };
+        let stale_hint = stale
+            .hint()
+            .expect("the stale-schema failure carries a hint");
+        assert!(
+            stale_hint.contains("unblock migrate"),
+            "the stale direction must name the ONE command that repairs it: {stale_hint}"
+        );
+        assert!(
+            stale_hint.contains("updated_at") && stale_hint.contains("redacted_at"),
+            "the hint must name the columns actually missing: {stale_hint}"
+        );
+
+        let newer = StorageError::SchemaMismatch {
+            found: 3,
+            expected: 2,
+        };
+        let newer_hint = newer
+            .hint()
+            .expect("the newer-than-build failure carries a hint");
+        assert!(
+            !newer_hint.contains("unblock migrate"),
+            "migrating cannot help a database written by a NEWER build: {newer_hint}"
+        );
+        assert!(
+            newer_hint.contains("unblock update"),
+            "the opposite direction's remedy is to upgrade the binary: {newer_hint}"
+        );
+        assert_ne!(
+            stale_hint, newer_hint,
+            "one code, two opposite remedies — which is why the published shape is ContextualText"
+        );
+
+        for hint in [&stale_hint, &newer_hint] {
+            let lowered = hint.to_lowercase();
+            assert!(
+                !lowered.contains("re-import") && !lowered.contains("reimport"),
+                "the hint may not advise a recovery the product cannot perform in this state \
+                 (`sync export` is itself broken by a stale `comments` table): {hint}"
+            );
+        }
+
+        // The hint survives the bridge the L7 boundary actually builds.
+        let structured: StructuredError = (&stale).into();
+        assert_eq!(structured.code, ErrorCode::SchemaMismatch);
+        assert_eq!(structured.hint.as_deref(), Some(stale_hint.as_str()));
+
+        // Every other variant keeps the trait default — no other code's published shape moves.
+        for quiet in [
+            StorageError::IssueNotFound { id: "ub-1".into() },
+            StorageError::DatabaseLocked,
+            StorageError::NotInitialized,
+            StorageError::Backend {
+                source: BackendOpaque::from_message("boom"),
+            },
+            StorageError::IntegrityFailed {
+                messages: vec!["corrupt page".into()],
+            },
+        ] {
+            assert_eq!(quiet.hint(), None, "{quiet:?} must carry no hint");
+        }
     }
 
     /// `CycleDetected{path}` surfaces as `context["cycle_path"]`.
