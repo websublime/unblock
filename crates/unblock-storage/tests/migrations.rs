@@ -581,9 +581,60 @@ async fn a_lying_stamp_is_refused_naming_the_missing_column() {
     }
 
     // And it carries the self-correction hint (D46 clause (7)) — composed from these same fields.
+    //
+    // MUTANT KILLED (the one this cell exists for since the 2026-08-03 ruling): restoring the single
+    // shipped `Migration` text ("at schema version {from}, but this build expects {to} … Run
+    // `unblock migrate`"). On THIS database that text advises a command that cannot repair the
+    // state — `run_migrations` skips the ladder at this stamp, so the advised command returns this
+    // identical error forever — and it renders a delta between two numbers that are the same. Both
+    // assertions below go red on it: that text carries no `PRAGMA user_version` reset and does not
+    // name the stamp as the false thing.
     let hint = err.hint().expect("the failure carries a hint");
     assert!(
-        hint.contains("unblock migrate"),
-        "the hint names the ONE command that repairs it: {hint}"
+        hint.contains("PRAGMA user_version = 1"),
+        "the recovery that actually works starts by resetting the LYING stamp to the baseline, \
+         spelled out executably: {hint}"
     );
+    assert!(
+        hint.contains("STAMP is what is wrong"),
+        "the state is named truthfully — the ladder did not fail, the stamp lies: {hint}"
+    );
+    assert!(
+        hint.contains("unblock migrate"),
+        "…and the reset is followed by the migrate that then has work to do: {hint}"
+    );
+    assert!(
+        !hint.contains("but this build expects"),
+        "the retired text claimed a version delta between two IDENTICAL numbers: {hint}"
+    );
+
+    // The advice is EXECUTABLE, not aspirational: follow it literally and the database recovers.
+    // (This is what makes the hint the remedy rather than a description — there is no in-product
+    // rescue verb for this state, since `sync export` is broken by the same stale shape.)
+    {
+        let (_db, conn) = raw(&db).await;
+        conn.query("PRAGMA user_version = 1", ())
+            .await
+            .expect("reset the lying stamp to the baseline, exactly as the hint says");
+    }
+    let storage = LibsqlStorage::open_local(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+        .await
+        .expect("open_local");
+    storage
+        .migrate()
+        .await
+        .expect("the hint's recovery repairs the database it fired on");
+    assert_eq!(
+        storage.schema_version().await.expect("schema_version"),
+        2,
+        "the recovered database ends at the current version"
+    );
+    let (_db, conn) = raw(&db).await;
+    let present = columns(&conn, "comments").await;
+    for column in STEP_TWO_COLUMNS {
+        assert!(
+            present.iter().any(|have| have == column),
+            "the recovery ADDS the missing column {column}; columns: {present:?}"
+        );
+    }
 }

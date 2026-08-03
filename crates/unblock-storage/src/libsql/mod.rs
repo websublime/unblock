@@ -44,6 +44,11 @@ pub use lock::WriteLockGuard;
 // constant itself stays crate-internal — no backend width leaks into the public surface.
 pub(crate) use schema::CURRENT_SCHEMA_VERSION;
 
+// D46: the version `SCHEMA_SQL` itself creates. Crate-internal (never re-exported at the crate
+// root): `src/error.rs` needs it to name the ONE stamp value the lying-stamp recovery resets to,
+// and a hint that hard-coded that number would be a second, un-pinned copy of it.
+pub(crate) use schema::BASELINE_SCHEMA_VERSION;
+
 // The `StorageTestkit` impl for `LibsqlStorage` lives **in-module** (gated) so it can reach the
 // `pub(super)` connection accessors (`read`/`write`) and `ids::next_child_number` without widening
 // any visibility at the crate root (resolved-decision #1). It is compiled for the crate's own tests
