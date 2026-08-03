@@ -130,6 +130,13 @@ coordinator**, run adversarially.
   the work — for substantive work, the wiki run-report (`.knowledge/wiki/runs/`, §8) lands in that same
   commit/PR too. **D5 model B** — manual export/import, no 3-way merge or locks; until the shared-state release
   (00-roadmap.md §4), concurrent sessions reconcile `.unblock/issues.jsonl` by hand.
+- **WHO owns the re-export and the run-report — the TRACK step, not the implementer.** The same-commit rule above
+  (and §8's) fixes WHERE they land, not WHO writes them, while §2/§4 place Track AFTER both gates — read apart, each
+  side can reasonably believe the other owns them (that ambiguity cost two Verify rounds on D46). Resolution: the
+  **Implement** team ships the work only; the **Track** team writes the `.knowledge/wiki/runs/` report and re-exports
+  `.unblock/issues.jsonl` on the same branch, on top of the gated work commits, so they still land in the same PR.
+  The **Verify** gate REPORTS both as known-pending and never fails a change for their absence. The required
+  `run-report-gate` CI job (ci-cd §2.3) remains the safety net that makes "pending" impossible to forget.
 - **Every outcome is a comment on the task's issue.** Each phase/analysis result for a task — the Understand map, the
   Decide rationale + Miguel's fork resolutions, each gate verdict (design Review / Verify) with its must-fixes, the
   Implement summary, the findings, and the Track/merge result — is recorded as a **comment** on the task's unblock
@@ -181,7 +188,8 @@ coordinator**, run adversarially.
 - **Same-commit rule (extends §6):** substantive work + the `.unblock/issues.jsonl` re-export + the wiki
   run-report land in the SAME commit/PR. *Substantive* here is the gate's structural diff predicate
   (`ci-cd-and-distribution.md` §2.3) — a distinct, stricter sense than §4's team-sizing use: every code
-  change is gate-substantive, including a §4-legitimate solo one-liner.
+  change is gate-substantive, including a §4-legitimate solo one-liner. This rule fixes WHERE they land;
+  **WHO writes them is §6's ownership bullet — the Track step, after both gates, on the same branch.**
 - **Enforcement is hard — failures block, never warn; no manual bypass, no discretionary label:** three
   layers — `cargo xtask knowledge-lint` (checks k1–k6), the required `run-report-gate` CI job (the
   structural substantive-PR predicate; the pr-create hook runs the same script), and PreToolUse hooks
