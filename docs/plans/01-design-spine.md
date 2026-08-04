@@ -1358,8 +1358,14 @@ between an earlier prose description and the source are resolved **in favour of 
   `SET`, no `updated_at`, no `Event`**. In unblock that skip is a **THREE-term** guard — no stored column
   staged **and** no label change **and** no reparent (`builder.is_empty() && !label_changed &&
   !parent_changed`, `crates/unblock-storage/src/libsql/crud.rs:966`); the original's row-column-only
-  `if set_clauses.is_empty() { return Ok }` is its first term alone, and taken as a description of OUR
-  mechanism it would skip a relation-only patch — which is precisely the ub-lp9.27 defect, not the rule.
+  `if set_clauses.is_empty() { return Ok }` is its first term alone, and it is NOT a description of OUR
+  mechanism — read as one it would skip EVERY relation-only patch, including one that really moves the
+  relation. That is strictly WIDER than the ub-lp9.27 defect, which skipped only those relation-only
+  patches whose diff had been MIS-COMPUTED into an equal one (against an empty label base a
+  `labels_remove` came out net-zero). A pre-fix label-only patch that really DID move the set was not
+  skipped at all: its label rows and `LabelAdded`/`LabelRemoved` events landed — what it lost was the
+  `updated_at` stamp, because the label term sat in the skip guard but NOT in the stamping condition
+  beside it. Which is why both are written out here, in their own terms.
   `updated_at` advances
   and `content_hash` is recomputed when at least one stored column changes **or when a real RELATION
   change occurs**. **The relation exceptions are NORMATIVE and there are exactly TWO:** (1) a real
