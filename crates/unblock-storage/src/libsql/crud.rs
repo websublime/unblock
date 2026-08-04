@@ -726,12 +726,15 @@ impl UpdateBuilder {
 
 /// Apply an [`IssuePatch`](crate::filters::IssuePatch) (spine §3.2.1).
 ///
-/// Builds a `SET` clause field-by-field; if **nothing** changes, the whole `UPDATE` is skipped —
-/// no `SET`, no `updated_at` advance, no `content_hash` recompute, no `Event` (the empty-diff full
-/// skip). When at least one stored column changes, `updated_at` advances and `content_hash` is
-/// recomputed; per-field events are written **only** for the fields whose value actually changed
-/// (see the §3.2.1 EventType-per-mutation table). A reparent (`parent`) is cycle-checked. Returns the
-/// hydrated, updated issue.
+/// Builds a `SET` clause field-by-field; if **nothing** changes — no stored column AND no relation —
+/// the whole `UPDATE` is skipped: no `SET`, no `updated_at` advance, no `content_hash` recompute, no
+/// `Event` (the empty-diff full skip). `updated_at` advances when at least one stored column changes
+/// **or** a real RELATION change occurs — a reparent (FR-1b) or a real label add/remove/set (spine
+/// §3.2.1 `update_issue` names both exceptions); `content_hash` is recomputed in the same branch, and
+/// on a pure-relation change that recompute is a no-op because §1.8 excludes relations. Per-field
+/// events are written **only** for the fields whose value actually changed (see the §3.2.1
+/// EventType-per-mutation table). A reparent (`parent`) is cycle-checked. Returns the hydrated,
+/// updated issue.
 ///
 /// `close_reason` is a `DEFAULT ''` body column persisted like the other body-text fields (no own
 /// event — §3.2.1 table). It is patched **independently** of `status`: the `StatusChanged`/`Closed`
@@ -768,6 +771,35 @@ pub(super) async fn update_issue(
         if issue.is_tombstone() {
             return Err(StorageError::IssueNotFound { id: id_owned });
         }
+
+        // Seed the LABEL relation in-tx so `apply_labels` diffs against the labels the issue REALLY
+        // carries. `issue_from_row` projects the `issues` row ALONE, so without this the diff base is
+        // permanently EMPTY: a `labels_remove` removes from nothing (the diff compares equal and the
+        // whole patch is skipped — a SILENT no-op returned as success), and a `labels_add`/`labels_set`
+        // naming an already-present label is seen as new and re-INSERTs it into the UNIQUE-constrained
+        // `labels` table. The post-transaction hydrated re-read is what HID the skip: it returns a
+        // correct-looking label set either way.
+        //
+        // LABELS ONLY, deliberately: `apply_labels` is the sole consumer of a relation inside this
+        // transaction — dependencies/comments are never diffed here, and the re-read hydrates them.
+        // Placed AFTER the tombstone guard so the reject path pays for no extra query. Same shape and
+        // order as the read-path `hydrate`, read inside the tx exactly like the row load above
+        // (TOCTOU-safe).
+        let mut label_rows = tx
+            .query(
+                "SELECT label FROM labels WHERE issue_id = ?1 ORDER BY label ASC",
+                libsql::params![id_owned.as_str()],
+            )
+            .await
+            .map_err(map_libsql_err)?;
+        let mut current_labels = Vec::new();
+        while let Some(row) = label_rows.next().await.map_err(map_libsql_err)? {
+            if let Value::Text(label) = row.get_value(0).map_err(map_libsql_err)? {
+                current_labels.push(label);
+            }
+        }
+        drop(label_rows);
+        issue.labels = current_labels;
 
         let mut builder = UpdateBuilder::new();
         // (event_type, old, new) tuples, appended after the row update succeeds.
@@ -926,11 +958,13 @@ pub(super) async fn update_issue(
             return Ok((issue, tx));
         }
 
-        // A row column changed OR a real reparent occurred -> advance updated_at. A reparent with no
-        // other row change still stamps `updated_at` so the modification is observable (FR-1b).
-        // `content_hash` excludes `updated_at` + relations (spine §1.8), so the recompute on a
-        // pure-reparent change is a no-op against the stored hash (parent/deps are not hashed).
-        if !builder.is_empty() || parent_changed {
+        // A row column changed, OR a real reparent occurred, OR a real label change occurred ->
+        // advance updated_at. A RELATION-only change with no other row change still stamps
+        // `updated_at` so the modification is observable: the reparent arm is FR-1b, and the label arm
+        // rides the same rule (spine §3.2.1 `update_issue` names both exceptions). `content_hash`
+        // excludes `updated_at` + relations (spine §1.8), so the recompute on a pure-relation change is
+        // a no-op against the stored hash (parent/deps/labels are not hashed).
+        if !builder.is_empty() || parent_changed || label_changed {
             let now = Utc::now();
             issue.updated_at = now;
             builder.push("updated_at", Value::Text(now.to_rfc3339()));
@@ -990,6 +1024,15 @@ async fn external_ref_taken(
 
 /// Apply the `labels_set`/`labels_add`/`labels_remove` ops, emitting LabelAdded/LabelRemoved events.
 /// Returns whether any label changed (so the empty-diff check accounts for label-only patches).
+///
+/// **Precondition (ub-lp9.27):** `issue.labels` must already hold the issue's CURRENT label set — it
+/// IS the diff base, and the caller seeds it in-tx from the `labels` table right after the tombstone
+/// guard. With a stale/empty base a remove removes from nothing (silent no-op) and an add of a
+/// present label re-INSERTs an existing row.
+///
+/// The reconcile INSERT is deliberately **strict** (never `INSERT OR IGNORE`): with a correct diff
+/// base no duplicate insert can arise, so the `labels` UNIQUE constraint is kept as a loud tripwire
+/// that fires if the diff base ever regresses again.
 async fn apply_labels(
     tx: &libsql::Transaction,
     id: &str,

@@ -150,6 +150,12 @@ where
     contract_get_issues(factory().await).await;
     contract_get_issues_skip_absent_order(factory().await).await;
     contract_update_issue(factory().await).await;
+    // ub-lp9.27 — the label diff base is the issue's ACTUAL label set (see the block comment above
+    // `contract_label_remove_then_read`).
+    contract_label_remove_then_read(factory().await).await;
+    contract_label_add_existing_is_idempotent(factory().await).await;
+    contract_labels_set_overlap_replaces(factory().await).await;
+    contract_label_change_updated_at_semantics(factory().await).await;
     contract_delete_issue(factory().await).await;
     contract_restore_issue(factory().await).await;
 
@@ -302,6 +308,23 @@ async fn event_types<S: Storage>(storage: &S, id: &str) -> Vec<String> {
         .expect("list_events")
         .into_iter()
         .map(|e| e.event_type.as_str().to_string())
+        .collect()
+}
+
+/// Collect the `(event_type, old_value, new_value)` triples for an issue, oldest first.
+///
+/// The type-only [`event_types`] cannot tell WHICH label an event carries — the label cases need the
+/// payload to prove the event announces the actual delta and not merely "something labelly happened".
+async fn event_triples<S: Storage>(
+    storage: &S,
+    id: &str,
+) -> Vec<(String, Option<String>, Option<String>)> {
+    storage
+        .list_events(id)
+        .await
+        .expect("list_events")
+        .into_iter()
+        .map(|e| (e.event_type.as_str().to_string(), e.old_value, e.new_value))
         .collect()
 }
 
@@ -506,6 +529,13 @@ pub async fn contract_get_issues<S: Storage>(storage: S) {
 
 /// `update_issue` applies a patch, advances `updated_at` and recomputes `content_hash` when a row
 /// column changes, and emits the per-field events.
+///
+/// A row-column change is **not** the only trigger for the `updated_at` stamp: a real RELATION change
+/// stamps it too — a reparent (FR-1b) and, since ub-lp9.27, a real label add/remove/set (spine §3.2.1
+/// `update_issue`). The label half lives in the four `contract_label_*` cases below; the empty-diff
+/// **full skip** (no `SET`, no `updated_at`, no `Event`) is unchanged and is pinned by
+/// [`contract_noop_update_writes_no_event`] and by
+/// [`contract_label_change_updated_at_semantics`]' second half.
 pub async fn contract_update_issue<S: Storage>(storage: S) {
     storage
         .create_issue(&issue("ub-1", "old"), "a")
@@ -534,6 +564,285 @@ pub async fn contract_update_issue<S: Storage>(storage: S) {
     // Updating a missing issue → IssueNotFound.
     let missing = storage.update_issue("ub-nope", &patch, "a").await;
     assert!(matches!(missing, Err(StorageError::IssueNotFound { .. })));
+}
+
+// --- ub-lp9.27 — the label diff base is the issue's ACTUAL label set ------------------------------
+//
+// `update_issue` diffs the requested label ops against the labels the issue REALLY carries (the
+// update transaction reads them from the labels relation before diffing). A backend that diffs
+// against an empty base passes none of the four cases below: a remove silently no-ops, an add of an
+// already-present label re-inserts a row that already exists, and a `labels_set` overlapping the
+// current set fails the same way instead of replacing.
+
+/// `labels_remove` on a label the issue ACTUALLY carries removes it — from the returned issue AND
+/// from a fresh read — and announces it with exactly one `LabelRemoved` carrying that label.
+///
+/// The fresh re-read is the load-bearing half: the response alone cannot distinguish a real removal
+/// from a silent skip, because `update_issue` re-hydrates the issue after the transaction, so a
+/// skipped patch still returns a perfectly well-formed (stale) label set with `isError:false`.
+pub async fn contract_label_remove_then_read<S: Storage>(storage: S) {
+    let mut seeded = issue("ub-1", "labelled");
+    seeded.labels = vec!["alpha".to_string(), "beta".to_string()];
+    storage.create_issue(&seeded, "a").await.expect("create");
+
+    let after = storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_remove: vec!["alpha".to_string()],
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .expect("labels_remove of a present label");
+    assert_eq!(
+        after.labels,
+        vec!["beta".to_string()],
+        "labels_remove must drop the label from the returned issue"
+    );
+
+    let reread = storage
+        .get_issue("ub-1")
+        .await
+        .expect("get_issue")
+        .expect("present");
+    assert_eq!(
+        reread.labels,
+        vec!["beta".to_string()],
+        "the removed label must be GONE from a FRESH read, not just from the response"
+    );
+
+    // Exactly one LabelRemoved, carrying the removed label in `old_value` (the create emitted the two
+    // LabelAdded events; a single removal keeps this slice order-independent by construction).
+    let removed: Vec<Option<String>> = event_triples(&storage, "ub-1")
+        .await
+        .into_iter()
+        .filter(|(kind, _, _)| kind == "label_removed")
+        .map(|(_, old, _)| old)
+        .collect();
+    assert_eq!(
+        removed,
+        vec![Some("alpha".to_string())],
+        "exactly one LabelRemoved, naming the label actually removed"
+    );
+}
+
+/// `labels_add` of an **already-present** label is an idempotent no-op: `Ok`, no event, and
+/// `updated_at` does not move.
+///
+/// Against an empty diff base the label is seen as new, so the reconcile re-INSERTs a row that
+/// already exists and the `labels` uniqueness constraint turns a harmless idempotent call into a
+/// backend error surfaced to the caller.
+pub async fn contract_label_add_existing_is_idempotent<S: Storage>(storage: S) {
+    let mut seeded = issue("ub-1", "labelled");
+    seeded.labels = vec!["alpha".to_string()];
+    storage.create_issue(&seeded, "a").await.expect("create");
+
+    let before = storage
+        .get_issue("ub-1")
+        .await
+        .expect("get_issue")
+        .expect("present");
+    let events_before = event_types(&storage, "ub-1").await;
+
+    let after = storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_add: vec!["alpha".to_string()],
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .expect("adding an ALREADY-PRESENT label must be an idempotent Ok, never a backend error");
+
+    assert_eq!(
+        after.labels,
+        vec!["alpha".to_string()],
+        "the label set is unchanged (never duplicated)"
+    );
+    assert_eq!(
+        after.updated_at, before.updated_at,
+        "an idempotent label add changes nothing, so it must NOT stamp updated_at"
+    );
+    assert_eq!(
+        event_types(&storage, "ub-1").await,
+        events_before,
+        "an idempotent label add writes NO LabelAdded event"
+    );
+}
+
+/// `labels_set` over a set that OVERLAPS the current one performs the replacement, and emits events
+/// for the actual deltas only — the label the two sets share is neither re-added nor re-announced.
+///
+/// Second half: a combined label + scalar patch. The label events are appended while the relation is
+/// reconciled, i.e. BEFORE the scalar per-field events — that relative order is part of the audit
+/// trail this case pins.
+pub async fn contract_labels_set_overlap_replaces<S: Storage>(storage: S) {
+    let mut seeded = issue("ub-1", "labelled");
+    seeded.labels = vec!["alpha".to_string(), "beta".to_string()];
+    storage.create_issue(&seeded, "a").await.expect("create");
+    let events_before = event_triples(&storage, "ub-1").await.len();
+
+    let after = storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_set: Some(vec!["beta".to_string(), "gamma".to_string()]),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .expect("labels_set over an OVERLAPPING set");
+    assert_eq!(
+        after.labels,
+        vec!["beta".to_string(), "gamma".to_string()],
+        "labels_set replaces the whole set (sorted), keeping the shared label"
+    );
+    let reread = storage
+        .get_issue("ub-1")
+        .await
+        .expect("get_issue")
+        .expect("present");
+    assert_eq!(
+        reread.labels,
+        vec!["beta".to_string(), "gamma".to_string()],
+        "the replacement is durable, not just reflected in the response"
+    );
+
+    // Exactly ONE delta per side (alpha out, gamma in), so this slice is order-deterministic:
+    // removals are reconciled before additions. `beta` — present before and after — is silent.
+    let new_events: Vec<(String, Option<String>, Option<String>)> = event_triples(&storage, "ub-1")
+        .await
+        .split_off(events_before);
+    assert_eq!(
+        new_events,
+        vec![
+            ("label_removed".to_string(), Some("alpha".to_string()), None),
+            ("label_added".to_string(), None, Some("gamma".to_string())),
+        ],
+        "labels_set announces the DELTAS only — the shared label is not re-announced"
+    );
+
+    // Combined label + scalar patch: the label events precede the scalar `Updated`.
+    let mut combined = issue("ub-2", "before");
+    combined.labels = vec!["keep".to_string()];
+    storage.create_issue(&combined, "a").await.expect("create");
+    let events_before = event_types(&storage, "ub-2").await.len();
+    storage
+        .update_issue(
+            "ub-2",
+            &IssuePatch {
+                title: Some("after".to_string()),
+                labels_add: vec!["added".to_string()],
+                labels_remove: vec!["keep".to_string()],
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .expect("combined label + scalar patch");
+    let new_events: Vec<String> = event_types(&storage, "ub-2").await.split_off(events_before);
+    assert_eq!(
+        new_events,
+        vec![
+            "label_removed".to_string(),
+            "label_added".to_string(),
+            "updated".to_string()
+        ],
+        "label events are appended with the relation reconcile, BEFORE the scalar field events"
+    );
+}
+
+/// `updated_at` semantics for labels: a **real** label-only change advances it (the relation is a
+/// genuine modification of the issue, exactly as a reparent is — spine §3.2.1 `update_issue`); a
+/// label **no-op** patch changes nothing and must leave it untouched.
+///
+/// `content_hash` is unaffected either way — spine §1.8 excludes relations from the hash — so the
+/// stored hash stays byte-identical across a label change while `updated_at` moves.
+pub async fn contract_label_change_updated_at_semantics<S: Storage>(storage: S) {
+    let mut seeded = issue("ub-1", "labelled");
+    seeded.labels = vec!["alpha".to_string()];
+    storage.create_issue(&seeded, "a").await.expect("create");
+    let before = storage
+        .get_issue("ub-1")
+        .await
+        .expect("get_issue")
+        .expect("present");
+    // Event count AFTER the create, so the assertions below speak only about the two patches (the
+    // create's own event order is a different case's business).
+    let events_after_create = event_types(&storage, "ub-1").await.len();
+
+    // (a) A genuine label-only change: no row column in the patch at all, yet updated_at advances.
+    let changed = storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_add: vec!["beta".to_string()],
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .expect("label-only add");
+    assert_eq!(
+        changed.labels,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "the label landed"
+    );
+    assert!(
+        changed.updated_at > before.updated_at,
+        "a REAL label-only change advances updated_at"
+    );
+    assert_eq!(
+        changed.content_hash, before.content_hash,
+        "labels are excluded from content_hash (spine §1.8), so the hash must NOT move"
+    );
+    assert_eq!(
+        changed.content_hash.as_deref(),
+        Some(changed.compute_content_hash().as_str()),
+        "the stored hash still matches the recompute after the label change"
+    );
+    assert_eq!(
+        event_types(&storage, "ub-1")
+            .await
+            .split_off(events_after_create),
+        vec!["label_added".to_string()],
+        "the real label-only change emits exactly one LabelAdded"
+    );
+    let events_after_change = event_types(&storage, "ub-1").await.len();
+
+    // (b) A label NO-OP patch (re-add a present label, remove an absent one) is the empty-diff full
+    // skip: EXACT equality, because a `>=` cannot detect a spurious stamp.
+    let noop = storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_add: vec!["beta".to_string()],
+                labels_remove: vec!["never-present".to_string()],
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .expect("label no-op patch");
+    assert_eq!(
+        noop.updated_at, changed.updated_at,
+        "a label no-op patch must NOT move updated_at (empty diff = full skip)"
+    );
+    assert_eq!(
+        noop.labels,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "a label no-op patch leaves the set alone"
+    );
+    assert_eq!(
+        event_types(&storage, "ub-1").await.len(),
+        events_after_change,
+        "a label no-op patch writes NO event"
+    );
 }
 
 /// `delete_issue` (Tombstone mode) soft-deletes and returns the resolved plan.
