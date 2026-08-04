@@ -534,7 +534,9 @@ pub async fn contract_get_issues<S: Storage>(storage: S) {
 ///
 /// A row-column change is **not** the only trigger for the `updated_at` stamp: a real RELATION change
 /// stamps it too — a reparent (FR-1b) and, since ub-lp9.27, a real label add/remove/set (spine §3.2.1
-/// `update_issue`). The label half lives in the four `contract_label_*` cases below; the empty-diff
+/// `update_issue`). The label half lives in the `contract_label_*` block registered together in
+/// [`run_storage_contract_suite`] — named as a block and never counted, because the block GROWS and
+/// the literal glob also catches the unrelated query case [`contract_label_and_or`]; the empty-diff
 /// **full skip** (no `SET`, no `updated_at`, no `Event`) is unchanged and is pinned by
 /// [`contract_noop_update_writes_no_event`] and by
 /// [`contract_label_change_updated_at_semantics`]' second half.
