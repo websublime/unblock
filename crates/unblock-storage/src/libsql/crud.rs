@@ -774,17 +774,26 @@ pub(super) async fn update_issue(
 
         // Seed the LABEL relation in-tx so `apply_labels` diffs against the labels the issue REALLY
         // carries. `issue_from_row` projects the `issues` row ALONE, so without this the diff base is
-        // permanently EMPTY: a `labels_remove` removes from nothing (the diff compares equal and the
-        // whole patch is skipped — a SILENT no-op returned as success), and a `labels_add`/`labels_set`
-        // naming an already-present label is seen as new and re-INSERTs it into the UNIQUE-constrained
-        // `labels` table. The post-transaction hydrated re-read is what HID the skip: it returns a
-        // correct-looking label set either way.
+        // permanently EMPTY: a `labels_remove` removes from nothing, and a `labels_add`/`labels_set`
+        // naming an already-present label is seen as new and re-INSERTs it against the `labels`
+        // `(issue_id, label)` primary key. The remove is the SILENT one, and how much it swallows
+        // depends on the REST of the patch: in a label-ONLY patch the equal diff takes the empty-diff
+        // full skip, so the whole patch vanishes as a success (no event, no `updated_at`); in a MIXED
+        // patch the row UPDATE still runs and only the label op vanishes. The post-transaction
+        // hydrated re-read is what HID both: it returns a correct-looking label set either way.
         //
-        // LABELS ONLY, deliberately: `apply_labels` is the sole consumer of a relation inside this
-        // transaction — dependencies/comments are never diffed here, and the re-read hydrates them.
-        // Placed AFTER the tombstone guard so the reject path pays for no extra query. Same shape and
-        // order as the read-path `hydrate`, read inside the tx exactly like the row load above
-        // (TOCTOU-safe).
+        // LABELS ONLY, deliberately — and the reason is narrower than "the only relation touched in
+        // this tx": `apply_reparent` diffs the parent-child edge in this same transaction, but it
+        // re-reads its OWN base from the tx (`existing_parent`, called below), so labels are the only
+        // relation whose diff base comes from the in-memory `Issue`. Dependencies/comments are never
+        // diffed here, and the post-tx re-read hydrates them. Placed AFTER the tombstone guard so the
+        // reject path pays for no extra query. Same shape and order as the read-path `hydrate`, read
+        // inside the tx exactly like the row load above (TOCTOU-safe).
+        //
+        // The `issue_id` scope is LOAD-BEARING, not incidental: a base polluted with another issue's
+        // labels re-creates this very defect (an add of a label some OTHER issue carries diffs equal
+        // and is skipped) and additionally invents `LabelRemoved` events for labels this issue never
+        // had. Pinned by `contract_label_diff_base_is_per_issue` (`crate::testkit`).
         let mut label_rows = tx
             .query(
                 "SELECT label FROM labels WHERE issue_id = ?1 ORDER BY label ASC",

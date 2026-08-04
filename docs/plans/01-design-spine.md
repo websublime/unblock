@@ -1355,12 +1355,18 @@ between an earlier prose description and the source are resolved **in favour of 
     ever satisfy, so a foreign key would forbid the very thing §1.9 defines as legal.
 - **`update_issue` (sqlite.rs:2496–2509, 2572–2870) — per-field event granularity; empty diff is a
   full skip.** An empty patch (or one that changes nothing) returns the issue unchanged and writes **no
-  `SET`, no `updated_at`, no `Event`** (`if set_clauses.is_empty() { return Ok }`). `updated_at` advances
+  `SET`, no `updated_at`, no `Event`**. In unblock that skip is a **THREE-term** guard — no stored column
+  staged **and** no label change **and** no reparent (`builder.is_empty() && !label_changed &&
+  !parent_changed`, `crates/unblock-storage/src/libsql/crud.rs:966`); the original's row-column-only
+  `if set_clauses.is_empty() { return Ok }` is its first term alone, and taken as a description of OUR
+  mechanism it would skip a relation-only patch — which is precisely the ub-lp9.27 defect, not the rule.
+  `updated_at` advances
   and `content_hash` is recomputed when at least one stored column changes **or when a real RELATION
   change occurs**. **The relation exceptions are NORMATIVE and there are exactly TWO:** (1) a real
   **reparent** — FR-1b, shipped since commit `42470c5` and stated here as of this amendment (it was
-  previously code-only, which is what made the "only when a stored column changes" absolute above false
-  in practice); and (2) a real **label** add/remove/set (inline amendment 2026-08-04, ub-lp9.27 — a
+  previously code-only, so this clause's own PRE-amendment wording — `updated_at` advances **only** when
+  a stored column changes — was false in practice; that wording is what this amendment replaced, which
+  is why no such "only" survives above); and (2) a real **label** add/remove/set (inline amendment 2026-08-04, ub-lp9.27 — a
   consequence of the SAME `update_issue` decision, so **no new D-id and no D-range bump**). A
   relation-only patch therefore emits an `UPDATE` whose `SET` carries only `updated_at` +
   `content_hash`, so the modification is observable; because §1.8 excludes relations **and** all
@@ -1385,8 +1391,12 @@ between an earlier prose description and the source are resolved **in favour of 
   scalar per-field events are appended, so in a combined label+scalar patch `LabelAdded`/`LabelRemoved`
   precede `Updated`/`StatusChanged`/… in the audit trail. Relative order *among* the label events of one
   patch is **not** guaranteed (the diff is a set), so a conformance assertion over 2+ adds or 2+ removes
-  compares them as a set. **Tombstone-patch guard
-  (crud.rs:332-334, SSOT):** a patch targeting a **tombstone** is rejected with **`IssueNotFound`** before any
+  compares them as a set — and so does one over a single add PLUS a single remove, which is the same
+  statement (a backend that reconciles additions first conforms). The libsql backend's own order —
+  removals reconciled before additions — is a BACKEND fact and is pinned as one, in
+  `crates/unblock-storage/tests/behaviour.rs`, never in the backend-independent contract suite.
+  **Tombstone-patch guard
+  (crud.rs:770-773, SSOT):** a patch targeting a **tombstone** is rejected with **`IssueNotFound`** before any
   `SET` — a tombstone cannot be reopened/edited via `update`, so the only un-tombstone path is `restore`
   (see the `restore_issue` carve-out below). This guard is what makes `restore` STRUCTURALLY separate from the
   reopen=update mapping (§5.2) and is cited by the §3.2.1 `restore_issue` step, the §4.1 `Session::restore` seam

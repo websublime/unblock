@@ -281,7 +281,24 @@ pub trait Storage: Send + Sync {
     ///
     /// Writes **one `Event` per changed field** in the same transaction (so the audit log records
     /// exactly what changed). A **no-op update** (a patch that changes nothing) writes **no
-    /// `Event`** and leaves `updated_at` unchanged. A `parent` change is cycle-checked (rejected
+    /// `Event`** and leaves `updated_at` unchanged.
+    ///
+    /// **A real RELATION change counts as a change here even when no stored column moves** (spine
+    /// §3.2.1 `update_issue` — the exceptions are normative and there are exactly two): a `parent`
+    /// reparent (FR-1b) and a label `labels_add`/`labels_remove`/`labels_set` that actually moves the
+    /// label set each **stamp `updated_at`** on their own. `content_hash` is unaffected either way —
+    /// §1.8 excludes relations from the hash. A relation op that changes nothing (reparenting to the
+    /// current parent, adding an already-present label, removing an absent one) is part of the no-op
+    /// above: no `Event`, no `updated_at`.
+    ///
+    /// The label ops diff against the issue's **actually persisted** label set, read inside the same
+    /// transaction as the patch — never an empty base. So `labels_remove` of a present label really
+    /// removes it, `labels_add` of an already-present label is an **idempotent `Ok`** (never a
+    /// uniqueness error), and `labels_set` overlapping the current set replaces it while announcing
+    /// only the deltas. Within one patch the label events precede the scalar per-field events; their
+    /// order **among themselves is not guaranteed** (the diff is a set).
+    ///
+    /// A `parent` change is cycle-checked (rejected
     /// with [`StorageError::CycleDetected`] carrying the path) and, since D45, existence-checked: a
     /// parent that names no row and is not an `external:` target is rejected with
     /// [`StorageError::BlockerNotFound`] (the chain on this path is self → `BlockerNotFound` → cycle,
