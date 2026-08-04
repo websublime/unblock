@@ -291,12 +291,15 @@ pub trait Storage: Send + Sync {
     /// current parent, adding an already-present label, removing an absent one) is part of the no-op
     /// above: no `Event`, no `updated_at`.
     ///
-    /// The label ops diff against the issue's **actually persisted** label set, read inside the same
-    /// transaction as the patch — never an empty base. So `labels_remove` of a present label really
-    /// removes it, `labels_add` of an already-present label is an **idempotent `Ok`** (never a
-    /// uniqueness error), and `labels_set` overlapping the current set replaces it while announcing
-    /// only the deltas. Within one patch the label events precede the scalar per-field events; their
-    /// order **among themselves is not guaranteed** (the diff is a set).
+    /// The label ops diff against the issue's **actually persisted** label set, read inside the
+    /// same transaction as the patch — never an empty base. So `labels_remove` of a present label
+    /// really removes it, `labels_add` of an already-present label is an **idempotent `Ok`**
+    /// (never a uniqueness error), and `labels_set` REPLACES the whole set — the caller's list
+    /// BECOMES the issue's label set, so a currently-carried label the caller does not list is
+    /// DROPPED, and the EMPTY set is that same replacement at its boundary rather than a special
+    /// case: it really CLEARS — while `LabelAdded`/`LabelRemoved` announce the deltas only. Within
+    /// one patch the label events precede the scalar per-field events; their order **among
+    /// themselves is not guaranteed** (the diff is a set).
     ///
     /// A `parent` change is cycle-checked (rejected
     /// with [`StorageError::CycleDetected`] carrying the path) and, since D45, existence-checked: a
