@@ -156,6 +156,7 @@ where
     contract_label_add_existing_is_idempotent(factory().await).await;
     contract_labels_set_overlap_replaces(factory().await).await;
     contract_label_change_updated_at_semantics(factory().await).await;
+    contract_label_diff_base_is_per_issue(factory().await).await;
     contract_delete_issue(factory().await).await;
     contract_restore_issue(factory().await).await;
 
@@ -570,9 +571,13 @@ pub async fn contract_update_issue<S: Storage>(storage: S) {
 //
 // `update_issue` diffs the requested label ops against the labels the issue REALLY carries (the
 // update transaction reads them from the labels relation before diffing). A backend that diffs
-// against an empty base passes none of the four cases below: a remove silently no-ops, an add of an
+// against an empty base passes none of the cases below: a remove silently no-ops, an add of an
 // already-present label re-inserts a row that already exists, and a `labels_set` overlapping the
 // current set fails the same way instead of replacing.
+//
+// The base is the ISSUE's label set, not the workspace's — `contract_label_diff_base_is_per_issue`
+// is the case that grades that scoping, and it is the only one whose fixture carries a second
+// labelled issue while the label ops run (a workspace-wide base passes all the others).
 
 /// `labels_remove` on a label the issue ACTUALLY carries removes it — from the returned issue AND
 /// from a fresh read — and announces it with exactly one `LabelRemoved` carrying that label.
@@ -865,6 +870,123 @@ pub async fn contract_label_change_updated_at_semantics<S: Storage>(storage: S) 
         event_types(&storage, "ub-1").await.len(),
         events_after_change,
         "a label no-op patch writes NO event"
+    );
+}
+
+/// The label diff base is scoped to the issue being patched: **another issue's labels never enter
+/// it**, in either direction.
+///
+/// This is the only case here whose fixture holds a SECOND labelled issue at the moment of the label
+/// ops, and that is the whole point. The other cases each hold a single labelled issue when their
+/// patch runs, so they cannot tell a per-issue diff base from a workspace-wide one — a base built
+/// from every label row in the database passes every one of them. A polluted base is not a cosmetic defect
+/// either; it re-creates exactly the failure this ub-lp9.27 cell set exists to close:
+///
+/// - a `labels_add` of a label some OTHER issue carries diffs **equal**, so the op is skipped and
+///   returned as a success with the label absent (the silent no-op again); and
+/// - a `labels_remove` of a label only some OTHER issue carries diffs as a **real** removal, so the
+///   patch invents a `LabelRemoved` event and an `updated_at` stamp for a label the target never had.
+///
+/// Both directions are exercised below, which is why the polluting issue carries two labels rather
+/// than one.
+pub async fn contract_label_diff_base_is_per_issue<S: Storage>(storage: S) {
+    // Pollute FIRST — before any label op runs — with an issue carrying labels the target does NOT.
+    let mut other = issue("ub-2", "the other issue");
+    other.labels = vec!["foreign-add".to_string(), "foreign-remove".to_string()];
+    storage
+        .create_issue(&other, "a")
+        .await
+        .expect("create the polluting issue");
+    let other_events_before = event_types(&storage, "ub-2").await.len();
+
+    let mut target = issue("ub-1", "the target");
+    target.labels = vec!["own".to_string()];
+    storage
+        .create_issue(&target, "a")
+        .await
+        .expect("create the target");
+    let events_after_create = event_types(&storage, "ub-1").await.len();
+
+    // (a) ADD a label the OTHER issue carries and the target does not: it must LAND on the target.
+    let added = storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_add: vec!["foreign-add".to_string()],
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .expect("labels_add of a label another issue happens to carry");
+    assert_eq!(
+        added.labels,
+        vec!["foreign-add".to_string(), "own".to_string()],
+        "the add must LAND: another issue carrying that label says nothing about THIS issue's diff"
+    );
+    let reread = storage
+        .get_issue("ub-1")
+        .await
+        .expect("get_issue")
+        .expect("present");
+    assert_eq!(
+        reread.labels,
+        vec!["foreign-add".to_string(), "own".to_string()],
+        "the add is durable, not just reflected in the response"
+    );
+    assert_eq!(
+        event_types(&storage, "ub-1")
+            .await
+            .split_off(events_after_create),
+        vec!["label_added".to_string()],
+        "exactly one LabelAdded, for the add that really happened"
+    );
+    let events_after_add = event_types(&storage, "ub-1").await.len();
+
+    // (b) REMOVE a label ONLY the other issue carries: the target never had it, so this is the
+    // empty-diff full skip — no stamp, no event, no phantom LabelRemoved.
+    let removed = storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_remove: vec!["foreign-remove".to_string()],
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .expect("labels_remove of a label the target does not carry");
+    assert_eq!(
+        removed.labels,
+        vec!["foreign-add".to_string(), "own".to_string()],
+        "removing a label the target never carried leaves its set alone"
+    );
+    assert_eq!(
+        removed.updated_at, added.updated_at,
+        "removing a label the target never carried changes nothing, so it must NOT stamp updated_at"
+    );
+    assert_eq!(
+        event_types(&storage, "ub-1").await.len(),
+        events_after_add,
+        "and it must NOT invent a LabelRemoved event"
+    );
+
+    // (c) The polluting issue is untouched throughout — the scoping holds for WRITES too, not only
+    // for the read that seeds the base.
+    let other_after = storage
+        .get_issue("ub-2")
+        .await
+        .expect("get_issue")
+        .expect("present");
+    assert_eq!(
+        other_after.labels,
+        vec!["foreign-add".to_string(), "foreign-remove".to_string()],
+        "the other issue keeps BOTH labels — neither the add nor the remove reached it"
+    );
+    assert_eq!(
+        event_types(&storage, "ub-2").await.len(),
+        other_events_before,
+        "and no event was written against the other issue"
     );
 }
 
