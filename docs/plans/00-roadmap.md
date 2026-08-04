@@ -207,11 +207,19 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   table inside that same transaction, and writes down the half of the `updated_at` rule that was code-only:
   a REAL relation change stamps `updated_at` — the reparent (FR-1b) and now a real label change are the
   spine's **exactly two** relation exceptions — while a label NO-OP still takes the full skip. User-visible in
-  this cut: a label removal now takes effect and a duplicate label add stops erroring. **`unblock-storage` (L2)
+  this cut: a label removal now takes effect; a duplicate label add stops erroring; and `labels_set` genuinely
+  REPLACES — a caller's set now DROPS the labels it does not list, and the empty set really CLEARS (pre-fix the
+  removal half of the set diff was unreachable, so `labels_set` was purely ADDITIVE and clearing was a no-op).
+  **`unblock-storage` (L2)
   is the only crate that gains code**; it moves no published byte, so it carries **no `contract_version` bump**
   and no `CONTRACT_HASH` re-pin, mints no `ErrorCode`, adds no tool, command or schema field, and leaves the
-  0–8 exit table untouched. It newly rejects **nothing** — every input it changes was previously accepted and
-  silently mishandled — so it files with the bug fixes and not with the ratified behavioural breaks above.
+  0–8 exit table untouched. It newly rejects **nothing**: no input GA accepted now fails, which is precisely
+  what separates it from the ratified behavioural breaks above. One changed input is LOUD, and it moves
+  error→success — `labels_add`/`labels_set` naming an already-present label was **REJECTED** with an opaque
+  backend error and is now the idempotent `Ok` the contract always promised. Everything else it changes was
+  accepted and silently mishandled (a `labels_remove` that removed nothing, a `labels_set` that only ever
+  added, a real label change that never stamped `updated_at`) and now does what it says. So it files with the
+  bug fixes, not with those breaks.
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
   self-update promise is exercised, not just unit-asserted.
