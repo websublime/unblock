@@ -193,6 +193,25 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   universally present and misses that `comments.updated_at` is present in HALF the population under the SAME
   stamp — which is the general rule D46 states, that no step may add a column that may already exist under the
   version it advances from.
+- **Label ops on `issue update` diffed against an EMPTY before-set** (P1, tracker `ub-lp9.27`) — another
+  dogfood-found class, and one that mints **no D-id**: it lands as an INLINE amendment on the spine's
+  `update_issue` clause (a consequence of that same decision, not a new one — `docs/PROCESS.md` §3), so the
+  **D-range is unchanged and no D-range cascade runs**. The update transaction built its `Issue` from
+  the `issues` row alone and never hydrated the label relation before diffing, leaving the before-set
+  permanently EMPTY on every patch. `labels_remove` of a present label therefore removed nothing and returned
+  `isError:false` — in a label-ONLY patch the equal diff took the empty-diff full skip so the whole patch
+  vanished as a success, and in a MIXED patch the row update still landed while only the label op vanished —
+  and `labels_add`/`labels_set` naming an already-present label re-inserted it against the `labels` primary
+  key, turning an idempotent call into an opaque backend error. The post-transaction hydrated re-read masked
+  both, returning a correct-looking label set either way. The repair seeds the diff base from the `labels`
+  table inside that same transaction, and writes down the half of the `updated_at` rule that was code-only:
+  a REAL relation change stamps `updated_at` — the reparent (FR-1b) and now a real label change are the
+  spine's **exactly two** relation exceptions — while a label NO-OP still takes the full skip. User-visible in
+  this cut: a label removal now takes effect and a duplicate label add stops erroring. **`unblock-storage` (L2)
+  is the only crate that gains code**; it moves no published byte, so it carries **no `contract_version` bump**
+  and no `CONTRACT_HASH` re-pin, mints no `ErrorCode`, adds no tool, command or schema field, and leaves the
+  0–8 exit table untouched. It newly rejects **nothing** — every input it changes was previously accepted and
+  silently mishandled — so it files with the bug fixes and not with the ratified behavioural breaks above.
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
   self-update promise is exercised, not just unit-asserted.
