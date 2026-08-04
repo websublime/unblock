@@ -1363,9 +1363,18 @@ between an earlier prose description and the source are resolved **in favour of 
   relation. That is strictly WIDER than the ub-lp9.27 defect, which skipped only those relation-only
   patches whose diff had been MIS-COMPUTED into an equal one (against an empty label base a
   `labels_remove` came out net-zero). A pre-fix label-only patch that really DID move the set was not
-  skipped at all: its label rows and `LabelAdded`/`LabelRemoved` events landed — what it lost was the
-  `updated_at` stamp, because the label term sat in the skip guard but NOT in the stamping condition
-  beside it. Which is why both are written out here, in their own terms.
+  skipped at all — the label term sat in the skip guard — but NOT SKIPPED did not mean LANDED. The one
+  shape that landed rows and events was an add of genuinely ABSENT labels: those rows and their
+  `LabelAdded` events committed, and what that patch lost was the `updated_at` stamp, because the same
+  label term was MISSING from the stamping condition beside the guard. A patch naming an
+  ALREADY-PRESENT label (through `labels_add` or `labels_set`) diffed it as new against the empty base,
+  so the reconcile re-INSERTed a row that already existed, died on the `labels` `(issue_id, label)`
+  primary key and rolled its whole transaction back — it landed nothing at all, not even its row
+  columns. And no pre-fix update ever removed a label: the reconcile iterates before-minus-current,
+  which over an empty before-set is itself always empty, so the removal loop was UNREACHABLE — pre-fix
+  no label `DELETE` ran and no `LabelRemoved` event was ever written, which is also why `labels_set`
+  was purely ADDITIVE and clearing the set was a no-op. Which is why the skip guard and the stamping
+  condition are written out here separately, in their own terms.
   `updated_at` advances
   and `content_hash` is recomputed when at least one stored column changes **or when a real RELATION
   change occurs**. **The relation exceptions are NORMATIVE and there are exactly TWO:** (1) a real
@@ -1385,15 +1394,21 @@ between an earlier prose description and the source are resolved **in favour of 
   changes** (e.g. patching `status`→its current value emits no `StatusChanged`).
   **Label diff base (NORMATIVE — ub-lp9.27).** The before-set the label ops diff against is the issue's
   **actually persisted** label set, read from the label relation **inside the same transaction** as the
-  patch (never an empty base, and never a pre-transaction probe). Three observable consequences, all
-  contract-suite-pinned (§3.2.1 / NFR-16): `labels_remove` of a present label really removes it (a fresh
-  read agrees — it is not a silent no-op returned as success); `labels_add` of an **already-present**
-  label is an **idempotent `Ok`** (no event, no `updated_at`, and no duplicate row against the label
-  uniqueness constraint); and `labels_set` overlapping the current set performs the replacement and
-  emits `LabelAdded`/`LabelRemoved` for the **deltas only** — a label present before and after is never
-  re-announced. The relation INSERT stays **strict** (no ignore-on-conflict): with a correct diff base a
-  duplicate insert is unreachable, so the uniqueness constraint remains a loud tripwire if the diff base
-  ever regresses. **Event ordering within ONE patch:** the label relation is reconciled before the
+  patch (never an empty base, and never a pre-transaction probe). Its observable consequences are all
+  contract-suite-pinned (§3.2.1 / NFR-16), and they are stated as a LIST and never as a count of it,
+  because the list GROWS whenever a cell joins it and a count would rot on the spot: `labels_remove` of
+  a present label really removes it (a fresh read agrees — it is not a silent no-op returned as
+  success); `labels_add` of an **already-present** label is an **idempotent `Ok`** (no event, no
+  `updated_at`, and no duplicate row against the label uniqueness constraint); `labels_set` **REPLACES
+  the whole set** — the caller's list BECOMES the issue's label set, so a currently-carried label the
+  caller does not list is DROPPED, and the replacement is durable (a fresh read agrees) — while
+  `LabelAdded`/`LabelRemoved` announce the **deltas only**, so a label present before and after is
+  never re-announced; and `labels_set` to the **EMPTY** set is that same replacement at its boundary
+  rather than a special case — it really CLEARS, emitting one `LabelRemoved` per label the issue
+  carried and advancing `updated_at` like any other real relation change. The relation INSERT stays
+  **strict** (no ignore-on-conflict): with a correct diff base a duplicate insert is unreachable, so
+  the uniqueness constraint remains a loud tripwire if the diff base ever regresses. **Event ordering
+  within ONE patch:** the label relation is reconciled before the
   scalar per-field events are appended, so in a combined label+scalar patch `LabelAdded`/`LabelRemoved`
   precede `Updated`/`StatusChanged`/… in the audit trail. Relative order *among* the label events of one
   patch is **not** guaranteed (the diff is a set), so a conformance assertion over 2+ adds or 2+ removes
