@@ -887,12 +887,30 @@ pub async fn contract_label_change_updated_at_semantics<S: Storage>(storage: S) 
 /// - a `labels_remove` of a label only some OTHER issue carries diffs as a **real** removal, so the
 ///   patch invents a `LabelRemoved` event and an `updated_at` stamp for a label the target never had.
 ///
-/// Both directions are exercised below, which is why the polluting issue carries two labels rather
-/// than one.
+/// Both READ directions are exercised below, which is why the polluting issue carries a label the
+/// target lacks in each direction.
+///
+/// The scoping of the reconcile WRITE is graded too, and it needs its own step: the two cases above
+/// diff to an empty net change or to an addition, so neither of them ever executes a `DELETE`
+/// against the label relation. Step (c) therefore has the target remove a label the two issues
+/// SHARE — the only fixture shape in which a real `DELETE` runs while a second issue holds the same
+/// label — and step (d) then reads the other issue back. A `DELETE` that dropped its per-issue
+/// predicate would strip the shared label from the other issue as well, which is exactly what step
+/// (d) fails on.
+// The four steps share ONE two-issue fixture and are read in sequence: step (d) grades the state
+// steps (a)-(c) left behind, so splitting them into separate cells would sever each assertion from
+// the writes it is about — and a per-step fixture could no longer say that the OTHER issue was
+// untouched THROUGHOUT. Hence over the pedantic line cap.
+#[allow(clippy::too_many_lines)]
 pub async fn contract_label_diff_base_is_per_issue<S: Storage>(storage: S) {
-    // Pollute FIRST — before any label op runs — with an issue carrying labels the target does NOT.
+    // Pollute FIRST — before any label op runs — with an issue carrying labels the target does NOT,
+    // plus one label the two issues SHARE (the write-scope probe of step (c)).
     let mut other = issue("ub-2", "the other issue");
-    other.labels = vec!["foreign-add".to_string(), "foreign-remove".to_string()];
+    other.labels = vec![
+        "foreign-add".to_string(),
+        "foreign-remove".to_string(),
+        "shared".to_string(),
+    ];
     storage
         .create_issue(&other, "a")
         .await
@@ -900,7 +918,7 @@ pub async fn contract_label_diff_base_is_per_issue<S: Storage>(storage: S) {
     let other_events_before = event_types(&storage, "ub-2").await.len();
 
     let mut target = issue("ub-1", "the target");
-    target.labels = vec!["own".to_string()];
+    target.labels = vec!["own".to_string(), "shared".to_string()];
     storage
         .create_issue(&target, "a")
         .await
@@ -921,7 +939,11 @@ pub async fn contract_label_diff_base_is_per_issue<S: Storage>(storage: S) {
         .expect("labels_add of a label another issue happens to carry");
     assert_eq!(
         added.labels,
-        vec!["foreign-add".to_string(), "own".to_string()],
+        vec![
+            "foreign-add".to_string(),
+            "own".to_string(),
+            "shared".to_string()
+        ],
         "the add must LAND: another issue carrying that label says nothing about THIS issue's diff"
     );
     let reread = storage
@@ -931,7 +953,11 @@ pub async fn contract_label_diff_base_is_per_issue<S: Storage>(storage: S) {
         .expect("present");
     assert_eq!(
         reread.labels,
-        vec!["foreign-add".to_string(), "own".to_string()],
+        vec![
+            "foreign-add".to_string(),
+            "own".to_string(),
+            "shared".to_string()
+        ],
         "the add is durable, not just reflected in the response"
     );
     assert_eq!(
@@ -958,7 +984,11 @@ pub async fn contract_label_diff_base_is_per_issue<S: Storage>(storage: S) {
         .expect("labels_remove of a label the target does not carry");
     assert_eq!(
         removed.labels,
-        vec!["foreign-add".to_string(), "own".to_string()],
+        vec![
+            "foreign-add".to_string(),
+            "own".to_string(),
+            "shared".to_string()
+        ],
         "removing a label the target never carried leaves its set alone"
     );
     assert_eq!(
@@ -971,8 +1001,53 @@ pub async fn contract_label_diff_base_is_per_issue<S: Storage>(storage: S) {
         "and it must NOT invent a LabelRemoved event"
     );
 
-    // (c) The polluting issue is untouched throughout — the scoping holds for WRITES too, not only
-    // for the read that seeds the base.
+    // (c) REMOVE the label the two issues SHARE. Unlike (a) and (b), this diff really moves in the
+    // removal direction, so the relation reconcile executes a genuine DELETE — the only step here
+    // that does. That DELETE is what step (d) grades for per-issue scope.
+    let shared_removed = storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_remove: vec!["shared".to_string()],
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .expect("labels_remove of the shared label");
+    assert_eq!(
+        shared_removed.labels,
+        vec!["foreign-add".to_string(), "own".to_string()],
+        "the shared label is gone from the TARGET"
+    );
+    let target_after = storage
+        .get_issue("ub-1")
+        .await
+        .expect("get_issue")
+        .expect("present");
+    assert_eq!(
+        target_after.labels,
+        vec!["foreign-add".to_string(), "own".to_string()],
+        "and gone from a FRESH read of the target, not just from the response"
+    );
+    let target_new: Vec<(String, Option<String>, Option<String>)> = event_triples(&storage, "ub-1")
+        .await
+        .split_off(events_after_add);
+    assert_eq!(
+        target_new,
+        vec![(
+            "label_removed".to_string(),
+            Some("shared".to_string()),
+            None
+        )],
+        "exactly one LabelRemoved on the target, naming the shared label"
+    );
+
+    // (d) The polluting issue is untouched throughout. This is where the WRITE scope is graded, and
+    // it is load-bearing only because step (c) really executed a DELETE: a reconcile DELETE that
+    // matched on the label alone — dropping its `issue_id` predicate — would strip `shared` from
+    // this issue too, and the label assertion below is what catches it. The event assertion covers
+    // the other half (no write against this issue is announced under its id).
     let other_after = storage
         .get_issue("ub-2")
         .await
@@ -980,8 +1055,13 @@ pub async fn contract_label_diff_base_is_per_issue<S: Storage>(storage: S) {
         .expect("present");
     assert_eq!(
         other_after.labels,
-        vec!["foreign-add".to_string(), "foreign-remove".to_string()],
-        "the other issue keeps BOTH labels — neither the add nor the remove reached it"
+        vec![
+            "foreign-add".to_string(),
+            "foreign-remove".to_string(),
+            "shared".to_string()
+        ],
+        "the other issue keeps ALL THREE labels — neither the add nor either remove reached it, and \
+         the shared label survived the target's real DELETE"
     );
     assert_eq!(
         event_types(&storage, "ub-2").await.len(),
