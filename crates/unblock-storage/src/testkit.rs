@@ -155,6 +155,7 @@ where
     contract_label_remove_then_read(factory().await).await;
     contract_label_add_existing_is_idempotent(factory().await).await;
     contract_labels_set_overlap_replaces(factory().await).await;
+    contract_labels_set_empty_clears(factory().await).await;
     contract_label_change_updated_at_semantics(factory().await).await;
     contract_label_diff_base_is_per_issue(factory().await).await;
     contract_delete_issue(factory().await).await;
@@ -572,8 +573,9 @@ pub async fn contract_update_issue<S: Storage>(storage: S) {
 // `update_issue` diffs the requested label ops against the labels the issue REALLY carries (the
 // update transaction reads them from the labels relation before diffing). A backend that diffs
 // against an empty base passes none of the cases below: a remove silently no-ops, an add of an
-// already-present label re-inserts a row that already exists, and a `labels_set` overlapping the
-// current set fails the same way instead of replacing.
+// already-present label re-inserts a row that already exists, a `labels_set` overlapping the
+// current set fails the same way instead of replacing, and a `labels_set` to the EMPTY set clears
+// nothing (its diff comes out equal, so the whole patch takes the empty-diff full skip).
 //
 // The base is the ISSUE's label set, not the workspace's — `contract_label_diff_base_is_per_issue`
 // is the case that grades that scoping, and it is the only one whose fixture carries a second
@@ -782,6 +784,79 @@ pub async fn contract_labels_set_overlap_replaces<S: Storage>(storage: S) {
         vec!["label_added".to_string(), "label_removed".to_string()],
         "both label deltas are announced before the scalar event; their order among themselves is \
          deliberately NOT graded here (the diff is a set — spine §3.2.1)"
+    );
+}
+
+/// `labels_set` to the **EMPTY** set really CLEARS the issue's labels.
+///
+/// This is the boundary of the replacement semantics the previous case exercises, and it is the one
+/// input that isolates the REMOVAL half of the set diff: `labels_set` with a non-empty set can pass
+/// while removals are broken (the additions still land), whereas the empty set has nothing but
+/// removals to perform. Against an empty diff base the requested set and the base are both empty, so
+/// the diff comes out EQUAL, the patch takes the empty-diff full skip, and clearing is a silent
+/// no-op that returns `isError:false` with every label still attached — which is why the fresh
+/// re-read below is asserted and not only the response.
+///
+/// The `LabelRemoved` events are compared as a **SET**: two or more removals come out of a set
+/// difference, so their relative order is genuinely unspecified (spine §3.2.1 `update_issue`) and an
+/// ordered assertion would fail a conforming backend. The count and both payloads stay exact.
+pub async fn contract_labels_set_empty_clears<S: Storage>(storage: S) {
+    let mut seeded = issue("ub-1", "labelled");
+    seeded.labels = vec!["alpha".to_string(), "beta".to_string()];
+    storage.create_issue(&seeded, "a").await.expect("create");
+    let before = storage
+        .get_issue("ub-1")
+        .await
+        .expect("get_issue")
+        .expect("present");
+    let events_after_create = event_triples(&storage, "ub-1").await.len();
+
+    let cleared = storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_set: Some(Vec::new()),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .expect("labels_set to the EMPTY set");
+    assert!(
+        cleared.labels.is_empty(),
+        "labels_set to the empty set clears the returned issue's labels, got {:?}",
+        cleared.labels
+    );
+
+    let reread = storage
+        .get_issue("ub-1")
+        .await
+        .expect("get_issue")
+        .expect("present");
+    assert!(
+        reread.labels.is_empty(),
+        "the clear is DURABLE — a fresh read carries no labels either, got {:?}",
+        reread.labels
+    );
+
+    // One LabelRemoved per previously-carried label, payload-exact, compared as a set.
+    let mut new_events: Vec<(String, Option<String>, Option<String>)> =
+        event_triples(&storage, "ub-1")
+            .await
+            .split_off(events_after_create);
+    new_events.sort();
+    assert_eq!(
+        new_events,
+        vec![
+            ("label_removed".to_string(), Some("alpha".to_string()), None),
+            ("label_removed".to_string(), Some("beta".to_string()), None),
+        ],
+        "clearing announces exactly one LabelRemoved per label that was carried, and nothing else"
+    );
+
+    assert!(
+        cleared.updated_at > before.updated_at,
+        "clearing the label set is a REAL relation change, so it advances updated_at"
     );
 }
 
