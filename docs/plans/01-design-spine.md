@@ -1356,9 +1356,36 @@ between an earlier prose description and the source are resolved **in favour of 
 - **`update_issue` (sqlite.rs:2496–2509, 2572–2870) — per-field event granularity; empty diff is a
   full skip.** An empty patch (or one that changes nothing) returns the issue unchanged and writes **no
   `SET`, no `updated_at`, no `Event`** (`if set_clauses.is_empty() { return Ok }`). `updated_at` advances
-  and `content_hash` is recomputed **only** when at least one stored column changes. Per-field events
+  and `content_hash` is recomputed when at least one stored column changes **or when a real RELATION
+  change occurs**. **The relation exceptions are NORMATIVE and there are exactly TWO:** (1) a real
+  **reparent** — FR-1b, shipped since commit `42470c5` and stated here as of this amendment (it was
+  previously code-only, which is what made the "only when a stored column changes" absolute above false
+  in practice); and (2) a real **label** add/remove/set (inline amendment 2026-08-04, ub-lp9.27 — a
+  consequence of the SAME `update_issue` decision, so **no new D-id and no D-range bump**). A
+  relation-only patch therefore emits an `UPDATE` whose `SET` carries only `updated_at` +
+  `content_hash`, so the modification is observable; because §1.8 excludes relations **and** all
+  timestamps from the hash, that recompute is a no-op against the stored hash on a pure-relation change
+  (labels/parent/deps are not hashed). **The empty-diff full skip is UNAFFECTED** — "real" means the
+  diff actually moved: a reparent to the current parent, or a label patch whose net set equals the
+  current one (re-adding a present label, removing an absent one), changes nothing and still skips the
+  whole `UPDATE` — no `updated_at`, no `Event`. Per-field events
   (see the EventType-per-mutation table below) are emitted **only when the field's value actually
-  changes** (e.g. patching `status`→its current value emits no `StatusChanged`). **Tombstone-patch guard
+  changes** (e.g. patching `status`→its current value emits no `StatusChanged`).
+  **Label diff base (NORMATIVE — ub-lp9.27).** The before-set the label ops diff against is the issue's
+  **actually persisted** label set, read from the label relation **inside the same transaction** as the
+  patch (never an empty base, and never a pre-transaction probe). Three observable consequences, all
+  contract-suite-pinned (§3.2.1 / NFR-16): `labels_remove` of a present label really removes it (a fresh
+  read agrees — it is not a silent no-op returned as success); `labels_add` of an **already-present**
+  label is an **idempotent `Ok`** (no event, no `updated_at`, and no duplicate row against the label
+  uniqueness constraint); and `labels_set` overlapping the current set performs the replacement and
+  emits `LabelAdded`/`LabelRemoved` for the **deltas only** — a label present before and after is never
+  re-announced. The relation INSERT stays **strict** (no ignore-on-conflict): with a correct diff base a
+  duplicate insert is unreachable, so the uniqueness constraint remains a loud tripwire if the diff base
+  ever regresses. **Event ordering within ONE patch:** the label relation is reconciled before the
+  scalar per-field events are appended, so in a combined label+scalar patch `LabelAdded`/`LabelRemoved`
+  precede `Updated`/`StatusChanged`/… in the audit trail. Relative order *among* the label events of one
+  patch is **not** guaranteed (the diff is a set), so a conformance assertion over 2+ adds or 2+ removes
+  compares them as a set. **Tombstone-patch guard
   (crud.rs:332-334, SSOT):** a patch targeting a **tombstone** is rejected with **`IssueNotFound`** before any
   `SET` — a tombstone cannot be reopened/edited via `update`, so the only un-tombstone path is `restore`
   (see the `restore_issue` carve-out below). This guard is what makes `restore` STRUCTURALLY separate from the
