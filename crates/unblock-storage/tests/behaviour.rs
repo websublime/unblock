@@ -445,6 +445,55 @@ async fn dry_run_delete_mutates_nothing() {
     assert_eq!(fetched.status, Status::Open, "DryRun must not mutate");
 }
 
+/// **libsql-specific (ub-lp9.27):** within one patch this backend reconciles label REMOVALS before
+/// ADDITIONS, so `label_removed` events precede `label_added` ones.
+///
+/// This lives here and NOT in the backend-independent contract suite on purpose. Spine §3.2.1
+/// `update_issue` guarantees that the label events of one patch precede the scalar per-field events,
+/// and explicitly declines to order the label events among themselves — the diff is a set, so a
+/// backend reconciling additions first is fully conformant. Grading that in the conformance suite
+/// would fail a conforming backend; grading it HERE states a fact about `crud.rs::apply_labels`
+/// (delete loop, then insert loop), so a future reordering is a deliberate change to a pinned
+/// behaviour of this backend rather than an accident.
+///
+/// The patch replaces the whole set, giving TWO removals and TWO additions: the assertion is about
+/// the two GROUPS, so it cannot be satisfied by a single pair lining up by luck, and it also rules
+/// out interleaving. Event TYPES (not payloads) are compared because the order WITHIN each group
+/// comes from a `HashSet` difference iteration and is genuinely unspecified.
+#[tokio::test]
+async fn labels_reconcile_removals_before_additions() {
+    let storage = fresh().await;
+    let mut seeded = issue("ub-1", "labelled");
+    seeded.labels = vec!["gone-a".to_string(), "gone-b".to_string()];
+    storage.create_issue(&seeded, "a").await.unwrap();
+    let before = event_types(&storage, "ub-1").await.len();
+
+    storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_set: Some(vec!["new-a".to_string(), "new-b".to_string()]),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .unwrap();
+
+    let new_events: Vec<String> = event_types(&storage, "ub-1").await.split_off(before);
+    assert_eq!(
+        new_events,
+        vec![
+            "label_removed".to_string(),
+            "label_removed".to_string(),
+            "label_added".to_string(),
+            "label_added".to_string(),
+        ],
+        "libsql reconciles removals before additions (crud.rs::apply_labels: delete loop, then \
+         insert loop) — a backend-specific pin, NOT a contract guarantee"
+    );
+}
+
 // --------------------------------------------------------------------------------------------------
 // Restore (un-tombstone) — FR-1c "recoverable", D20
 // --------------------------------------------------------------------------------------------------
