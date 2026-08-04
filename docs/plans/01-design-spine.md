@@ -1362,8 +1362,8 @@ between an earlier prose description and the source are resolved **in favour of 
   mechanism — read as one it would skip EVERY relation-only patch, including one that really moves the
   relation. That is strictly WIDER than the ub-lp9.27 defect, which skipped only those relation-only
   patches whose diff had been MIS-COMPUTED into an equal one (against an empty label base a
-  `labels_remove` came out net-zero). A pre-fix label-only patch that really DID move the set was not
-  skipped at all — the label term sat in the skip guard — but NOT SKIPPED did not mean LANDED. The one
+  `labels_remove` came out net-zero). A pre-fix label-only patch whose COMPUTED diff came out non-equal was
+  not skipped at all — the label term sat in the skip guard — but NOT SKIPPED did not mean LANDED. The one
   shape that landed rows and events was an add of genuinely ABSENT labels: those rows and their
   `LabelAdded` events committed, and what that patch lost was the `updated_at` stamp, because the same
   label term was MISSING from the stamping condition beside the guard. A patch naming an
@@ -1374,54 +1374,55 @@ between an earlier prose description and the source are resolved **in favour of 
   which over an empty before-set is itself always empty, so the removal loop was UNREACHABLE — pre-fix
   no label `DELETE` ran and no `LabelRemoved` event was ever written, which is also why `labels_set`
   was purely ADDITIVE and clearing the set was a no-op. Which is why the skip guard and the stamping
-  condition are written out here separately, in their own terms.
-  `updated_at` advances
-  and `content_hash` is recomputed when at least one stored column changes **or when a real RELATION
-  change occurs**. **The relation exceptions are NORMATIVE and there are exactly TWO:** (1) a real
-  **reparent** — FR-1b, shipped since commit `42470c5` and stated here as of this amendment (it was
-  previously code-only, so this clause's own PRE-amendment wording — `updated_at` advances **only** when
-  a stored column changes — was false in practice; that wording is what this amendment replaced, which
-  is why no such "only" survives above); and (2) a real **label** add/remove/set (inline amendment 2026-08-04, ub-lp9.27 — a
-  consequence of the SAME `update_issue` decision, so **no new D-id and no D-range bump**). A
-  relation-only patch therefore emits an `UPDATE` whose `SET` carries only `updated_at` +
-  `content_hash`, so the modification is observable; because §1.8 excludes relations **and** all
-  timestamps from the hash, that recompute is a no-op against the stored hash on a pure-relation change
-  (labels/parent/deps are not hashed). **The empty-diff full skip is UNAFFECTED** — "real" means the
-  diff actually moved: a reparent to the current parent, or a label patch whose net set equals the
-  current one (re-adding a present label, removing an absent one), changes nothing and still skips the
-  whole `UPDATE` — no `updated_at`, no `Event`. Per-field events
-  (see the EventType-per-mutation table below) are emitted **only when the field's value actually
-  changes** (e.g. patching `status`→its current value emits no `StatusChanged`).
+  condition are written out here separately, in their own terms. `updated_at` advances and
+  `content_hash` is recomputed when at least one stored column changes **or when a real RELATION change
+  occurs**. **The relation exceptions are NORMATIVE and there are exactly TWO** — a CLOSED set whose
+  count is itself the rule, since it FORBIDS a third, which is why THIS one is counted while the OPEN
+  consequence list below is not: (1) a real **reparent** — FR-1b, shipped since commit `42470c5` and
+  stated here as of this amendment (it was previously code-only, so this clause's own PRE-amendment
+  wording — `updated_at` advances **only** when a stored column changes — was false in practice; that
+  wording is what this amendment replaced, which is why no such "only" survives above); and (2) a real
+  **label** add/remove/set (inline amendment 2026-08-04, ub-lp9.27 — a consequence of the SAME
+  `update_issue` decision, so **no new D-id and no D-range bump**). A relation-only patch therefore
+  emits an `UPDATE` whose `SET` carries only `updated_at` + `content_hash`, so the modification is
+  observable; because §1.8 excludes relations **and** all timestamps from the hash, that recompute is a
+  no-op against the stored hash on a pure-relation change (labels/parent/deps are not hashed). **The
+  empty-diff full skip is UNAFFECTED** — "real" means the diff actually moved: a reparent to the current
+  parent, or a label patch whose net set equals the current one (re-adding a present label, removing an
+  absent one), changes nothing and still skips the whole `UPDATE` — no `updated_at`, no `Event`.
+  Per-field events (see the EventType-per-mutation table below) are emitted **only when the field's
+  value actually changes** (e.g. patching `status`→its current value emits no `StatusChanged`).
   **Label diff base (NORMATIVE — ub-lp9.27).** The before-set the label ops diff against is the issue's
   **actually persisted** label set, read from the label relation **inside the same transaction** as the
-  patch (never an empty base, and never a pre-transaction probe). Its observable consequences are all
-  contract-suite-pinned (§3.2.1 / NFR-16), and they are stated as a LIST and never as a count of it,
-  because the list GROWS whenever a cell joins it and a count would rot on the spot: `labels_remove` of
-  a present label really removes it (a fresh read agrees — it is not a silent no-op returned as
-  success); `labels_add` of an **already-present** label is an **idempotent `Ok`** (no event, no
-  `updated_at`, and no duplicate row against the label uniqueness constraint); `labels_set` **REPLACES
-  the whole set** — the caller's list BECOMES the issue's label set, so a currently-carried label the
-  caller does not list is DROPPED, and the replacement is durable (a fresh read agrees) — while
-  `LabelAdded`/`LabelRemoved` announce the **deltas only**, so a label present before and after is
-  never re-announced; and `labels_set` to the **EMPTY** set is that same replacement at its boundary
-  rather than a special case — it really CLEARS, emitting one `LabelRemoved` per label the issue
-  carried and advancing `updated_at` like any other real relation change. The relation INSERT stays
-  **strict** (no ignore-on-conflict): with a correct diff base a duplicate insert is unreachable, so
-  the uniqueness constraint remains a loud tripwire if the diff base ever regresses. **Event ordering
-  within ONE patch:** the label relation is reconciled before the
-  scalar per-field events are appended, so in a combined label+scalar patch `LabelAdded`/`LabelRemoved`
-  precede `Updated`/`StatusChanged`/… in the audit trail. Relative order *among* the label events of one
-  patch is **not** guaranteed (the diff is a set), so a conformance assertion over 2+ adds or 2+ removes
-  compares them as a set — and so does one over a single add PLUS a single remove, which is the same
-  statement (a backend that reconciles additions first conforms). The libsql backend's own order —
-  removals reconciled before additions — is a BACKEND fact and is pinned as one, in
-  `crates/unblock-storage/tests/behaviour.rs`, never in the backend-independent contract suite.
-  **Tombstone-patch guard
-  (crud.rs:770-773, SSOT):** a patch targeting a **tombstone** is rejected with **`IssueNotFound`** before any
-  `SET` — a tombstone cannot be reopened/edited via `update`, so the only un-tombstone path is `restore`
-  (see the `restore_issue` carve-out below). This guard is what makes `restore` STRUCTURALLY separate from the
-  reopen=update mapping (§5.2) and is cited by the §3.2.1 `restore_issue` step, the §4.1 `Session::restore` seam
-  note, and the §5.2 `Reopen`/`Restore` notes — all of which point HERE as the normative source.
+  patch (never an empty base, and never a pre-transaction probe). **BOTH that read and the reconciling
+  write are scoped to THIS issue, never to the workspace:** a label another issue also carries is absent
+  from this issue's base, and the removal `DELETE` leaves that other issue's row standing. Its
+  observable consequences are all contract-suite-pinned (§3.2.1 / NFR-16), and they are stated as a LIST
+  and never as a count of it, because the list GROWS whenever a cell joins it and a count would rot on
+  the spot: `labels_remove` of a present label really removes it (a fresh read agrees — it is not a
+  silent no-op returned as success); `labels_add` of an **already-present** label is an **idempotent
+  `Ok`** (no event, no `updated_at`, and no duplicate row against the label uniqueness constraint);
+  `labels_set` **REPLACES the whole set** — the caller's list BECOMES the issue's label set, so a
+  currently-carried label the caller does not list is DROPPED, and the replacement is durable (a fresh
+  read agrees) — while `LabelAdded`/`LabelRemoved` announce the **deltas only**, so a label present
+  before and after is never re-announced; and `labels_set` to the **EMPTY** set is that same replacement
+  at its boundary rather than a special case — it really CLEARS, emitting one `LabelRemoved` per label
+  the issue carried and advancing `updated_at` like any other real relation change. The relation INSERT
+  stays **strict** (no ignore-on-conflict): with a correct diff base a duplicate insert is unreachable,
+  so the uniqueness constraint remains a loud tripwire if the diff base ever regresses. **Event ordering
+  within ONE patch:** the label relation is reconciled before the scalar per-field events are appended,
+  so in a combined label+scalar patch `LabelAdded`/`LabelRemoved` precede `Updated`/`StatusChanged`/… in
+  the audit trail. Relative order *among* the label events of one patch is **not** guaranteed (the diff
+  is a set), so a conformance assertion over 2+ adds or 2+ removes compares them as a set — and so does
+  one over a single add PLUS a single remove, which is the same statement (a backend that reconciles
+  additions first conforms). The libsql backend's own order — removals reconciled before additions — is
+  a BACKEND fact and is pinned as one, in `crates/unblock-storage/tests/behaviour.rs`, never in the
+  backend-independent contract suite. **Tombstone-patch guard (crud.rs:770-773, SSOT):** a patch
+  targeting a **tombstone** is rejected with **`IssueNotFound`** before any `SET` — a tombstone cannot
+  be reopened/edited via `update`, so the only un-tombstone path is `restore` (see the `restore_issue`
+  carve-out below). This guard is what makes `restore` STRUCTURALLY separate from the reopen=update
+  mapping (§5.2) and is cited by the §3.2.1 `restore_issue` step, the §4.1 `Session::restore` seam note,
+  and the §5.2 `Reopen`/`Restore` notes — all of which point HERE as the normative source.
   **Reparent target existence (NORMATIVE — D45; the 4th edge-writing entry point).** `apply_reparent`
   (`crates/unblock-storage/src/libsql/crud.rs:972-1032`) writes a `parent-child` edge to whatever string
   the patch carries, guarded today only by self and cycle. It now carries the same in-transaction
