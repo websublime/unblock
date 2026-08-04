@@ -829,11 +829,11 @@ pub async fn contract_label_change_updated_at_semantics<S: Storage>(storage: S) 
         changed.content_hash, before.content_hash,
         "labels are excluded from content_hash (spine §1.8), so the hash must NOT move"
     );
-    assert_eq!(
-        changed.content_hash.as_deref(),
-        Some(changed.compute_content_hash().as_str()),
-        "the stored hash still matches the recompute after the label change"
-    );
+    // The STORED hash column is deliberately NOT asserted here, and cannot be: spine §1.8 has every
+    // backend RECOMPUTE `content_hash` on load and never trust the column, so an `Issue` handed back
+    // by the trait carries a recomputed value — comparing it against a recompute of the same loaded
+    // issue compares a value to itself and passes over a garbage column. The obligation above (the
+    // hash does not move across a label change) is the observable one.
     assert_eq!(
         event_types(&storage, "ub-1")
             .await
