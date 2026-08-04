@@ -677,9 +677,15 @@ pub async fn contract_label_add_existing_is_idempotent<S: Storage>(storage: S) {
 /// `labels_set` over a set that OVERLAPS the current one performs the replacement, and emits events
 /// for the actual deltas only — the label the two sets share is neither re-added nor re-announced.
 ///
-/// Second half: a combined label + scalar patch. The label events are appended while the relation is
-/// reconciled, i.e. BEFORE the scalar per-field events — that relative order is part of the audit
-/// trail this case pins.
+/// Second half: a combined label + scalar patch, which pins the ONE ordering the contract promises —
+/// the label events are appended while the relation is reconciled, so they precede the scalar
+/// per-field events. **What this case deliberately does NOT pin is the order of the label events
+/// among THEMSELVES** (spine §3.2.1 `update_issue`: the diff is a set, so that relative order is
+/// explicitly not guaranteed). Both halves therefore compare the label events as a SET. The libsql
+/// backend's own deterministic order — removals reconciled before additions — is a statement about
+/// one backend, pinned in `unblock-storage/tests/behaviour.rs`
+/// (`labels_reconcile_removals_before_additions`), never here: a conformance suite that graded it
+/// would fail a fully conforming backend that reconciled additions first.
 pub async fn contract_labels_set_overlap_replaces<S: Storage>(storage: S) {
     let mut seeded = issue("ub-1", "labelled");
     seeded.labels = vec!["alpha".to_string(), "beta".to_string()];
@@ -713,16 +719,21 @@ pub async fn contract_labels_set_overlap_replaces<S: Storage>(storage: S) {
         "the replacement is durable, not just reflected in the response"
     );
 
-    // Exactly ONE delta per side (alpha out, gamma in), so this slice is order-deterministic:
-    // removals are reconciled before additions. `beta` — present before and after — is silent.
-    let new_events: Vec<(String, Option<String>, Option<String>)> = event_triples(&storage, "ub-1")
-        .await
-        .split_off(events_before);
+    // Exactly ONE delta per side (alpha out, gamma in). `beta` — present before and after — is
+    // silent. Compared as a SET (canonicalised by sorting) rather than as a sequence: the contract
+    // does not order the label events of one patch relative to each other. The comparison stays
+    // exact in every other respect — the LENGTH, both event types and both payloads are pinned, so a
+    // spurious extra event or a re-announced `beta` still fails.
+    let mut new_events: Vec<(String, Option<String>, Option<String>)> =
+        event_triples(&storage, "ub-1")
+            .await
+            .split_off(events_before);
+    new_events.sort();
     assert_eq!(
         new_events,
         vec![
-            ("label_removed".to_string(), Some("alpha".to_string()), None),
             ("label_added".to_string(), None, Some("gamma".to_string())),
+            ("label_removed".to_string(), Some("alpha".to_string()), None),
         ],
         "labels_set announces the DELTAS only — the shared label is not re-announced"
     );
@@ -747,13 +758,25 @@ pub async fn contract_labels_set_overlap_replaces<S: Storage>(storage: S) {
         .expect("combined label + scalar patch");
     let new_events: Vec<String> = event_types(&storage, "ub-2").await.split_off(events_before);
     assert_eq!(
-        new_events,
-        vec![
-            "label_removed".to_string(),
-            "label_added".to_string(),
-            "updated".to_string()
-        ],
-        "label events are appended with the relation reconcile, BEFORE the scalar field events"
+        new_events.len(),
+        3,
+        "one LabelRemoved + one LabelAdded + one Updated, and nothing else"
+    );
+    // The SCALAR event is pinned LAST — THAT half of the order IS guaranteed (label events are
+    // appended with the relation reconcile, before the scalar per-field events).
+    assert_eq!(
+        new_events[2], "updated",
+        "the scalar field event is LAST: label events are appended with the relation reconcile, \
+         BEFORE the scalar field events"
+    );
+    // The two LABEL events are compared as a SET — their relative order is not guaranteed.
+    let mut label_half = new_events[..2].to_vec();
+    label_half.sort();
+    assert_eq!(
+        label_half,
+        vec!["label_added".to_string(), "label_removed".to_string()],
+        "both label deltas are announced before the scalar event; their order among themselves is \
+         deliberately NOT graded here (the diff is a set — spine §3.2.1)"
     );
 }
 
