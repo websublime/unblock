@@ -367,8 +367,14 @@ fn ns1_a_duplicated_params_name_is_out_of_band_and_non_executing() {
     assert_eq!(resp["error"]["code"], -32601, "{resp}");
 }
 
-/// NS2 — a duplicated `params` KEY (not a duplicate INSIDE it) is a hard `-32700`, and the
-/// connection RECOVERS on the next line.
+/// NS2 — a duplicated `params` KEY (not a duplicate INSIDE it) on a `tools/call` is a hard
+/// `-32700`, and the connection RECOVERS on the next line.
+///
+/// The `-32700` is METHOD-DEPENDENT and this cell pins the `tools/call` half only: the same
+/// duplication on `ping` — a request with no `params` at all — is a plain SUCCESS (PRD section 4
+/// D47, spine section 5.6). The reply also OMITS the id, which is what the assertion below checks
+/// and what leaves an rmcp client pending — a residual D47 discloses and deliberately leaves open
+/// (tracked as `ub-788`).
 #[test]
 fn ns2_a_duplicated_params_key_is_a_parse_error_and_recovers() {
     let ws = Workspace::init();
@@ -404,20 +410,78 @@ fn ns2_a_duplicated_params_key_is_a_parse_error_and_recovers() {
     );
 }
 
-/// NS4 — a duplicated ENVELOPE `id` produces NO RESPONSE AT ALL.
+/// NS4 — a duplicated ENVELOPE `id` is answered OUT-OF-BAND `-32600` on the RECOVERED id (D47).
 ///
-/// It parses cleanly (so the compatibility filter never runs) and decodes as a NOTIFICATION, which
-/// the notification path ignores — a client waiting on that id hangs forever. This is a KNOWN,
-/// SCOPED-OUT residual: there is no request id to answer on, so an in-band reply is impossible and
-/// an out-of-band one would reopen the arm this design closes. The cell pins the observed behaviour
-/// so the residual stays a measured fact.
+/// It parses cleanly (so the compatibility filter never runs) and decodes as a NOTIFICATION,
+/// because rmcp tries the `Request` variant first and `JsonRpcRequest` requires an `id` that
+/// deserializes as a number-or-string. Before D47 the notification path ignored it and a client
+/// waiting on that id hung forever. The two reasons the pre-D47 cell gave for scoping that out were
+/// BOTH falsified, and are recorded here so they are not re-derived: "there is no request id to
+/// answer on" looked at the DECODED message, where rmcp has dropped the surplus `id`, not at the RAW
+/// line where it is still present; and the in-band arm D43 protects belongs to `call_tool`, which
+/// this frame never reaches, so an out-of-band `-32600` about the ENVELOPE reopens nothing.
+///
+/// This cell is the RECOVERED half. Its sibling drives the AMBIGUOUS half with two DIFFERING ids —
+/// which is what the single pre-D47 cell used, so the recoverable half had no coverage at all.
 ///
 /// Proved by a SENTINEL FOLLOW — no timeouts, no sleeps, no threads.
 #[test]
-fn ns4_a_duplicated_envelope_id_gets_no_response_at_all() {
+fn ns4_a_duplicated_envelope_id_with_equal_ids_is_answered_on_that_id() {
     let ws = Workspace::init();
     let mut c = client(&ws);
-    let target = create_issue(&mut c, "ns4 target");
+    let target = create_issue(&mut c, "ns4a target");
+
+    let echo_id = 424_242_i64;
+    let bad = format!(
+        r#"{{"jsonrpc":"2.0","id":{echo_id},"id":{echo_id},"method":"tools/call","params":{{"name":"issue","arguments":{{"action":"show","id":"{target}"}}}}}}"#
+    );
+    c.write_raw_line(&bad);
+
+    let sentinel = c.next_request_id();
+    let resp = c.request_raw(
+        sentinel,
+        &raw_tools_call(
+            sentinel,
+            "issue",
+            &format!(r#"{{"action":"show","id":"{target}"}}"#),
+        ),
+    );
+    assert_ne!(
+        resp["result"]["isError"], true,
+        "sentinel must answer: {resp}"
+    );
+
+    assert!(
+        c.saw_response_for(echo_id),
+        "the EQUAL-ids frame must now be answered ON that id (D47); on the pre-D47 binary this \
+         frame was silent, which is what makes this cell the before/after witness. Lines: {:?}",
+        c.seen_lines
+    );
+    let answer = c
+        .seen_lines
+        .iter()
+        .find(|line| line.contains(r#""id":424242"#))
+        .unwrap_or_else(|| panic!("the answer line is missing: {:?}", c.seen_lines));
+    let parsed: Value = serde_json::from_str(answer).expect("the answer is JSON");
+    assert_eq!(
+        parsed["error"]["code"], -32600,
+        "and it must be an Invalid Request, not a tool result: {parsed}"
+    );
+}
+
+/// `NS4b` — the AMBIGUOUS half: two DIFFERING ids answer with the `id` OMITTED.
+///
+/// This drives the ORIGINAL pre-D47 frame unchanged, and RETAINS both of its original negatives —
+/// which is the discrimination that cell bought and which must not be lost. Note that both of them
+/// stayed TRUE across D47: the bytes are ambiguous, so neither candidate id is ever answered on.
+/// What changed is that a reply now EXISTS at all, which is the third assertion below.
+///
+/// Proved by a SENTINEL FOLLOW — no timeouts, no sleeps, no threads.
+#[test]
+fn ns4_a_duplicated_envelope_id_with_differing_ids_answers_with_the_id_omitted() {
+    let ws = Workspace::init();
+    let mut c = client(&ws);
+    let target = create_issue(&mut c, "ns4b target");
 
     let ghost_id = 424_242_i64;
     let bad = format!(
@@ -425,8 +489,6 @@ fn ns4_a_duplicated_envelope_id_gets_no_response_at_all() {
     );
     c.write_raw_line(&bad);
 
-    // SENTINEL: a known-good request with a fresh id. Reading its response proves the server has
-    // moved past the ghost frame.
     let sentinel = c.next_request_id();
     let resp = c.request_raw(
         sentinel,
@@ -443,13 +505,22 @@ fn ns4_a_duplicated_envelope_id_gets_no_response_at_all() {
 
     assert!(
         !c.saw_response_for(ghost_id),
-        "the duplicated-envelope-id frame is expected to get NO response (a scoped-out residual); \
-         if this now answers, the residual closed and the note must be updated. Lines: {:?}",
+        "an AMBIGUOUS frame must not be answered on either candidate id. Lines: {:?}",
         c.seen_lines
     );
     assert!(
         !c.saw_response_for(999_999),
         "nor under the last-wins id. Lines: {:?}",
+        c.seen_lines
+    );
+    let omitted = c
+        .seen_lines
+        .iter()
+        .any(|line| line.contains("-32600") && !line.contains(r#""id":"#));
+    assert!(
+        omitted,
+        "a -32600 with the id OMITTED must nevertheless have been emitted (D47) — before D47 this \
+         frame produced nothing at all. Lines: {:?}",
         c.seen_lines
     );
 }

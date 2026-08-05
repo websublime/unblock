@@ -216,6 +216,14 @@ pub struct RawDuplexClient {
     next_id: i64,
     /// Every response id observed, in arrival order (drives `saw_response_for`).
     seen_ids: Vec<i64>,
+    /// **[v1.0.1/D47]** EVERY non-empty line the server wrote, verbatim, in arrival order.
+    ///
+    /// `seen_ids` is not enough for D47: a reply whose `id` is OMITTED — the ambiguous/unusable
+    /// arm — carries no id at all, so it is invisible to `seen_ids` AND `read_response` would loop
+    /// past it until the server closed. A cell that can only observe id-carrying replies could
+    /// therefore never see half of what this decision emits. The CLI harness already records every
+    /// line for exactly this reason; this mirrors it.
+    pub seen_lines: Vec<String>,
 }
 
 impl RawDuplexClient {
@@ -256,6 +264,7 @@ impl RawDuplexClient {
             }
             let value: Value = serde_json::from_str(trimmed)
                 .unwrap_or_else(|e| panic!("every server line must be JSON-RPC framing: {e}"));
+            self.seen_lines.push(trimmed.to_string());
             if let Some(seen) = value.get("id").and_then(Value::as_i64) {
                 self.seen_ids.push(seen);
                 if seen == id {
@@ -294,6 +303,16 @@ impl RawDuplexClient {
     #[must_use]
     pub fn saw_response_for(&self, id: i64) -> bool {
         self.seen_ids.contains(&id)
+    }
+
+    /// **[v1.0.1/D47]** Did any observed line contain `needle`?
+    ///
+    /// The observation channel for a reply with NO id — see [`RawDuplexClient::seen_lines`]. Used
+    /// with the shipped SENTINEL-FOLLOW pattern (send the frame, then a known-good request, read
+    /// the sentinel, then ask this), so it needs no timeout and no sleep.
+    #[must_use]
+    pub fn saw_line_containing(&self, needle: &str) -> bool {
+        self.seen_lines.iter().any(|line| line.contains(needle))
     }
 
     /// Drive the `initialize` handshake by hand.
@@ -389,7 +408,66 @@ fn raw_client(client_io: tokio::io::DuplexStream) -> RawDuplexClient {
         reader: tokio::io::BufReader::new(client_read),
         next_id: 1,
         seen_ids: Vec::new(),
+        seen_lines: Vec::new(),
     }
+}
+
+/// **[v1.0.1/D47]** A stable fingerprint of everything the store holds that a tool call could move.
+///
+/// The EFFECT oracle: a channel-only assertion ("the frame was answered `-32600`") is satisfied by
+/// an implementation that rebuilds the frame as a Request on the recovered id and DELIVERS it — the
+/// single most plausible wrong way to implement this decision. Only comparing the store before and
+/// after catches that, because such an implementation would execute the tool.
+///
+/// Lives here rather than inside one suite so `envelope_id_duplex.rs` and `duplicate_key_duplex.rs`
+/// share ONE oracle: copying an effect oracle is how the two silently drift apart.
+/// It reads through the SAME MCP path a client uses, deliberately: a fingerprint taken behind the
+/// server would not notice a frame that executed through it.
+pub async fn store_fingerprint(client: &mut RawDuplexClient, ids: &[String]) -> Value {
+    let mut out = Map::new();
+    for id in ids {
+        let shown = client
+            .call_tool("issue", serde_json::json!({"action":"show","id":id}))
+            .await;
+        out.insert(format!("issue:{id}"), shown["result"].clone());
+        let comments = client
+            .call_tool(
+                "comment",
+                serde_json::json!({"action":"list","issue_id":id}),
+            )
+            .await;
+        out.insert(format!("comments:{id}"), comments["result"].clone());
+        let deps = client
+            .call_tool("dep", serde_json::json!({"action":"list","id":id}))
+            .await;
+        out.insert(format!("deps:{id}"), deps["result"].clone());
+    }
+    let count = client
+        .call_tool("query", serde_json::json!({"kind":"count"}))
+        .await;
+    out.insert("count".to_string(), count["result"].clone());
+    Value::Object(out)
+}
+
+/// Create an issue through the live client and return its minted id.
+///
+/// Moved here beside [`store_fingerprint`] for the same sharing reason.
+pub async fn create_issue(client: &mut RawDuplexClient, title: &str) -> String {
+    let response = client
+        .call_tool(
+            "issue",
+            serde_json::json!({"action":"create","title":title}),
+        )
+        .await;
+    let result = &response["result"];
+    assert_ne!(
+        result["isError"], true,
+        "fixture create must succeed: {response}"
+    );
+    result["structuredContent"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("minted id in {response}"))
+        .to_string()
 }
 
 /// A `Storage` decorator that COUNTS every mutating call (NFR-18 spy). It wraps a real inner backend
