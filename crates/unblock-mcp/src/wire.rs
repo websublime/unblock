@@ -20,14 +20,52 @@
 //! correlated queue can hand a `Clean` verdict computed for one frame to a DIFFERENT frame. That
 //! fails **OPEN**.
 //!
-//! # THE TRANSPORT NEVER REPLIES AND NEVER SHORT-CIRCUITS (normative)
+//! # THE TRANSPORT NEVER REPLIES AND NEVER SHORT-CIRCUITS *FOR THE D43 DUPLICATE-KEY CLASS* (normative)
 //!
 //! On a duplicate or an indeterminate scan it **still parses and still delivers** the message,
-//! carrying the verdict. It emits exactly the responses `AsyncRwTransport` emits today (the
-//! `-32700` parse-error reply, id omitted) and nothing else. The transport has no request id and no
-//! in-band channel; inventing a reply here would force the out-of-band `-32602`/`-32700` arm back
-//! open for a class the binding decision says must be answered IN-BAND. Rejection happens at
+//! carrying the verdict. For that class it emits exactly the responses `AsyncRwTransport` emits
+//! today (the `-32700` parse-error reply, id omitted) and nothing else, because that class HAS an
+//! in-band channel: inventing a reply for it would force the out-of-band `-32602`/`-32700` arm back
+//! open for a class the binding decision says must be answered IN-BAND. Rejection for it happens at
 //! exactly one site: `call_tool` (`crate::server`).
+//!
+//! # THE ONE CLASS THE TRANSPORT DOES ANSWER — UN-DECODABLE ENVELOPE `id` (normative, PRD §4, D47)
+//!
+//! The two rules do not conflict, because this class never reaches `call_tool` at all. A frame whose
+//! RAW BYTES carried a top-level `id` member and whose decode produced a `Notification` has no
+//! response obligation in rmcp and no in-band channel here, so before D47 it evaporated: no reply,
+//! no store effect, nothing on stdout, and a client that sent an id waiting forever. Duplication is
+//! the MINORITY route — `null`, an object, an array, a boolean, a non-integer or out-of-i64-range
+//! number, and the `id` key spelled "\u0069d" all land in the same place, because rmcp
+//! tries the `Request` variant first and `JsonRpcRequest` requires an `id` that deserializes as a
+//! number-or-string.
+//!
+//! The transport answers it **out-of-band `-32600 Invalid Request`**, on the id RECOVERED from the
+//! raw line when the bytes yield one unambiguously (a single valid `RequestId`, or several all
+//! EQUAL), with the id omitted when they do not (two different ids, or a value that is no
+//! representable `RequestId`). Answering on the recovered id is the whole mechanism, not a nicety:
+//! rmcp's client awaits untimed and DISCARDS an error that carries no id, so an id-less reply never
+//! releases it.
+//!
+//! It then **DROPS** the frame. Dropping is load-bearing: rmcp's `expect_next_message` returns
+//! `ExpectedInitializeRequest` for ANY non-Request message in the initialize slot, so DELIVERING one
+//! of these pre-handshake kills the server — precisely the failure this arm removes.
+//!
+//! The predicate is [`crate::envelope_id::scan`], a `DeserializeSeed` over the ROOT object collecting
+//! every top-level `id` member's value, guarded by an EXHAUSTIVE match on the `Notification` variant
+//! so request traffic pays nothing. Keys are compared DECODED, never as raw spans.
+//! [`unblock_error::dup_key::scan`] CANNOT serve as this predicate: it reports `Clean` for every
+//! non-duplicated shape of the class, and its `Duplicate { key, path }` verdict retains no occurrence
+//! VALUES, so equal and differing ids are indistinguishable to it.
+//!
+//! DISCLOSED and deliberately left open (tracked as `ub-788`): the `-32700` arm omits a readable id
+//! unconditionally, so a duplicated `method`/`jsonrpc` frame still leaves an rmcp client pending.
+//!
+//! ONE EFFECT IS REMOVED, deliberately: a `notifications/cancelled` frame carrying an un-decodable
+//! `id` is DELIVERED today, and rmcp's serve loop cancels the matching in-flight request through it
+//! before any handler runs (`src/service.rs:981-996`). Answered and dropped, that cancellation stops
+//! happening. Preserving it would mean delivering the frame after answering it — the shape that kills
+//! the server in the initialize slot. A conforming cancellation carries no `id` and is unaffected.
 //!
 //! # CD-7 — this module FORKS an undocumented rmcp internal
 //!
@@ -60,7 +98,7 @@
 
 use std::sync::Arc;
 
-use rmcp::model::ErrorData;
+use rmcp::model::{ErrorData, JsonRpcMessage, RequestId};
 use rmcp::service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
 use rmcp::transport::Transport;
 use rmcp::transport::async_rw::JsonRpcMessageCodec;
@@ -70,6 +108,8 @@ use tokio_util::bytes::BytesMut;
 use tokio_util::codec::Encoder;
 use unblock_error::dup_key::{DupScan, scan};
 
+use crate::envelope_id::{self, EnvelopeId};
+
 /// The scan root: the WHOLE `params` value of every decoded request — the reserved `_meta` member
 /// included, NOT `params.arguments` alone.
 ///
@@ -78,8 +118,20 @@ use unblock_error::dup_key::{DupScan, scan};
 /// leave one nested-duplicate class executing.
 const SCAN_ROOT: &[&str] = &["params"];
 
+/// The `-32600` message for the D47 un-decodable-envelope-id arm.
+///
+/// A COMPILE-TIME CONSTANT on purpose: zero attacker bytes are echoed into it, and `data` is `None`
+/// for the same reason — so the reply's member set is exactly the shipped `-32700` reply's plus the
+/// (protocol-mandated) `id`. A `data` carrying anything derived from the frame would open a NEW echo
+/// channel for untrusted input with no protocol requirement behind it.
+const INVALID_REQUEST_ID_MESSAGE: &str =
+    "Invalid Request: the id member is duplicated or is not a valid JSON-RPC request id";
+
 /// UTF-8 byte order mark — RFC 8259 §8.1. Stripped exactly once, prefix only, mirroring rmcp.
-const UTF8_BOM: &[u8; 3] = b"\xEF\xBB\xBF";
+///
+/// `pub(crate)` so [`crate::envelope_id`] strips exactly the SAME one: the scanner and the parser
+/// must see the same document, and two copies of this constant is how they drift.
+pub(crate) const UTF8_BOM: &[u8; 3] = b"\xEF\xBB\xBF";
 
 /// The wire-scan verdict carried from the transport to `call_tool` (D43).
 ///
@@ -145,6 +197,38 @@ where
             write: Arc::new(Mutex::new(Some(write))),
         }
     }
+
+    /// Write ONE out-of-band error reply and report whether the connection is still usable.
+    ///
+    /// `None` ⇒ the caller must `return None` from `receive()` — the SAME two conditions the shipped
+    /// `-32700` arm returns `None` on: the write half was taken by `close()` (⇒ `NotConnected`, the
+    /// D40 teardown path), or the write itself failed.
+    ///
+    /// **Takes the WRITE HALF, not `&self` — and that is a `Send` requirement, not a preference.**
+    /// `receive()` holds `line`, an immutable borrow of `self.line_buf`, so an `&mut self` helper
+    /// would conflict with it; but `&self` does not work either, because `Transport::receive`
+    /// requires its future to be `Send` and `&Self` is `Send` only if `Self: Sync` — which this
+    /// transport is not (`BufReader<R>` is not `Sync` for a merely-`Send` `R`). Borrowing the ONE
+    /// field that is touched satisfies both: `Arc<Mutex<Option<W>>>` is `Send + Sync` for `W: Send`,
+    /// and a shared borrow of `self.write` is disjoint from the shared borrow of `self.line_buf`.
+    ///
+    /// The guard is scoped to this function, so it is released before `receive()` parks in the next
+    /// `read_until`. Holding it across that read would block every `send()` for the whole idle
+    /// period.
+    ///
+    /// Both out-of-band arms (`-32700` and D47's `-32600`) go through here so they are identical
+    /// **by construction** rather than by review, and both encode through rmcp's own
+    /// [`JsonRpcMessageCodec`] — there is no hand-rolled byte path.
+    async fn answer_error(
+        write: &Arc<Mutex<Option<W>>>,
+        error: ErrorData,
+        id: Option<RequestId>,
+    ) -> Option<()> {
+        let mut guard = write.lock().await;
+        let writer = guard.as_mut()?;
+        let response = TxJsonRpcMessage::<RoleServer>::error(error, id);
+        write_frame(writer, response).await.ok()
+    }
 }
 
 impl<R, W> Transport<RoleServer> for DupScanningTransport<R, W>
@@ -203,6 +287,59 @@ where
 
             match try_parse_with_compatibility::<RxJsonRpcMessage<RoleServer>>(line) {
                 Ok(Some(mut message)) => {
+                    // D47 / ub-cnv — the UN-DECODABLE-ENVELOPE-ID class.
+                    //
+                    // rmcp decodes into an UNTAGGED union (rmcp src/model.rs:575-588) tried
+                    // Request-first, and `JsonRpcRequest` requires `id: RequestId` (:431-436). So
+                    // ANY frame whose `id` member fails to decode falls through to the Notification
+                    // variant — where the server has no response obligation and we register no
+                    // notification handler — and EVAPORATES: no reply, no store effect, nothing on
+                    // stdout. A client that DID send an id waits forever (`Peer::send_request` uses
+                    // `no_options`, src/service.rs:442-447; the non-timeout await is bare,
+                    // :344-346; an id-less error is dropped, :1030-1036).
+                    //
+                    // A frame with NO `id` member is a genuine Notification and is EXPLICITLY out
+                    // of scope: it takes the `Absent` arm and behaves exactly as it did before D47.
+                    //
+                    // The match is EXHAUSTIVE on purpose (no `_` arm): an rmcp bump adding a fifth
+                    // `JsonRpcMessage` variant that could carry a stray id must be a COMPILE ERROR
+                    // here, not a silent hole.
+                    let is_notification = match &message {
+                        JsonRpcMessage::Notification(_) => true,
+                        JsonRpcMessage::Request(_)
+                        | JsonRpcMessage::Response(_)
+                        | JsonRpcMessage::Error(_) => false,
+                    };
+                    if is_notification {
+                        // The raw line is deliberately NOT logged at any level:
+                        // `try_parse_with_compatibility` already logs it on its own failure path,
+                        // and these frames never reach that path.
+                        match envelope_id::scan(line) {
+                            EnvelopeId::Absent => {}
+                            EnvelopeId::Recovered(id) => {
+                                tracing::debug!(
+                                    "un-decodable envelope id; answering -32600 on the recovered id"
+                                );
+                                Self::answer_error(&self.write, 
+                                    ErrorData::invalid_request(INVALID_REQUEST_ID_MESSAGE, None),
+                                    Some(id),
+                                )
+                                .await?;
+                                continue; // ANSWER AND DROP — never delivered.
+                            }
+                            EnvelopeId::Unusable => {
+                                tracing::debug!(
+                                    "un-decodable envelope id, unrecoverable; answering -32600 with the id omitted"
+                                );
+                                Self::answer_error(&self.write, 
+                                    ErrorData::invalid_request(INVALID_REQUEST_ID_MESSAGE, None),
+                                    None,
+                                )
+                                .await?;
+                                continue;
+                            }
+                        }
+                    }
                     message.insert_extension(verdict);
                     return Some(message);
                 }
@@ -212,15 +349,8 @@ where
                 Ok(None) => {}
                 Err(e) => {
                     tracing::debug!("Parse error on incoming message: {e}");
-                    let mut guard = self.write.lock().await;
-                    let writer = guard.as_mut()?;
-                    let response = TxJsonRpcMessage::<RoleServer>::error(
-                        ErrorData::parse_error("Parse error", None),
-                        None,
-                    );
-                    if write_frame(writer, response).await.is_err() {
-                        return None;
-                    }
+                    Self::answer_error(&self.write, ErrorData::parse_error("Parse error", None), None)
+                        .await?;
                     // Recover: loop to the next line. This deliberately does NOT return.
                 }
             }
