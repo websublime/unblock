@@ -221,6 +221,42 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   contract always promised. Everything else it changes was accepted and silently mishandled (a
   `labels_remove` that removed nothing, a `labels_set` that only ever added, a real label change that never
   stamped `updated_at`) and now does what it says. So it files with the bug fixes, not with those breaks.
+- **An un-decodable envelope `id` gets NO response at all** (P1, tracker `ub-cnv`, PRD section 4 **D47**) — the
+  residual D43 clause (6) scoped out, now closed in the same cut, and minting its own D-id because it is a
+  DIFFERENT class from the duplicate-key one and because it REVERSES a shipped clause (`docs/PROCESS.md` section 3).
+  rmcp decodes a JSON-RPC frame through an untagged union that tries `Request` first; `JsonRpcRequest`
+  requires an `id` that deserializes as a number-or-string, and `JsonRpcNotification` has no `id` field at
+  all — so ANY frame whose `id` fails to decode falls through to the Notification variant, carries no response
+  obligation, and evaporates. Duplication is the MINORITY route: a duplicated id (equal or differing), a
+  `null`, an object, an array, a boolean, `1e2`, `100.0`, `2^63` and the key spelled "\u0069d" all
+  reach the same silence — while the SAME number written `100`, and `i64::MAX`, are answered normally. A client
+  that sent an id is by JSON-RPC's own definition not treating the frame as a notification, so it waits; rmcp's
+  own client waits with an UNTIMED await and DISCARDS an error carrying no id, so only a reply on the
+  RECOVERED id releases it. **D47 answers out-of-band `-32600 Invalid Request` on that recovered id** — one
+  valid id, or several all EQUAL — falling back to the id omitted when the bytes are ambiguous (two different
+  ids) or the value is no representable request id — and that fallback is disclosed rather than glossed: with
+  rmcp 1.7 the RECOVERED arm is reached only by repeated EQUAL ids (a SINGLE well-formed id can never reach the
+  notification variant, because `CustomRequest` and `CustomNotification` deserialize through the identical body
+  and Request is tried first), so every other shape gets a DIAGNOSTIC that an rmcp client discards rather than a
+  release. Then it **DROPS** the frame instead of delivering it,
+  which also removes a fatality nobody had connected to this defect: the same frame sent BEFORE `initialize`
+  terminated the server with `ExpectedInitializeRequest` and exit 1. A frame with NO `id` member is a genuine
+  notification and is explicitly OUT of scope — it keeps behaving exactly as today. **`unblock-mcp` (L7)
+  is the only crate that gains code**; `unblock-cli` gains wire tests only. It mints **no `ErrorCode`**
+  (`-32600` is rmcp's transport-level code, not our 36-member taxonomy), moves no published byte, and carries
+  **no `contract_version` bump and no `CONTRACT_HASH` re-pin** — `unblock.mcp.v1.9` stands. It withdraws no
+  ANSWER the GA release gave: every frame whose behaviour changes received no reply before. **It does remove one
+  EFFECT, deliberately and with the reason recorded:** a `notifications/cancelled` frame carrying an un-decodable
+  `id` is delivered today, and rmcp's serve loop cancels the matching in-flight request through it before any
+  handler runs (`src/service.rs:981-996`); answered-and-dropped, that cancellation no longer happens. Preserving
+  it would mean delivering the frame after answering it — the one shape measured to kill the server when it lands
+  in the `initialize` slot — so the effect is traded for removing that fatality. A conforming cancellation, which
+  carries no `id` member at all, is outside this class and is unaffected. **Three residuals stay OPEN and
+  are disclosed rather than claimed shut:** a duplicated `jsonrpc`/`method` still answers `-32700` with the id
+  OMITTED, so an rmcp client stays pending (scoped out by Miguel; tracked as `ub-788`); an **id-less** notification
+  before `initialize` still kills the server, which D47's class excludes by decision; and the CLI writes a
+  non-JSON-RPC structured-error blob onto STDOUT on that death, embedding a `Debug` rendering of
+  attacker-controlled bytes into the framing channel — a separate defect with its own issue.
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
   self-update promise is exercised, not just unit-asserted.
@@ -711,6 +747,10 @@ Notes:
   count is checkable against the matrix above rather than trusted (`unblock-model`, `unblock-error`,
   `unblock-storage`, `unblock-sync`, `unblock-config`, `unblock-engine`, `unblock-mcp`, `unblock-cli`), the
   column is **no longer sparse**, and that framing is retired here rather than restated.
+  **D47 (`ub-cnv`) moves NO cell:** `unblock-mcp` is already full, and D47 lands there alone — the transport's
+  un-decodable-`id` `-32600` arm, the new `src/envelope_id.rs` predicate, and the three-tier CD-7 harness —
+  with `unblock-cli` gaining wire tests only. It is the smallest-scoped decision in this slot and the only one
+  that touches a single crate.
 - **100% Rust, no Node:** the TUI adds **no npm/Node build stage** to `dist` and **no `ui` Cargo feature** —
   `cargo-deny` covers the whole tree and the binary gains no npm supply-chain surface. (The web dashboard's
   npm/Node ecosystem lives in the separate v2+ commercial PRO product — roadmap §7 — not the OSS tree.)

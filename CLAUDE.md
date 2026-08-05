@@ -14,7 +14,7 @@ codes are stable, a breaking change → 2.0.0. (Original source for reference on
 
 | Doc | Role |
 |---|---|
-| `docs/PRD.md` | Product truth — decisions (§4 D1..D46), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
+| `docs/PRD.md` | Product truth — decisions (§4 D1..D47), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
 | **unblock (MCP)** — tracker | **System of record for tasks** (dogfooded) — next-ready/status/deps live here, not in a doc. Git record: `.unblock/issues.jsonl`; wiring + tool surface: `.mcp.json` / `AGENTS.md` / `unblock://capabilities`. |
