@@ -1,6 +1,6 @@
 //! `unblock-mcp` (L7) — the PRIMARY product surface: an `rmcp` stdio MCP server (`unblock mcp`)
 //! exposing the engine as the consolidated 8-tool taxonomy + resources + prompts,
-//! duplicate-key-scanned at the transport before parse (D43), quota-checked and strictly deserialized at the boundary
+//! duplicate-key-scanned at the transport before parse (D43) — that same transport answers an un-decodable-`id` frame `-32600` on the recovered id and DROPS it (D47) — quota-checked and strictly deserialized at the boundary
 //! under quotas (NFR-18), discoverable via a `contract_version`-stamped bundle (FR-12), every error
 //! mapped to the structured boundary (FR-11). A thin adapter over `Session` (no write orchestration).
 //! See `docs/plans/crates/unblock-mcp.md`.
@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod envelope_id;
 mod error;
 mod options;
 mod prompts;
@@ -39,6 +40,14 @@ mod wire;
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub mod duplicate_key_corpus;
+
+// The D47 un-decodable-envelope-id frame corpus, declared ONCE and consumed by this crate's OWN
+// in-module cells, its duplex suite, and `unblock-cli`'s raw-stdio suite. `any(test, ...)` and not
+// `test-util` alone: the in-lib cells must see it in every build that compiles them, and a silently
+// non-compiled cell is a vacuous pass.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub mod envelope_id_corpus;
 
 pub use error::McpServerError;
 pub use options::{CONTRACT_HASH, CONTRACT_VERSION, McpServerOptions, Quotas};
