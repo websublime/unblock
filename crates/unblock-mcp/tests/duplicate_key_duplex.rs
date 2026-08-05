@@ -24,25 +24,6 @@ use unblock_mcp::duplicate_key_corpus::{
     CELLS, FlipCell, covered_tools, instantiate, parses_as_tool_input, raw_tools_call,
 };
 
-/// Create an issue and return its minted id.
-async fn create_issue(client: &mut common::RawDuplexClient, title: &str) -> String {
-    let response = client
-        .call_tool(
-            "issue",
-            serde_json::json!({"action":"create","title":title}),
-        )
-        .await;
-    let result = &response["result"];
-    assert_ne!(
-        result["isError"], true,
-        "fixture create must succeed: {response}"
-    );
-    result["structuredContent"]["id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("minted id in {response}"))
-        .to_string()
-}
-
 /// The D43 in-band contract on a rejected frame.
 fn assert_in_band_duplicate_key(response: &Value, cell: &str, key: &str, pointer: &str) {
     assert!(
@@ -79,36 +60,6 @@ fn assert_in_band_duplicate_key(response: &Value, cell: &str, key: &str, pointer
     );
 }
 
-/// A comparable fingerprint of everything the corpus could plausibly disturb.
-///
-/// THE EFFECT ORACLE (§4.7): without it, a fix that rejects *after* mutating passes the whole
-/// matrix — and mutating first is exactly the live harm.
-async fn store_fingerprint(client: &mut common::RawDuplexClient, ids: &[String]) -> Value {
-    let mut out = serde_json::Map::new();
-    for id in ids {
-        let shown = client
-            .call_tool("issue", serde_json::json!({"action":"show","id":id}))
-            .await;
-        out.insert(format!("issue:{id}"), shown["result"].clone());
-        let comments = client
-            .call_tool(
-                "comment",
-                serde_json::json!({"action":"list","issue_id":id}),
-            )
-            .await;
-        out.insert(format!("comments:{id}"), comments["result"].clone());
-        let deps = client
-            .call_tool("dep", serde_json::json!({"action":"list","id":id}))
-            .await;
-        out.insert(format!("deps:{id}"), deps["result"].clone());
-    }
-    let count = client
-        .call_tool("query", serde_json::json!({"kind":"count"}))
-        .await;
-    out.insert("count".to_string(), count["result"].clone());
-    Value::Object(out)
-}
-
 /// **Row 6.3 + the effect oracle.** Every corpus cell, over the live scanning transport.
 #[tokio::test]
 async fn every_corpus_cell_is_rejected_in_band_with_zero_effect() {
@@ -117,11 +68,11 @@ async fn every_corpus_cell_is_rejected_in_band_with_zero_effect() {
         common::connect_raw(session, unblock_mcp::Quotas::default()).await;
 
     for cell in CELLS {
-        let first = create_issue(&mut client, &format!("{} target A", cell.id)).await;
-        let second = create_issue(&mut client, &format!("{} target B", cell.id)).await;
+        let first = common::create_issue(&mut client, &format!("{} target A", cell.id)).await;
+        let second = common::create_issue(&mut client, &format!("{} target B", cell.id)).await;
         let ids = [first.clone(), second.clone()];
 
-        let before = store_fingerprint(&mut client, &ids).await;
+        let before = common::store_fingerprint(&mut client, &ids).await;
 
         let id = client.next_request_id();
         let arguments = instantiate(cell.arguments_text, &first, &second);
@@ -146,7 +97,7 @@ async fn every_corpus_cell_is_rejected_in_band_with_zero_effect() {
 
         assert_in_band_duplicate_key(&response, cell.id, cell.duplicated_key, cell.pointer);
 
-        let after = store_fingerprint(&mut client, &ids).await;
+        let after = common::store_fingerprint(&mut client, &ids).await;
         assert_eq!(
             before, after,
             "{}: THE STORE CHANGED. A fix that rejects AFTER mutating passes every channel \
@@ -166,7 +117,7 @@ async fn the_verdict_is_per_frame_not_sticky() {
     let session = common::session().await;
     let (mut client, server, cancel) =
         common::connect_raw(session, unblock_mcp::Quotas::default()).await;
-    let target = create_issue(&mut client, "sequence target").await;
+    let target = common::create_issue(&mut client, "sequence target").await;
 
     // (1) a duplicate-key call — rejected.
     let id1 = client.next_request_id();
@@ -220,7 +171,7 @@ async fn n4_a_duplicate_inside_meta_is_rejected_in_band() {
     let session = common::session().await;
     let (mut client, server, cancel) =
         common::connect_raw(session, unblock_mcp::Quotas::default()).await;
-    let target = create_issue(&mut client, "meta target").await;
+    let target = common::create_issue(&mut client, "meta target").await;
 
     let id = client.next_request_id();
     let frame = format!(
@@ -244,7 +195,7 @@ async fn ns5_a_duplicate_outside_params_is_not_flagged() {
     let session = common::session().await;
     let (mut client, server, cancel) =
         common::connect_raw(session, unblock_mcp::Quotas::default()).await;
-    let target = create_issue(&mut client, "outside target").await;
+    let target = common::create_issue(&mut client, "outside target").await;
 
     let id = client.next_request_id();
     let frame = format!(

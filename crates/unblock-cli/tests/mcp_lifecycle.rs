@@ -441,6 +441,172 @@ fn a_no_signal_run_loop_error_exits_1_and_never_hangs() {
 }
 
 // ------------------------------------------------------------------------------------------------
+// [v1.0.1/D47] — an un-decodable envelope `id` BEFORE `initialize` no longer kills the server.
+//
+// This is the half of the defect nobody had connected to it. rmcp's `serve_server_with_ct_inner`
+// loops on `expect_next_message`, whose `other =>` arm returns `ExpectedInitializeRequest` for ANY
+// non-Request message — a Notification included. So a class frame DELIVERED in the initialize slot
+// terminated the server with exit 1, while the same frame ANSWERED-AND-DROPPED is never handed to
+// rmcp at all and the connection stays parked waiting for a real `initialize`.
+//
+// OBSERVATION CHANNEL: `client.seen_lines`, NOT `stdout_snapshot()`. `capture_stdout()` CONSUMES
+// the stdout reader and `read_response` panics once it is gone, so it cannot be called before the
+// `ping_barrier()`/`initialize()` these cells must perform. Written like the sibling D38 cell
+// above — which calls `capture_stdout()` immediately and reads nothing — every line of interest
+// would instead be consumed into `seen_lines` while `stdout_snapshot()` came back EMPTY, and the
+// two negatives below would then pass over an empty collection while proving nothing. Hence the
+// non-emptiness guard that opens each of them.
+// ------------------------------------------------------------------------------------------------
+
+/// **L-P1** — a class frame before `initialize` no longer kills the server, and stdout stays clean.
+///
+/// The negatives are the entire pin on the requirement that the pre-handshake fatal variant is
+/// gone: no `INTERNAL_ERROR`, and no line carrying the `StructuredError` shape (`code`/`retryable`
+/// at the top level) which is NOT JSON-RPC framing and has no business on this channel.
+///
+/// Mutant: answer-AND-deliver (`continue` replaced by `return Some(message)`), which restores
+/// exactly the `ExpectedInitializeRequest` death this cell exists to prove is gone.
+#[test]
+fn a_class_frame_before_initialize_no_longer_kills_the_server() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    // BEFORE the handshake: a duplicated envelope id with EQUAL values.
+    client.write_raw_line(r#"{"jsonrpc":"2.0","id":90001,"id":90001,"method":"ping","params":{}}"#);
+    // The server must still be parked awaiting `initialize` — and must still answer a ping.
+    client.ping_barrier();
+    client.initialize();
+    client.close_stdin();
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a class frame before `initialize` must NOT kill the server (it did before D47: exit 1 \
+         with ExpectedInitializeRequest). Child stderr:\n{}",
+        client.stderr_snapshot()
+    );
+
+    // NON-EMPTINESS FIRST: a negative quantified over an empty collection proves nothing.
+    assert!(
+        !client.seen_lines.is_empty(),
+        "nothing was observed on stdout at all — the negatives below would be vacuous"
+    );
+    for line in &client.seen_lines {
+        let parsed: Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("every stdout line must be JSON: `{line}`: {e}"));
+        assert!(
+            parsed.get("jsonrpc").is_some(),
+            "every stdout line must be JSON-RPC framing (NFR-14): {line}"
+        );
+        assert!(
+            parsed.get("code").is_none() && parsed.get("retryable").is_none(),
+            "a StructuredError blob must never reach the JSON-RPC framing channel: {line}"
+        );
+        assert!(
+            !line.contains("INTERNAL_ERROR"),
+            "the pre-handshake death is gone, so nothing may report it: {line}"
+        );
+    }
+    assert!(
+        client.seen_lines.iter().any(|l| l.contains("-32600")),
+        "and the class frame must itself have been ANSWERED: {:?}",
+        client.seen_lines
+    );
+}
+
+/// **L-P2** — the pre-handshake answer carries the RECOVERED id.
+///
+/// Mutant: passing `None` instead of `Some(id)` on the recovered arm.
+#[test]
+fn the_pre_handshake_answer_carries_the_recovered_id() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    client.write_raw_line(r#"{"jsonrpc":"2.0","id":90001,"id":90001,"method":"ping","params":{}}"#);
+    client.ping_barrier();
+    client.initialize();
+    client.close_stdin();
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(status.code(), Some(0));
+
+    assert!(
+        !client.seen_lines.is_empty(),
+        "nothing was observed on stdout at all — the assertion below would be vacuous"
+    );
+    let answer = client
+        .seen_lines
+        .iter()
+        .find(|l| l.contains("-32600"))
+        .unwrap_or_else(|| panic!("no -32600 was emitted: {:?}", client.seen_lines));
+    let parsed: Value = serde_json::from_str(answer).expect("the answer is JSON");
+    assert_eq!(
+        parsed["id"], 90001,
+        "the answer must ride the RECOVERED id — an id-less error is DROPPED by an rmcp client, \
+         so only this spelling actually releases a waiting peer: {parsed}"
+    );
+}
+
+/// **L-N1** — the control: a clean pre-`initialize` request still works, exactly as before D47.
+///
+/// Mutant: re-keying the predicate onto the `Request` variant, which would answer the barrier ping.
+#[test]
+fn a_clean_pre_initialize_request_still_works() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    client.ping_barrier();
+    client.initialize();
+    client.close_stdin();
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "today's behaviour, which D47 must not move. Child stderr:\n{}",
+        client.stderr_snapshot()
+    );
+}
+
+/// **L-N2** — an id-LESS notification before `initialize` STILL exits 1.
+///
+/// **This pins a KNOWN DEFECT that D47 deliberately does NOT fix.** D47's class requires the raw
+/// bytes to carry a top-level `id`; a frame with no `id` member is a genuine JSON-RPC Notification
+/// and is excluded BY DECISION, so this fatality survives and needs its own issue. It is upstream
+/// rmcp behaviour (`expect_next_message`'s `other =>` arm).
+///
+/// It is PARTLY REDUNDANT with `a_no_signal_run_loop_error_exits_1_and_never_hangs` above, and that
+/// is exactly the point: that D38-era cell provokes its `Err` with THIS VERY FRAME. Under a mutant
+/// that swallowed no-id frames, that cell would stop receiving its `Err`, the child would never
+/// exit, and it would fail on its 20-second wait for a reason having nothing to do with D38 —
+/// whereupon the natural "fix" is to weaken it. This cell makes the coupling explicit instead of
+/// latent.
+///
+/// Mutant: deleting the `Absent => {}` arm.
+#[test]
+fn an_id_less_notification_before_initialize_still_exits_1() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    client.notify("notifications/initialized", &json!({}));
+    client.capture_stdout();
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "an id-LESS notification before `initialize` is OUT of the D47 class by decision, so this \
+         fatality is unchanged. Child stderr:\n{}",
+        client.stderr_snapshot()
+    );
+    assert!(
+        client.stdout_snapshot().contains("INTERNAL_ERROR"),
+        "and it still surfaces as INTERNAL_ERROR: {}",
+        client.stdout_snapshot()
+    );
+}
+
+// ------------------------------------------------------------------------------------------------
 // T3.2.1 follow-up (b) / D40 — the unsignalled pre-`initialize` client disconnect exits 0.
 // ------------------------------------------------------------------------------------------------
 
