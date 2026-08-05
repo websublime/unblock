@@ -233,7 +233,7 @@ mod tests {
     }
 
     fn num(n: i64) -> EnvelopeId {
-        EnvelopeId::Recovered(RequestId::Number(n.try_into().expect("test id fits u32")))
+        EnvelopeId::Recovered(RequestId::Number(n))
     }
 
     fn text(s: &str) -> EnvelopeId {
