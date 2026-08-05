@@ -320,7 +320,8 @@ where
                                 tracing::debug!(
                                     "un-decodable envelope id; answering -32600 on the recovered id"
                                 );
-                                Self::answer_error(&self.write, 
+                                Self::answer_error(
+                                    &self.write,
                                     ErrorData::invalid_request(INVALID_REQUEST_ID_MESSAGE, None),
                                     Some(id),
                                 )
@@ -331,7 +332,8 @@ where
                                 tracing::debug!(
                                     "un-decodable envelope id, unrecoverable; answering -32600 with the id omitted"
                                 );
-                                Self::answer_error(&self.write, 
+                                Self::answer_error(
+                                    &self.write,
                                     ErrorData::invalid_request(INVALID_REQUEST_ID_MESSAGE, None),
                                     None,
                                 )
@@ -349,8 +351,12 @@ where
                 Ok(None) => {}
                 Err(e) => {
                     tracing::debug!("Parse error on incoming message: {e}");
-                    Self::answer_error(&self.write, ErrorData::parse_error("Parse error", None), None)
-                        .await?;
+                    Self::answer_error(
+                        &self.write,
+                        ErrorData::parse_error("Parse error", None),
+                        None,
+                    )
+                    .await?;
                     // Recover: loop to the next line. This deliberately does NOT return.
                 }
             }
@@ -479,7 +485,8 @@ fn try_parse_with_compatibility<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::{DupScanningTransport, ParamsScan};
-    use rmcp::model::{GetExtensions, JsonRpcMessage};
+    use crate::envelope_id_corpus::{Expect, divergence_corpus, expected_bytes};
+    use rmcp::model::{GetExtensions, JsonRpcMessage, RequestId};
     use rmcp::service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
     use rmcp::transport::Transport;
     use rmcp::transport::async_rw::AsyncRwTransport;
@@ -507,42 +514,49 @@ mod tests {
     /// Each entry is a raw line written to the transport's read half. It deliberately includes the
     /// shapes whose handling is invisible to any test that goes through an rmcp CLIENT: a client
     /// serializes an already-deduplicated object and structurally cannot emit a duplicate key.
-    fn framing_corpus() -> Vec<Vec<u8>> {
-        let mut corpus: Vec<Vec<u8>> = Vec::new();
+    fn framing_corpus() -> Vec<(&'static str, Vec<u8>)> {
+        let mut corpus: Vec<(&'static str, Vec<u8>)> = Vec::new();
         // F1 — BOM-prefixed CLEAN frame.
         let mut bom_clean = b"\xEF\xBB\xBF".to_vec();
         bom_clean.extend_from_slice(br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#);
-        corpus.push(bom_clean);
+        corpus.push(("F1", bom_clean));
         // F2 — CRLF-terminated clean frame (the terminator is added by the writer below).
-        corpus.push(br#"{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}"#.to_vec());
+        corpus.push((
+            "F2",
+            br#"{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}"#.to_vec(),
+        ));
         // F3 — BOM-prefixed DUPLICATE frame.
         let mut bom_dup = b"\xEF\xBB\xBF".to_vec();
         bom_dup.extend_from_slice(
             br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"issue","arguments":{"action":"create","action":"delete"}}}"#,
         );
-        corpus.push(bom_dup);
+        corpus.push(("F3", bom_dup));
         // F4 — a padded duplicate whose second occurrence sits past the pad.
         let pad = "x".repeat(100 * 1024);
-        corpus.push(
+        corpus.push((
+            "F4",
             format!(
                 r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"issue","arguments":{{"pad":"{pad}","action":"create","action":"delete"}}}}}}"#
             )
             .into_bytes(),
-        );
+        ));
         // F5 — a blank line (skipped, no message, no reply).
-        corpus.push(Vec::new());
+        corpus.push(("F5", Vec::new()));
         // F6 — a whitespace-only line: NOT empty, so it parses and fails => -32700 + recovery.
-        corpus.push(b"   ".to_vec());
+        corpus.push(("F6", b"   ".to_vec()));
         // F8 — an unknown notification with a WELL-FORMED `params` object. It does NOT reach the
         // compatibility filter: rmcp's catch-all `CustomNotification` types it, so the frame is
         // DELIVERED (and the filter only runs on a typed-parse failure).
-        corpus.push(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{}}"#.to_vec());
+        corpus.push((
+            "F8",
+            br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{}}"#.to_vec(),
+        ));
         // F12 — the same frame BOM-prefixed: delivered identically to F8, which is what pins the
         // BOM strip as happening before the typed parse.
         let mut bom_note = b"\xEF\xBB\xBF".to_vec();
         bom_note
             .extend_from_slice(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{}}"#);
-        corpus.push(bom_note);
+        corpus.push(("F12", bom_note));
         // -- the four entries that actually EXERCISE the forked compatibility filter --------------
         //
         // Each one FAILS the typed parse, which is the only way into the filter. Without them the
@@ -557,48 +571,117 @@ mod tests {
         //
         // F14 — an unknown notification whose `params` are a SCALAR: `CustomNotification` flattens
         // `_meta` out of `params` and so requires a map. Ignored, NOT -32700.
-        corpus.push(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":5}"#.to_vec());
+        corpus.push((
+            "F14",
+            br#"{"jsonrpc":"2.0","method":"notifications/foo","params":5}"#.to_vec(),
+        ));
         // F15 — LSP-style traffic (`$/cancelRequest`), same scalar `params`. Ignored ONLY by the
         // filter's first arm (no `id` + a non-standard method); its method does not start with
         // `notifications/`, so the second arm would let it through as a -32700.
-        corpus.push(br#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":5}"#.to_vec());
+        corpus.push((
+            "F15",
+            br#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":5}"#.to_vec(),
+        ));
         // F16 — the OVER-ignoring direction: a STANDARD notification with unusable `params` must
         // still be a -32700, not a silent drop. Both arms must decline it.
-        corpus.push(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":5}"#.to_vec());
+        corpus.push((
+            "F16",
+            br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":5}"#.to_vec(),
+        ));
         // F17 — ignored ONLY by the filter's SECOND arm: it carries an `id`, so the first arm
         // declines it (it is not a notification), and only the `notifications/*`-prefix arm can
         // ignore it. rmcp ignores it, so we must too. WITHOUT this entry arm 2 is dead code under
         // test — replacing its whole `matches!` with `false` leaves the suite green while the fork
         // silently answers -32700 to a frame rmcp drops.
-        corpus
-            .push(br#"{"jsonrpc":"2.0","id":17,"method":"notifications/foo","params":5}"#.to_vec());
+        //
+        // [v1.0.1/D47] This is ALSO the DELIBERATE PARITY DROP (D47's Decision 4): it carries an
+        // `id`, so a reader reasonably expects the D47 arm to answer it. It must NOT, and no
+        // carve-out exists for it — the exclusion is STRUCTURAL. `try_parse_with_compatibility`
+        // returns `Ok(None)` for this frame, so it never becomes a `message` at all, and a
+        // predicate keyed on a DELIVERED Notification cannot see it. It stays byte-silent because
+        // rmcp is byte-silent, which is the whole point of the fork.
+        corpus.push((
+            "F17",
+            br#"{"jsonrpc":"2.0","id":17,"method":"notifications/foo","params":5}"#.to_vec(),
+        ));
         // F9 — an unknown method WITH an id: delivered (the handler answers -32601).
-        corpus.push(br#"{"jsonrpc":"2.0","id":9,"method":"nope/nope","params":{}}"#.to_vec());
+        corpus.push((
+            "F9",
+            br#"{"jsonrpc":"2.0","id":9,"method":"nope/nope","params":{}}"#.to_vec(),
+        ));
         // F10 — non-UTF-8 bytes: -32700 + recovery.
-        corpus.push(vec![b'{', 0xff, 0xfe, b'}']);
+        corpus.push(("F10", vec![b'{', 0xff, 0xfe, b'}']));
         // F11 — depth-130 nesting: past serde_json's 128-level limit for BOTH parsers => -32700.
         let mut deep = String::from(r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":"#);
         deep.push_str(&"[".repeat(130));
         deep.push_str(&"]".repeat(130));
         deep.push('}');
-        corpus.push(deep.into_bytes());
-        // NS2 — a duplicated envelope `params` KEY: a hard -32700 for both parsers.
-        corpus.push(
+        corpus.push(("F11", deep.into_bytes()));
+        // NS2 — a duplicated envelope `params` KEY on a `tools/call`: a hard -32700 for both
+        // parsers. The outcome is METHOD-DEPENDENT and this entry pins only the `tools/call` half:
+        // the same duplication on `ping` — a request with no `params` at all — is a plain SUCCESS
+        // (PRD section 4 D47, spine section 5.6). This entry is graded ONLY by the whole-stream
+        // equality below, never on its own -32700; do not read it as a per-frame assertion.
+        corpus.push((
+            "NS2",
             br#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"issue"},"params":{"name":"claim"}}"#
                 .to_vec(),
-        );
+        ));
+        // -- [v1.0.1/D47] four NEVER-ANSWERED negatives ------------------------------------------
+        //
+        // These are PARITY entries: each must stay byte-identical to rmcp. They exist because the
+        // D47 arm's failure mode is OVER-firing, and the shipped corpus contains no frame that
+        // distinguishes "the predicate is correct" from "the predicate answers anything with an
+        // `id`-shaped thing near it".
+        //
+        // F18 — a NESTED `id`. The envelope id is a ROOT member by definition, so `params.id` is
+        // invisible: delivered, nothing written. Dies if the scan recurses instead of `IgnoredAny`.
+        corpus.push((
+            "F18",
+            br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{"id":1}}"#.to_vec(),
+        ));
+        // F19 — a WELL-FORMED id on a `notifications/*` method. This is already a `CustomRequest`
+        // today (the untagged union tries Request first), so it is delivered as a REQUEST and the
+        // D47 arm — keyed on the Notification variant — structurally cannot see it. Dies if the
+        // predicate is re-keyed onto `Request`.
+        corpus.push((
+            "F19",
+            br#"{"jsonrpc":"2.0","id":19,"method":"notifications/cancelled","params":{"requestId":1,"reason":"x"}}"#
+                .to_vec(),
+        ));
+        // F20 — a duplicated `method`. Still a `-32700` with the id OMITTED, on both transports:
+        // this pins that D47 did NOT close the disclosed residual (`ub-788`), and dies if the
+        // recovered-id logic is extended to the `Err` arm.
+        corpus.push((
+            "F20",
+            br#"{"jsonrpc":"2.0","id":20,"method":"tools/call","method":"ping","params":{}}"#
+                .to_vec(),
+        ));
+        // F21 — a string VALUE whose bytes SPELL an id member's key. The four-byte window `"id"`
+        // genuinely occurs on the wire here (it is the value `"id"`: `"`,`i`,`d`,`"`), while no `id`
+        // MEMBER exists at any depth. That is the only way a JSON document can contain those four
+        // bytes without containing an `id` member, and it is what kills a prefilter that trusts its
+        // POSITIVE. A value written `"\"id\":1"` would NOT work: JSON forbids a raw quote inside a
+        // string, so on the wire its bytes are escaped and the window never occurs.
+        corpus.push((
+            "F21",
+            br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{"s":"id"}}"#.to_vec(),
+        ));
         // A trailing UNTERMINATED line at EOF (F7) — the writer omits the final newline for the
         // LAST entry, so this one exercises it.
-        corpus.push(br#"{"jsonrpc":"2.0","id":7,"method":"ping","params":{}}"#.to_vec());
+        corpus.push((
+            "F7",
+            br#"{"jsonrpc":"2.0","id":7,"method":"ping","params":{}}"#.to_vec(),
+        ));
         corpus
     }
 
     /// Serialize the corpus into one byte stream: `\n` after every line except the last (F7), and
     /// CRLF after the second entry (F2).
-    fn corpus_bytes(corpus: &[Vec<u8>]) -> Vec<u8> {
+    fn corpus_bytes(corpus: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
         let mut out = Vec::new();
         let last = corpus.len() - 1;
-        for (index, line) in corpus.iter().enumerate() {
+        for (index, (_label, line)) in corpus.iter().enumerate() {
             out.extend_from_slice(line);
             if index == last {
                 continue; // F7: unterminated final line at EOF.
@@ -773,8 +856,19 @@ mod tests {
 
         // A request OUTSIDE the `notifications/` prefix is never filtered: the `id` makes the first
         // arm decline it and the prefix test makes the second decline it too, so it surfaces as
-        // -32700 rather than leaving the client waiting on a response that never comes. (F17 above
-        // is the deliberate exception rmcp itself defines, and only inside that prefix.)
+        // -32700 instead of vanishing. (F17 above is the deliberate exception rmcp itself defines,
+        // and only inside that prefix.)
+        //
+        // TWO THINGS THIS DOES NOT SAY, because an earlier wording claimed both and neither is true
+        // (PRD section 4, D47):
+        // 1. It does NOT say the client stops waiting. Our -32700 omits the id, exactly as rmcp
+        //    does, and an rmcp client DROPS an id-less error while awaiting untimed — so the reply
+        //    is a diagnostic on the connection, not a resolution of the pending request. That is a
+        //    DISCLOSED residual (D47 clause 8), deliberately left open and tracked as `ub-788`.
+        // 2. It is not a transport-wide invariant. A frame whose raw bytes carry a top-level `id`
+        //    that FAILS to decode never reaches this arm at all: rmcp's untagged union falls
+        //    through to the Notification variant. That class is answered -32600 on the recovered id
+        //    and dropped, by the arm D47 adds — not by anything here.
         assert!(
             parse(br#"{"jsonrpc":"2.0","id":1,"method":"nope/nope","params":5}"#).is_err(),
             "a request outside `notifications/*` must never be ignored — the client is waiting on \
@@ -789,6 +883,487 @@ mod tests {
         let mut out = Vec::new();
         let _ = reader.read_to_end(&mut out).await;
         out
+    }
+
+    // =============================================================================================
+    // [v1.0.1/D47] THE UN-DECODABLE-ENVELOPE-`id` CELLS
+    //
+    // Homed here and not in an integration suite for one reason: only the in-module harness owns
+    // the RAW WRITTEN STREAM and both transports. Neither integration harness can assert exact
+    // bytes — each parses every line to a `Value` before the caller sees it, which loses member
+    // ORDER and the presence-versus-null distinction, and those are exactly what these cells pin.
+    // =============================================================================================
+
+    /// Which tier one entry of the FULL corpus belongs to.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Tier {
+        /// Must stay byte-identical to `AsyncRwTransport`.
+        Parity,
+        /// Must DIVERGE from rmcp in exactly the declared way.
+        Divergence(Expect),
+    }
+
+    /// The parity tier and the divergence tier as ONE labelled list.
+    fn full_corpus() -> Vec<(String, Vec<u8>, Tier)> {
+        let mut all: Vec<(String, Vec<u8>, Tier)> = framing_corpus()
+            .into_iter()
+            .map(|(label, bytes)| (label.to_string(), bytes, Tier::Parity))
+            .collect();
+        all.extend(divergence_corpus().into_iter().map(|entry| {
+            (
+                entry.id.to_string(),
+                entry.frame,
+                Tier::Divergence(entry.expect),
+            )
+        }));
+        all
+    }
+
+    /// Run ONE frame through our transport; return `(received, written)`.
+    async fn run_ours(frame: &[u8]) -> (Vec<String>, Vec<u8>) {
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
+        let mut bytes = frame.to_vec();
+        bytes.push(b'\n');
+        in_w.write_all(&bytes).await.expect("write frame");
+        in_w.shutdown().await.expect("close writer");
+        let received = drain(DupScanningTransport::new(in_r, out_w)).await;
+        let written = read_to_end(&mut out_r).await;
+        (received, written)
+    }
+
+    /// Run ONE frame through rmcp's own transport; return `(received, written)`.
+    async fn run_rmcp(frame: &[u8]) -> (Vec<String>, Vec<u8>) {
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
+        let mut bytes = frame.to_vec();
+        bytes.push(b'\n');
+        in_w.write_all(&bytes).await.expect("write frame");
+        in_w.shutdown().await.expect("close writer");
+        let received = drain(AsyncRwTransport::new_server(in_r, out_w)).await;
+        let written = read_to_end(&mut out_r).await;
+        (received, written)
+    }
+
+    /// **W-D01..W-D23** — every divergence entry is answered BYTE FOR BYTE, and never delivered.
+    ///
+    /// The assertion is EXACT bytes, not "differs from rmcp": a mutant writing garbage satisfies
+    /// "differs" and cannot satisfy this. The per-entry id choice is the only thing that actually
+    /// pins the unambiguity rule.
+    ///
+    /// Mutants: the whole catalogue's byte-level half — `invalid_request` swapped for
+    /// `parse_error`; `Some(id)` replaced by `None` on the recovered arm; `None` replaced by any
+    /// id on the fallback arm; any edit to the message literal. **W-D23** additionally carries the
+    /// raw-span VALUE comparator, and **W-D22** the D43-suppresses-D47 precedence mutant.
+    #[tokio::test]
+    async fn the_divergence_corpus_is_answered_byte_for_byte() {
+        for entry in divergence_corpus() {
+            let (received, written) = run_ours(&entry.frame).await;
+            assert_eq!(
+                String::from_utf8_lossy(&written),
+                String::from_utf8_lossy(&expected_bytes(&entry.expect)),
+                "{} wrote the wrong bytes — {}",
+                entry.id,
+                entry.why
+            );
+            assert!(
+                received.is_empty(),
+                "{} must be ANSWERED AND DROPPED, never delivered — got {received:?}",
+                entry.id
+            );
+        }
+    }
+
+    /// **W-DROP** — an answered frame is never delivered, and exactly one reply is written per frame.
+    ///
+    /// Mutant: `continue` replaced by `return Some(message)` (answer AND deliver) — the shape that
+    /// kills the server in rmcp's initialize slot.
+    #[tokio::test]
+    async fn an_answered_frame_is_never_delivered() {
+        let corpus = divergence_corpus();
+        let pick = |id: &str| {
+            corpus
+                .iter()
+                .find(|f| f.id == id)
+                .unwrap_or_else(|| panic!("{id} missing"))
+        };
+
+        let mut bytes = Vec::new();
+        for id in ["D01", "D04", "D06"] {
+            bytes.extend_from_slice(&pick(id).frame);
+            bytes.push(b'\n');
+        }
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
+        in_w.write_all(&bytes).await.expect("write frames");
+        in_w.shutdown().await.expect("close writer");
+        let received = drain(DupScanningTransport::new(in_r, out_w)).await;
+        let written = read_to_end(&mut out_r).await;
+
+        assert!(received.is_empty(), "no class frame may be delivered");
+        let lines = written
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .count();
+        assert_eq!(
+            lines, 3,
+            "exactly ONE reply per frame, no more and no fewer"
+        );
+    }
+
+    /// **W-RECOVER** — the connection SURVIVES an answer and the next frame is delivered normally.
+    ///
+    /// Mutant: `continue` replaced by `return None` (close the connection after answering).
+    #[tokio::test]
+    async fn the_connection_survives_and_the_next_frame_is_delivered() {
+        let corpus = divergence_corpus();
+        let ambiguous = corpus.iter().find(|f| f.id == "D04").expect("D04 missing");
+
+        let mut bytes = ambiguous.frame.clone();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#);
+        bytes.push(b'\n');
+
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
+        in_w.write_all(&bytes).await.expect("write frames");
+        in_w.shutdown().await.expect("close writer");
+        let received = drain(DupScanningTransport::new(in_r, out_w)).await;
+        let written = read_to_end(&mut out_r).await;
+
+        assert_eq!(received.len(), 1, "the FOLLOWING frame must still arrive");
+        assert!(
+            received[0].contains(r#""method":"ping""#),
+            "the delivered frame must be the ping: {}",
+            received[0]
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&written),
+            String::from_utf8_lossy(&expected_bytes(&Expect::Omitted)),
+            "exactly ONE reply — the fallback — and nothing for the clean ping"
+        );
+    }
+
+    /// **W-N1** — a notification with NO `id` is DELIVERED and nothing is written.
+    ///
+    /// This is D47's explicit carve-out and a JSON-RPC requirement ("The Server MUST NOT reply to a
+    /// Notification"), so it is a false-POSITIVE guard rather than a coverage cell.
+    ///
+    /// Mutant: deleting the `Absent => {}` arm, so a genuine notification falls into a reply arm.
+    #[tokio::test]
+    async fn a_notification_with_no_id_is_delivered_and_nothing_is_written() {
+        let (received, written) =
+            run_ours(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{}}"#).await;
+        assert_eq!(
+            received.len(),
+            1,
+            "a genuine notification must be delivered"
+        );
+        assert!(written.is_empty(), "and must NOT be answered");
+    }
+
+    /// **W-N2** — a NESTED `id` does not make a notification answerable.
+    ///
+    /// Mutant: recursing into nested objects instead of consuming them with `IgnoredAny`.
+    #[tokio::test]
+    async fn a_nested_id_does_not_make_a_notification_answerable() {
+        let (received, written) =
+            run_ours(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{"id":1}}"#).await;
+        assert_eq!(received.len(), 1);
+        assert!(written.is_empty(), "`params.id` is not an ENVELOPE id");
+    }
+
+    /// **W-N2b** — a string VALUE that spells `"id"` is not an `id` MEMBER.
+    ///
+    /// The four-byte window `"id"` genuinely occurs in this frame's wire bytes while no `id` member
+    /// exists at any depth.
+    ///
+    /// Mutant: a window prefilter that trusts its POSITIVE (answer whenever the window occurs).
+    /// **It does NOT kill the prefilter that trusts its NEGATIVE**, and the difference matters: that
+    /// mutant is unsound only in the direction of MISSING the escaped key, which W-D14/W-D15 own.
+    #[tokio::test]
+    async fn an_id_shaped_string_value_is_not_an_id_member() {
+        let frame = br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{"s":"id"}}"#;
+        assert!(
+            frame.windows(4).any(|w| w == br#""id""#),
+            "non-vacuity: the four-byte window must really occur on the wire, or this cell grades \
+             nothing at all"
+        );
+        let (received, written) = run_ours(frame).await;
+        assert_eq!(received.len(), 1);
+        assert!(written.is_empty());
+    }
+
+    /// **W-N3** — the Decision-4 parity drop stays silent.
+    ///
+    /// F17 carries an `id`, so a reader expects the D47 arm to answer it. The exclusion is
+    /// STRUCTURAL rather than a carve-out: `try_parse_with_compatibility` returns `Ok(None)` for
+    /// this frame, so it never becomes a `message` and the predicate — keyed on a DELIVERED
+    /// Notification — cannot see it. rmcp drops it too, so the re-scoped acceptance criterion
+    /// ("no frame that rmcp itself would answer may go unanswered") is satisfied.
+    ///
+    /// Mutants: neutering the compat filter's second arm; moving the D47 branch ABOVE the parse so
+    /// it keys on raw bytes alone.
+    #[tokio::test]
+    async fn the_decision_4_parity_drop_stays_silent() {
+        let (received, written) =
+            run_ours(br#"{"jsonrpc":"2.0","id":17,"method":"notifications/foo","params":5}"#).await;
+        assert!(received.is_empty(), "F17 is never delivered");
+        assert!(
+            written.is_empty(),
+            "and never answered — rmcp answers nothing either"
+        );
+    }
+
+    /// **W-N4** — a clean request is untouched: delivered, `Clean`, nothing written.
+    ///
+    /// Mutants: re-keying the predicate onto the `Request` variant; moving the branch above the
+    /// parse.
+    #[tokio::test]
+    async fn a_clean_request_is_untouched() {
+        let (received, written) =
+            run_ours(br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#).await;
+        assert_eq!(received.len(), 1);
+        assert!(written.is_empty(), "request traffic must pay nothing");
+    }
+
+    /// **W-N5** — a D43 frame is not STOLEN by D47.
+    ///
+    /// The duplicate is inside `params.arguments` and the ROOT `id` is perfectly fine, so this
+    /// stays a D43 frame end to end: delivered, carrying its `Duplicate` verdict, unanswered.
+    ///
+    /// Mutant: re-keying the predicate onto `Request`, which would answer it and never deliver it —
+    /// silently disabling the whole D43 gate.
+    #[tokio::test]
+    async fn d43_frames_are_not_stolen_by_d47() {
+        let (received, written) = run_ours(
+            br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"issue","arguments":{"id":"a","id":"b"}}}"#,
+        )
+        .await;
+        assert_eq!(received.len(), 1, "a D43 frame must still be DELIVERED");
+        assert!(
+            written.is_empty(),
+            "and must NOT be answered by the D47 arm"
+        );
+
+        // And it must still carry its D43 verdict, which is what `call_tool` gates on.
+        let (mut in_w, in_r) = tokio::io::duplex(64 * 1024);
+        let (out_w, _out_r) = tokio::io::duplex(64 * 1024);
+        in_w.write_all(
+            br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"issue","arguments":{"id":"a","id":"b"}}}
+"#,
+        )
+        .await
+        .expect("write frame");
+        in_w.shutdown().await.expect("close writer");
+        let mut transport = DupScanningTransport::new(in_r, out_w);
+        let message = transport.receive().await.expect("delivered");
+        assert_eq!(
+            verdict_of(&message),
+            Some(ParamsScan::Duplicate {
+                key: "id".to_string(),
+                path: "/arguments".to_string()
+            }),
+            "the D43 verdict must survive untouched"
+        );
+    }
+
+    /// **W-R1** — the DISCLOSED residual: the `-32700` arm still omits a readable id.
+    ///
+    /// A duplicated `method` hard-fails the parse, so it never reaches the D47 arm at all. The
+    /// reply carries a diagnostic but no id, and an rmcp client DROPS an id-less error while
+    /// awaiting untimed — so that client stays pending.
+    ///
+    /// **This residual is OPEN by decision, not by oversight**, and is tracked as its own issue
+    /// `ub-788`. Closing it is a DELIBERATE future change that will turn this cell RED; that is the
+    /// cell working, not breaking. It exists so the residual stays a measured fact rather than
+    /// prose.
+    ///
+    /// Mutant: extending the recovered-id logic to the `Err` arm.
+    #[tokio::test]
+    async fn the_duplicated_method_residual_is_still_id_less() {
+        let (_received, written) =
+            run_ours(br#"{"jsonrpc":"2.0","id":6,"method":"ping","method":"ping","params":{}}"#)
+                .await;
+        assert_eq!(
+            String::from_utf8_lossy(&written),
+            "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}\n",
+            "the -32700 arm must be byte-unchanged by D47: code -32700, and NO id"
+        );
+    }
+
+    /// **W-G2** — the per-entry differential over the FULL corpus, both tiers.
+    ///
+    /// The whole-stream cell above keeps its own job (F2's CRLF, F5's blank line and F7's
+    /// unterminated final line are STREAM properties a per-entry harness destroys, which is why
+    /// that cell must not be deleted as redundant). This one grades each entry independently.
+    #[tokio::test]
+    async fn the_per_entry_differential_holds_for_both_tiers() {
+        for (label, frame, tier) in full_corpus() {
+            let (our_received, our_written) = run_ours(&frame).await;
+            let (rmcp_received, rmcp_written) = run_rmcp(&frame).await;
+            match tier {
+                Tier::Parity => {
+                    assert_eq!(
+                        our_received, rmcp_received,
+                        "{label}: the receive() sequence diverged from rmcp's"
+                    );
+                    assert_eq!(
+                        String::from_utf8_lossy(&our_written),
+                        String::from_utf8_lossy(&rmcp_written),
+                        "{label}: the bytes written diverged from rmcp's"
+                    );
+                }
+                Tier::Divergence(expect) => {
+                    assert!(
+                        rmcp_written.is_empty(),
+                        "{label}: rmcp must answer NOTHING — that IS the defect"
+                    );
+                    assert_eq!(
+                        rmcp_received.len(),
+                        1,
+                        "{label}: rmcp must DELIVER it as a notification — that IS the defect"
+                    );
+                    assert_eq!(
+                        String::from_utf8_lossy(&our_written),
+                        String::from_utf8_lossy(&expected_bytes(&expect)),
+                        "{label}: our reply bytes are wrong"
+                    );
+                    assert!(our_received.is_empty(), "{label}: we must answer AND DROP");
+                }
+            }
+        }
+    }
+
+    /// **W-G3** — the SET-EQUALITY / anti-drift guard. This is what replaces what a single
+    /// "identical bytes" assertion used to buy.
+    ///
+    /// Without it, an OVER-firing predicate that also answered the id-less F8/F12 would leave both
+    /// other tiers green: the parity tier would still match rmcp on the entries it did not touch,
+    /// and the divergence tier would still match its expected bytes.
+    ///
+    /// Mutant: re-keying the predicate onto `Request` (F1–F4/F9/F19 gain replies), or any rmcp bump
+    /// that migrates an entry between tiers.
+    #[tokio::test]
+    async fn the_diverging_entries_are_exactly_the_declared_ones() {
+        use std::collections::BTreeSet;
+
+        let mut observed: BTreeSet<String> = BTreeSet::new();
+        let mut declared: BTreeSet<String> = BTreeSet::new();
+        let mut all_our_written = String::new();
+
+        for (label, frame, tier) in full_corpus() {
+            if matches!(tier, Tier::Divergence(_)) {
+                declared.insert(label.clone());
+            }
+            let (our_received, our_written) = run_ours(&frame).await;
+            let (rmcp_received, rmcp_written) = run_rmcp(&frame).await;
+            all_our_written.push_str(&String::from_utf8_lossy(&our_written));
+            if our_written != rmcp_written || our_received != rmcp_received {
+                observed.insert(label);
+            }
+        }
+
+        assert_eq!(
+            observed, declared,
+            "the stream positions where we diverge from rmcp must be EXACTLY the declared \
+             divergence tier — an entry in `observed` only is an over-firing predicate, an entry \
+             in `declared` only is a fix that stopped working"
+        );
+        assert!(
+            !declared.is_empty(),
+            "a corpus with no declared divergence would make this guard vacuous"
+        );
+
+        // The RATIFIED fallback spelling, pinned over the whole DIVERGENCE stream. This is a
+        // SECOND, WIDER copy of the guard the shipped CD-7 cell carries — not a migration of it.
+        // That one pins the -32700 arm's own omission and stays where it is; this one covers the
+        // arm D47 adds, which the shipped guard never sees.
+        assert!(
+            !all_our_written.contains("\"id\":null"),
+            "D47's fallback spells the missing id by OMISSION: rmcp's JsonRpcError.id is \
+             Option<RequestId> with skip_serializing_if = \"Option::is_none\" (model.rs:462-470), \
+             so a literal null is not reachable through the codec. If the decision is ever revised \
+             to a literal null (a deliberate codec bypass), THIS is the assertion to change."
+        );
+    }
+
+    /// **W-G4** — divergence-kind coverage as a SET, never a count.
+    ///
+    /// A count would rot; a set cannot be off-by-one against itself. Its "site" is the CORPUS, not
+    /// a production site: the mutation it grades is a corpus EDIT that silently drops one half of
+    /// the recovery rule (e.g. deleting every string-id entry).
+    #[test]
+    fn every_divergence_kind_is_represented() {
+        use crate::envelope_id_corpus::ExpectKind;
+        use std::collections::BTreeSet;
+
+        let present: BTreeSet<ExpectKind> = divergence_corpus()
+            .iter()
+            .map(|f| f.expect.kind())
+            .collect();
+        let required: BTreeSet<ExpectKind> = [
+            ExpectKind::RecoveredNum,
+            ExpectKind::RecoveredStr,
+            ExpectKind::Omitted,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            present, required,
+            "the corpus must exercise all three reply shapes"
+        );
+    }
+
+    /// **W-G5** — corpus non-vacuity: every entry really carries what its `why` claims.
+    ///
+    /// The failure this guards is the one this repo has paid for: someone "tidies" a frame into a
+    /// well-formed one and the cell keeps passing while grading nothing.
+    #[test]
+    fn the_divergence_corpus_is_not_vacuous() {
+        for entry in divergence_corpus() {
+            let text = String::from_utf8_lossy(&entry.frame);
+
+            // Every entry must be a frame our predicate can even see: the raw bytes must carry a
+            // root `id` member in SOME spelling.
+            assert!(
+                text.contains(r#""id":"#) || text.contains(r#"d":"#),
+                "{}: no `id` member in the frame text at all",
+                entry.id
+            );
+
+            // The wrong-TYPE entries must really parse to a value rmcp's RequestId rejects.
+            if entry.id.starts_with('D') && matches!(entry.expect, Expect::Omitted) {
+                let parsed: Result<serde_json::Value, _> = serde_json::from_slice(&entry.frame);
+                if let Ok(serde_json::Value::Object(map)) = parsed
+                    && let Some(id) = map.get("id")
+                {
+                    use serde::Deserialize as _;
+                    assert!(
+                        RequestId::deserialize(id.clone()).is_err()
+                            || entry.id == "D04"
+                            || entry.id == "D05",
+                        "{}: claims to be unusable, but its (last-wins) id decodes fine",
+                        entry.id
+                    );
+                }
+            }
+
+            // D23 SPECIFICALLY: the two occurrences must NOT be byte-identical while their decoded
+            // values ARE equal. Without this guard, "tidying" the escape away degenerates the one
+            // cell that kills a raw-span VALUE comparator into a duplicate of D02.
+            if entry.id == "D23" {
+                assert!(
+                    !text.contains(r#""id":"a","id":"a""#),
+                    "D23's occurrences must differ BYTEWISE, or it stops grading anything"
+                );
+                assert_eq!(
+                    text.matches(r#""id":"#).count(),
+                    2,
+                    "D23 must carry exactly two plain `id` keys"
+                );
+            }
+        }
     }
 
     /// The verdict is stamped PER FRAME, in order, on one connection — a transport that reused or

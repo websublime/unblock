@@ -53,6 +53,7 @@ pub enum ExpectKind {
 
 impl Expect {
     /// The kind of this expectation, for set-coverage assertions.
+    #[must_use]
     pub fn kind(&self) -> ExpectKind {
         match self {
             Self::RecoveredNum(_) => ExpectKind::RecoveredNum,
@@ -83,10 +84,13 @@ const MESSAGE: &str =
 /// One helper so that a future decision to respell the fallback is one edit rather than
 /// twenty-three. The member order is rmcp's struct field order (`jsonrpc`, `id`, `error`, then
 /// `code`, `message`, `data` — the last skipped because `data` is `None`).
+#[must_use]
 pub fn expected_bytes(expect: &Expect) -> Vec<u8> {
     let body = match expect {
         Expect::RecoveredNum(n) => {
-            format!(r#"{{"jsonrpc":"2.0","id":{n},"error":{{"code":-32600,"message":"{MESSAGE}"}}}}"#)
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{n},"error":{{"code":-32600,"message":"{MESSAGE}"}}}}"#
+            )
         }
         Expect::RecoveredStr(s) => format!(
             r#"{{"jsonrpc":"2.0","id":"{s}","error":{{"code":-32600,"message":"{MESSAGE}"}}}}"#
@@ -114,6 +118,12 @@ pub const ISSUE_ID_PLACEHOLDER: &str = "{ID}";
 ///
 /// Every entry was confirmed SILENT against the shipped binary before the fix landed — a cell whose
 /// "before" was already answered proves nothing.
+///
+/// The length is a consequence of the corpus being DATA: each entry is one frame plus the one line
+/// saying what it pins that nothing else does. Splitting it into arbitrary halves would hide the
+/// enumeration this cell exists to make readable.
+#[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn divergence_corpus() -> Vec<Frame> {
     let mut corpus = Vec::new();
 
@@ -217,7 +227,8 @@ pub fn divergence_corpus() -> Vec<Frame> {
     );
     push(
         "D15",
-        br#"{"jsonrpc":"2.0","\u0069d":90015,"\u0069d":90015,"method":"ping","params":{}}"#.to_vec(),
+        br#"{"jsonrpc":"2.0","\u0069d":90015,"\u0069d":90015,"method":"ping","params":{}}"#
+            .to_vec(),
         Expect::RecoveredNum(90015),
         "DECODED keys, RECOVERY direction, with BOTH occurrences escaped on purpose: a MIXED \
          escaped/plain pair would leave a raw-span key comparator undetected, since it would still \
@@ -247,24 +258,28 @@ pub fn divergence_corpus() -> Vec<Frame> {
         Expect::RecoveredNum(90018),
         "the other standard notification carrier; unlike D17 it executes nothing either way",
     );
-    push("D19", {
-        let mut bytes = BOM.to_vec();
-        bytes.extend_from_slice(
-            br#"{"jsonrpc":"2.0","id":90019,"id":90019,"method":"ping","params":{}}"#,
-        );
-        bytes
-    },
+    push(
+        "D19",
+        {
+            let mut bytes = BOM.to_vec();
+            bytes.extend_from_slice(
+                br#"{"jsonrpc":"2.0","id":90019,"id":90019,"method":"ping","params":{}}"#,
+            );
+            bytes
+        },
         Expect::RecoveredNum(90019),
         "the scan strips exactly the ONE prefix BOM the parser strips — scanner and parser must see \
          the same document",
     );
-    push("D20", {
-        let pad = "x".repeat(100 * 1024);
-        format!(
+    push(
+        "D20",
+        {
+            let pad = "x".repeat(100 * 1024);
+            format!(
             r#"{{"jsonrpc":"2.0","id":90020,"pad":"{pad}","id":90020,"method":"ping","params":{{}}}}"#
         )
         .into_bytes()
-    },
+        },
         Expect::RecoveredNum(90020),
         "NO short-circuit and no prefix-bounded scan: the second occurrence sits 100 KiB past the \
          first, so an early-returning collector reports one occurrence and a truncated one reports \
