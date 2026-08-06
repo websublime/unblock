@@ -128,6 +128,9 @@ RECOVERED_ID_RE='Some\(id\),$'
 # P14   is the count-free LIST in PROCESS.md §3 naming this script. No sibling has this row and nothing
 #       else pins that line — which is precisely why the enumeration can rot silently, and this is the
 #       first cascade that would notice.
+# P15   is `ub-nbz`, the SECOND residual the PRD row names — the -32600 lost whenever rmcp cancels the
+#       receive() future. It mirrors P10 for the same reason and is a SEPARATE row rather than a widened
+#       one: a single row matching either id would go green with the other id dangling.
 # =================================================================================================
 REQUIRE="
 P1@crates/unblock-mcp/src/envelope_id.rs@pub\(crate\) fn scan@the D47 predicate module still exists and still exposes its scan entry point
@@ -142,6 +145,7 @@ P11@docs/roadmap.html@D47@the RENDERED roadmap lists D47 in its v1.0.1 card — 
 P12@docs/plans/ci-cd-and-distribution.md@d47-envelope-id-claims@this gate is SPECIFIED, not merely wired
 P13@.github/workflows/ci.yml@d47-envelope-id-claims@this gate actually RUNS in the required doc-lint job
 P14@docs/PROCESS.md@d47-envelope-id-claims@the count-free LIST that IS the rule names this script, so the enumeration cannot rot silently
+P15@.unblock/issues.jsonl@ub-nbz@the SECOND residual the PRD row names — the -32600 lost to a cancelled receive() — has a REAL issue, so that id does not dangle either
 "
 
 # =================================================================================================
@@ -253,13 +257,13 @@ check_table_floor() { # $1 label, $2 actual, $3 floor
 p_count="$(count_rows "$REQUIRE" '^P[0-9]')"
 q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 
-# The floors are 12 and 12, and the P floor is LOWER than the 14 rows this file was first written
-# with because P4/P5 were RE-ANCHORED into the Q table (header), not dropped: the total is 24 either
-# way. A floor may only move down together with the rows it counts moving somewhere the other floor
-# counts them — never because a rule became inconvenient.
-check_table_floor 'required-landing (P)' "$p_count" 12 || blocked=1
+# The floors are 13 and 12. The P floor is still LOWER than the highest P code in use because P4/P5
+# were RE-ANCHORED into the Q table (header) rather than dropped, and it rose by one when P15 pinned
+# the second residual id the PRD row names. A floor may only move down together with the rows it counts
+# moving somewhere the other floor counts them — never because a rule became inconvenient.
+check_table_floor 'required-landing (P)' "$p_count" 13 || blocked=1
 check_table_floor 'row-anchored (Q)' "$q_count" 12 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
-say "OK — the D47 predicate, its exhaustive-match guard, its decoded-key rule and its recovered-id arm are all still in the tree, the store-effect oracle and the disclosed -32700 residual are still pinned, the tracker names both ub-cnv and its ub-788 residual, the rendered roadmap lists the decision, this gate is both specified and wired, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates while the contract version stands unmoved."
+say "OK — the D47 predicate, its exhaustive-match guard, its decoded-key rule and its recovered-id arm are all still in the tree, the store-effect oracle and the disclosed -32700 residual are still pinned, the tracker names ub-cnv and both residual ids the PRD row cites (ub-788 and ub-nbz), the rendered roadmap lists the decision, this gate is both specified and wired, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates while the contract version stands unmoved."
 exit 0
