@@ -61,15 +61,18 @@
 //! DISCLOSED and deliberately left open (tracked as `ub-788`): the `-32700` arm omits a readable id
 //! unconditionally, so a duplicated `method`/`jsonrpc` frame still leaves an rmcp client pending.
 //!
-//! ALSO DISCLOSED and deliberately left open (tracked as `ub-TBD`): **the reply is written INSIDE
+//! ALSO DISCLOSED and deliberately left open (tracked as `ub-nbz`): **the reply is written INSIDE
 //! `receive()`, and rmcp polls `receive()` as one arm of an UNBIASED `tokio::select!`**
 //! (`src/service.rs:805`, the arm at `:813`) — so a poll that loses the race is DROPPED, taking with
 //! it the reply that had not yet been written AND the frame itself, since the loop clears
-//! `line_buf` at the top of the next iteration. Idle connection: never lost. Under concurrent
-//! request traffic: frequently (measured 25/40 with four requests in flight, 39/40 with eight).
-//! This is a property of the seam and NOT of D47 — the `-32700` arm below has the same shape and
-//! the same loss rate — and the pre-handshake case this arm exists for runs with nothing in flight,
-//! where nothing is lost. Closing it means moving the write off the cancellable path.
+//! `line_buf` at the top of the next iteration. Measured by the Verify gate's attack lens over a
+//! deterministic sentinel-follow, 40 repetitions per cell, from ONE harness and unreplicated:
+//! 0 of 40 lost with the connection idle, 25 of 40 with four requests in flight, 39 of 40 with
+//! eight. This is a property of the seam and NOT of D47 — the `-32700` arm below has the same
+//! write-inside-a-cancellable-future shape and the same harness measured main losing at the same
+//! rate (35 of 40 at eight) — and the pre-handshake case this arm exists for runs with nothing in
+//! flight, the regime measured at 0 of 40. Closing it means moving the write off the cancellable
+//! path.
 //!
 //! ONE EFFECT IS REMOVED, deliberately: a `notifications/cancelled` frame carrying an un-decodable
 //! `id` is DELIVERED today, and rmcp's serve loop cancels the matching in-flight request through it
