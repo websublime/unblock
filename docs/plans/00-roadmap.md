@@ -251,12 +251,16 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   handler runs (`src/service.rs:981-996`); answered-and-dropped, that cancellation no longer happens. Preserving
   it would mean delivering the frame after answering it — the one shape measured to kill the server when it lands
   in the `initialize` slot — so the effect is traded for removing that fatality. A conforming cancellation, which
-  carries no `id` member at all, is outside this class and is unaffected. **Three residuals stay OPEN and
+  carries no `id` member at all, is outside this class and is unaffected. **Residuals stay OPEN and
   are disclosed rather than claimed shut:** a duplicated `jsonrpc`/`method` still answers `-32700` with the id
   OMITTED, so an rmcp client stays pending (scoped out by Miguel; tracked as `ub-788`); an **id-less** notification
-  before `initialize` still kills the server, which D47's class excludes by decision; and the CLI writes a
+  before `initialize` still kills the server, which D47's class excludes by decision; the CLI writes a
   non-JSON-RPC structured-error blob onto STDOUT on that death, embedding a `Debug` rendering of
-  attacker-controlled bytes into the framing channel — a separate defect with its own issue.
+  attacker-controlled bytes into the framing channel — a separate defect with its own issue; and the `-32600`
+  itself is LOST whenever rmcp cancels the `receive()` future, since the reply is written inside that future and
+  rmcp polls it as one arm of an unbiased `select!` — measured from one unreplicated harness at 0 of 40 with the
+  connection idle, 25 of 40 with four requests in flight and 39 of 40 with eight, a pre-existing property of the
+  seam that the shipped `-32700` arm shares (scoped out by Miguel; tracked as `ub-nbz`).
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
   self-update promise is exercised, not just unit-asserted.
