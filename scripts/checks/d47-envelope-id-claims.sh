@@ -41,6 +41,15 @@
 #   Q-n   ROW-ANCHORED landing — at least ONE line must match the anchor, and EVERY line matching the
 #         anchor must ALSO match the requirement. A vanished anchor is a FAILURE, never a pass: an
 #         anchor that no longer exists proves nothing, and silently proving nothing is how a pin rots.
+#         Used wherever a bare token would also match the file's own prose about the thing.
+#
+# THE P TABLE HAS A GAP AT P4/P5, DELIBERATELY. Both shipped as P rows and both were SATISFIABLE BY A
+# DOC COMMENT — the decoded-key rule's token also matches two comments in `envelope_id.rs`, and the
+# recovered-arm's `Some(id)` also matches a module doc line and a test body in `wire.rs` — so each
+# stayed GREEN under the very mutant its own reason text named. They are RE-ANCHORED as Q11/Q12 on
+# their PRODUCTION lines (the D46 sibling's remedy for exactly this shape). The codes are NOT reused
+# and the survivors are NOT renumbered: a renumbering makes every prior reference to "P6" silently
+# mean something else, which is a worse failure than a documented gap.
 #
 # Exit: 0 = pass · 1 = BLOCK (a required landing is missing) · 2 = cannot evaluate (fail-closed).
 set -u
@@ -78,6 +87,18 @@ knob_re() { printf '%s' "$1" | sed 's/\\/\\\\\\/g'; }
 RANGE_KNOB_RE="$(knob_re "$RANGE_RE")"
 RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 
+# Q12's two halves, held in variables for TWO independent reasons, both of which bite silently.
+#   1. An END-ANCHOR cannot be written inline in the tables below: those are DOUBLE-QUOTED strings
+#      whose field separator is `@`, so a regex ending in `$` puts `$@` in the source — the shell
+#      expands that to the positional parameters (empty) and eats the anchor. The row then matches a
+#      mangled pattern, and the failure looks like a missing landing rather than a quoting bug.
+#   2. The two halves are matched against DIFFERENT texts and cannot be one variable: the ANCHOR runs
+#      over the file's own lines, while the REQUIREMENT runs over `git grep -n` output, i.e.
+#      `path:lineno:text` — so a `^` in a requirement can never match anything and would turn the row
+#      into a permanent, meaningless BLOCK.
+RECOVERED_ID_LINE_RE='^ +Some\(id\),$'
+RECOVERED_ID_RE='Some\(id\),$'
+
 # =================================================================================================
 # REQUIRED LANDINGS — `code@path@regex@what it proves`
 #
@@ -88,11 +109,8 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 # P3    is the EXHAUSTIVE variant match, which is the entire mitigation for an rmcp bump adding a fifth
 #       `JsonRpcMessage` variant. A `_` wildcard would compile, pass every cell, and silently reopen
 #       the hole; this row is what notices.
-# P4    is the DECODED-key rule, the one property whose violation is invisible to a hand-written test
-#       that does not happen to use the escaped spelling.
-# P5    is the ANSWER-AND-DROP shape: the recovered arm must pass `Some(id)`. Passing `None` there
-#       still answers, still recovers the connection, and still passes every cell that does not
-#       correlate by id — while releasing no waiting peer at all, which is the whole point of D47.
+# P4/P5 are GONE from this table on purpose — see the header. The DECODED-key rule is Q11 and the
+#       recovered-id arm is Q12, both anchored on the production line the mutant edits.
 # P6    is the SHARED corpus, gated `any(test, feature = ...)` so the in-lib cells cannot silently
 #       compile away — this project's canonical vacuity failure.
 # P7    is the store-EFFECT oracle, the only assertion that kills a "rebuild it as a Request and
@@ -115,8 +133,6 @@ REQUIRE="
 P1@crates/unblock-mcp/src/envelope_id.rs@pub\(crate\) fn scan@the D47 predicate module still exists and still exposes its scan entry point
 P2@crates/unblock-mcp/src/wire.rs@INVALID_REQUEST_ID_MESSAGE@the transport's -32600 arm is still wired to the compile-time reply constant
 P3@crates/unblock-mcp/src/wire.rs@JsonRpcMessage::Response\(_\)@the variant match is still EXHAUSTIVE (no wildcard arm): a fifth rmcp variant that could carry a stray id must be a COMPILE error, not a silent hole
-P4@crates/unblock-mcp/src/envelope_id.rs@next_key::<String>@keys are still compared DECODED, never as raw spans — the escaped spelling IS a genuine envelope id and a byte prefilter misses it
-P5@crates/unblock-mcp/src/wire.rs@Some\(id\)@the RECOVERED arm still answers ON the recovered id; passing None there answers nobody, since an rmcp client DROPS an id-less error
 P6@crates/unblock-mcp/src/lib.rs@cfg\(any\(test, feature = \"test-util\"\)\)@the shared corpus is gated so the in-lib cells cannot silently compile away — a non-compiled cell is a vacuous pass
 P7@crates/unblock-mcp/tests/envelope_id_duplex.rs@store_fingerprint@the store-EFFECT oracle survives: the one assertion that kills a rebuild-as-a-Request-and-deliver-it implementation
 P8@crates/unblock-mcp/src/wire.rs@ub-788@the DISCLOSED -32700 residual is still named at the transport, so it stays tracked rather than quietly assumed closed
@@ -144,6 +160,21 @@ P14@docs/PROCESS.md@d47-envelope-id-claims@the count-free LIST that IS the rule 
 #       "restore" one; it would be vacuous by construction.
 # Q10   is the contract knob, anchored on the constant's own definition line so this file's prose about
 #       the version cannot satisfy it. It pins that D47 did NOT bump the contract.
+# Q11   is the DECODED-key rule (ex-P4), anchored on the collector's own key loop. BOTH halves work
+#       here: swap the key type for a raw-span one and the anchored line fails the requirement; delete
+#       the loop and the anchor vanishes, which is also a failure. What NO positive row can catch is a
+#       byte PREFILTER added in front of the seed (`M5b`) — added code leaves every landing intact —
+#       and that mutant is graded by the cell `scan_decodes_keys` instead. Stated so this row is not
+#       read as covering it.
+# Q12   is the ANSWER-AND-DROP shape (ex-P5): the recovered arm must pass `Some(id)`. Passing `None`
+#       there still answers, still recovers the connection, and still passes every cell that does not
+#       correlate by id — while releasing no waiting peer at all, which is the whole point of D47.
+#       The anchor is the argument's OWN production line (indentation + the value + a comma, whole
+#       line), which no doc comment and no test body can spell; the named mutant rewrites that line to
+#       `None,`, the anchor then matches NOTHING, and a vanished anchor is a failure. So on this row it
+#       is the anchor half that kills the mutant and the requirement half that is nearly a restatement
+#       — said plainly rather than dressed up, because a row whose reason overstates its own reach is
+#       the exact defect this pair of rows was rewritten to remove.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@CLAUDE.md@^\| .docs/PRD\.md. \| Product truth@$RANGE_RE@PROSE D-range bump site, LOCATED on the document-map row that states the range
@@ -156,6 +187,8 @@ Q7@scripts/checks/ub-lp9.25-dangling-blocker-claims.sh@^RANGE_ALT_RE=@$RANGE_KNO
 Q8@scripts/checks/d46-schema-migration-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D46 sibling's live-range knob, same anchoring and same reason
 Q9@scripts/checks/d46-schema-migration-claims.sh@^RANGE_ALT_RE=@$RANGE_KNOB_ALT_RE@…and THAT sibling's ALTERNATION knob, the fifth separate way the enumeration can be half-bumped
 Q10@crates/unblock-mcp/src/options.rs@^pub const CONTRACT_VERSION@$CONTRACT_RE@D47 mints no ErrorCode and bumps NO contract: -32600 is rmcp's transport-level code, not our taxonomy. An unstated 'we didn't bump' is indistinguishable from an oversight, so it is stated here
+Q11@crates/unblock-mcp/src/envelope_id.rs@^ +while let Some\(key\) = map\.next_key@next_key::<String>\(\)@keys are still compared DECODED, never as raw spans — the escaped spelling IS a genuine envelope id. Anchored on the collector's key LOOP, so neither of this file's two comments about the rule can satisfy it
+Q12@crates/unblock-mcp/src/wire.rs@$RECOVERED_ID_LINE_RE@$RECOVERED_ID_RE@the RECOVERED arm still answers ON the recovered id; passing None there answers nobody, since an rmcp client DROPS an id-less error. Anchored on the argument's own production line, so the module doc and the test body that also spell Some(id) cannot satisfy it
 "
 
 blocked=0
@@ -220,8 +253,12 @@ check_table_floor() { # $1 label, $2 actual, $3 floor
 p_count="$(count_rows "$REQUIRE" '^P[0-9]')"
 q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 
-check_table_floor 'required-landing (P)' "$p_count" 14 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 10 || blocked=1
+# The floors are 12 and 12, and the P floor is LOWER than the 14 rows this file was first written
+# with because P4/P5 were RE-ANCHORED into the Q table (header), not dropped: the total is 24 either
+# way. A floor may only move down together with the rows it counts moving somewhere the other floor
+# counts them — never because a rule became inconvenient.
+check_table_floor 'required-landing (P)' "$p_count" 12 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 12 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D47 predicate, its exhaustive-match guard, its decoded-key rule and its recovered-id arm are all still in the tree, the store-effect oracle and the disclosed -32700 residual are still pinned, the tracker names both ub-cnv and its ub-788 residual, the rendered roadmap lists the decision, this gate is both specified and wired, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates while the contract version stands unmoved."
