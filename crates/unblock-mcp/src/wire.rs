@@ -61,6 +61,16 @@
 //! DISCLOSED and deliberately left open (tracked as `ub-788`): the `-32700` arm omits a readable id
 //! unconditionally, so a duplicated `method`/`jsonrpc` frame still leaves an rmcp client pending.
 //!
+//! ALSO DISCLOSED and deliberately left open (tracked as `ub-TBD`): **the reply is written INSIDE
+//! `receive()`, and rmcp polls `receive()` as one arm of an UNBIASED `tokio::select!`**
+//! (`src/service.rs:805`, the arm at `:813`) — so a poll that loses the race is DROPPED, taking with
+//! it the reply that had not yet been written AND the frame itself, since the loop clears
+//! `line_buf` at the top of the next iteration. Idle connection: never lost. Under concurrent
+//! request traffic: frequently (measured 25/40 with four requests in flight, 39/40 with eight).
+//! This is a property of the seam and NOT of D47 — the `-32700` arm below has the same shape and
+//! the same loss rate — and the pre-handshake case this arm exists for runs with nothing in flight,
+//! where nothing is lost. Closing it means moving the write off the cancellable path.
+//!
 //! ONE EFFECT IS REMOVED, deliberately: a `notifications/cancelled` frame carrying an un-decodable
 //! `id` is DELIVERED today, and rmcp's serve loop cancels the matching in-flight request through it
 //! before any handler runs (`src/service.rs:981-996`). Answered and dropped, that cancellation stops
@@ -215,6 +225,13 @@ where
     /// The guard is scoped to this function, so it is released before `receive()` parks in the next
     /// `read_until`. Holding it across that read would block every `send()` for the whole idle
     /// period.
+    ///
+    /// **WHAT THE MUTEX BUYS, AND WHAT IT DOES NOT.** It buys BYTE-ATOMICITY: `write_frame` writes a
+    /// whole frame under one guard, so a concurrent `send()` can never interleave bytes into the
+    /// middle of this reply. It buys NOTHING about CANCELLATION — this future runs inside
+    /// `receive()`, which rmcp may drop mid-poll, in which case the reply is simply never written.
+    /// The two are separate hazards and only the first is closed here; the second is the module
+    /// doc's second disclosed residual.
     ///
     /// Both out-of-band arms (`-32700` and D47's `-32600`) go through here so they are identical
     /// **by construction** rather than by review, and both encode through rmcp's own
