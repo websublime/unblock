@@ -227,6 +227,14 @@ pub(crate) fn into_exit_to(
 /// Write a rendered machine payload plus its terminating newline onto `out` — the ONE place that
 /// shape exists, so the two [`StdoutRole`] arms cannot drift in anything but their destination.
 ///
+/// **The TERMINATOR is part of the contract, not decoration, and it is pinned by its own cell (U9
+/// below) rather than left to the byte-equality one.** The renderer returns `serde_json::to_string`
+/// output, which carries no trailing newline; both consumers read this stream LINE-WISE — an MCP
+/// host tailing the child's stderr (D48), and every shell pipeline reading a `Reports` command's
+/// stdout — so dropping it would withhold the payload until EOF on BOTH channels. `U8`, which
+/// compares the two channels against each other, structurally cannot see that: this single site
+/// mutates both of its operands identically.
+///
 /// A failing report stream never changes the exit code we were asked to deliver, so both writes are
 /// deliberately ignored (the same rule [`emit_diagnostic`] states).
 fn write_payload(payload: &str, out: &mut impl Write) {
@@ -700,6 +708,50 @@ mod tests {
                 "{fmt:?}: the SAME document, byte for byte — only the stream differs (D48 clause 3)"
             );
             assert!(reports_err.is_empty() && protocol_out.is_empty(), "{fmt:?}");
+        }
+    }
+
+    /// **U9 — the payload is NEWLINE-TERMINATED, on whichever channel it lands.** The one thing the
+    /// relative comparison in U8 structurally cannot see: `write_payload` is a SINGLE site, so
+    /// dropping its trailing `write_all(b"\n")` mutates both of U8's operands identically and that
+    /// cell stays green while every payload in the product loses its terminator.
+    ///
+    /// It is a behavioural loss and not a cosmetic one, on BOTH roles at once — which is why both
+    /// are driven here rather than only the relocated one. The renderer emits
+    /// `serde_json::to_string`, i.e. no trailing newline of its own; a host reading the `mcp`
+    /// child's stderr line-wise (the only place a D48-relocated failure can now be read) and a
+    /// shell pipeline reading a `Reports` command's stdout would both see the document only at EOF.
+    ///
+    /// EXACTLY one newline is asserted, not merely a trailing one: the compact single-line render is
+    /// the premise the shared harness oracle rests on (`tests/common/mod.rs`
+    /// `structured_error_on_stderr` locates the payload as ONE line), so a second terminator, or a
+    /// switch to pretty JSON, is a defect here rather than a harmless reformat.
+    #[test]
+    fn the_payload_is_newline_terminated_on_both_channels() {
+        for (role, expect_on_stdout) in [(StdoutRole::Reports, true), (StdoutRole::Protocol, false)]
+        {
+            for fmt in [OutputFormat::Json, OutputFormat::Robot] {
+                let (mut out, mut err) = (Vec::new(), Vec::new());
+                let code = into_exit_to(already_initialized(), fmt, role, &mut out, &mut err);
+                assert_eq!(code, 2, "{role:?}/{fmt:?}");
+                let written = if expect_on_stdout { &out } else { &err };
+                let text = String::from_utf8(written.clone()).expect("utf8 payload");
+                assert!(
+                    text.ends_with('\n'),
+                    "{role:?}/{fmt:?}: the payload must be TERMINATED — a line-wise consumer \
+                     (an MCP host tailing stderr, a shell pipeline reading stdout) sees an \
+                     unterminated document only at EOF: `{text}`"
+                );
+                assert_eq!(
+                    text.matches('\n').count(),
+                    1,
+                    "{role:?}/{fmt:?}: ONE compact line plus ONE terminator — the premise the \
+                     harness oracle's line-wise search rests on: `{text}`"
+                );
+                // And the terminator is the ONLY thing added: the line still parses whole.
+                let payload = parse_payload(text.trim_end().as_bytes());
+                assert_eq!(payload["code"], "ALREADY_INITIALIZED");
+            }
         }
     }
 }
