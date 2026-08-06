@@ -307,6 +307,19 @@ jobs:
       # Positive-only by design — D46 retires no framing, so it carries no negative sweep and needs no
       # allow-list. Specified in ci-cd-and-distribution.md §2.1 (the D46 sub-check).
       - run: scripts/checks/d46-schema-migration-claims.sh
+      # D47 (`ub-cnv`) required landings: the un-decodable-envelope-`id` class. Its teeth are
+      # executable — the transport arm, the predicate module and ~40 cells — but no test can carry its
+      # OWN survival, and one published artefact (`docs/roadmap.html`) sits outside every lint corpus
+      # in the repo. This step asserts the positive: the predicate and its `-32600` arm, the EXHAUSTIVE
+      # variant match (a `_` wildcard would compile, pass every cell and silently reopen the hole), the
+      # decoded-key rule, the recovered-id argument, the gated shared corpus, the store-effect oracle,
+      # the disclosed `-32700` residual, BOTH tracker ids (`ub-cnv` and the `ub-788` the PRD row names,
+      # so the top document carries no dangling id), the rendered roadmap's v1.0.1 card, this gate's own
+      # wiring, and the live D-range at every file the count-free `docs/PROCESS.md` §3 enumeration
+      # names — plus the contract version standing UNMOVED, since `-32600` is rmcp's transport-level
+      # code and not our taxonomy. Positive-only by design: a negative sweep for retired framing is
+      # dodged by a rewrapped line. Specified in ci-cd-and-distribution.md §2.1 (the D47 sub-check).
+      - run: scripts/checks/d47-envelope-id-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
