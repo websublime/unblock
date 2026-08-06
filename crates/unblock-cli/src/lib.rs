@@ -48,7 +48,10 @@ pub async fn run() -> ExitCode {
 /// initializes stderr-only logging, dispatches, and maps the outcome:
 /// - `Ok(None)` → success (exit `0`);
 /// - `Ok(Some(code))` → an explicit exit code (the `mcp` `128+signo` signal exit);
-/// - `Err(e)` → [`exit::into_exit`] (the structured error render + 0–8 cast).
+/// - `Err(e)` → [`exit::into_exit`] (the structured error render + 0–8 cast). Which STREAM that
+///   render lands on is decided by the parsed command's [`Command::stdout_role`] (D48): STDOUT for a
+///   command that owns stdout as its own report channel, STDERR for one that owns it as a
+///   wire-protocol framing channel (`mcp`). The exit code is the same either way.
 pub async fn run_with<I, T>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = T>,
@@ -71,11 +74,16 @@ where
     // Resolve the error-render format up front from CLI+env only (config default is unknown before a
     // workspace opens; FR-13 precedence for the no-workspace error path — spine §5b, output.rs SF-1).
     let fmt = output::pick_cli_format(&cli.global);
+    // D48: which CHANNEL that error render lands on, read HERE because `dispatch` consumes `cli`
+    // and the fact is unrecoverable afterwards. `fmt` is deliberately untouched — degrading the
+    // format for `mcp` would silently break FR-13 precedence (`-o json`, `UNBLOCK_OUTPUT_FORMAT`),
+    // which is the rejected alternative D48 clause (2) names.
+    let stdout_role = cli.command.stdout_role();
 
     match dispatch::dispatch(cli).await {
         Ok(None) => exit::ok_exit(),
         Ok(Some(code)) => ExitCode::from(code),
-        Err(err) => exit::into_exit(err, fmt),
+        Err(err) => exit::into_exit(err, fmt, stdout_role),
     }
 }
 

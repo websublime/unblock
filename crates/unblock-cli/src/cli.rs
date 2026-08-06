@@ -9,6 +9,10 @@
 //! commands; the flag still forwards via `CliOverrides.output_format` so `--flag > env` holds inside
 //! config's resolver (spine §5b / §1807; the no-workspace `version` path reads the env leniently in
 //! `output::pick_cli_format`). See `docs/plans/crates/unblock-cli.md`.
+//!
+//! Since D48 this module also owns ONE channel fact: [`Command::stdout_role`] classifies each
+//! subcommand by what its STDOUT *is* — its own report channel, or a wire-protocol framing channel —
+//! which the exit boundary reads to pick the stream its structured error renders to.
 
 use std::path::PathBuf;
 
@@ -16,6 +20,8 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use unblock_config::CliOverrides;
 use unblock_model::OutputFormat;
 use unblock_render::parse_format;
+
+use crate::exit::StdoutRole;
 
 /// The top-level `unblock` command (lifecycle/ops only — D3).
 #[derive(Debug, Parser)]
@@ -113,6 +119,33 @@ pub enum Command {
     /// Self-update the `unblock` binary (checksum-verified before swap, FR-25/D17).
     #[cfg(feature = "self-update")]
     Update(UpdateArgs),
+}
+
+impl Command {
+    /// D48: what THIS subcommand's stdout is — its own report channel, or a protocol framing one.
+    ///
+    /// Read at `lib.rs` while the parsed `Cli` is still in scope (`dispatch::dispatch` CONSUMES it,
+    /// so the fact cannot be recovered afterwards) and threaded into `exit::into_exit`, which is the
+    /// SINGLE terminal renderer for every `Err` a command returns.
+    ///
+    /// **The match is EXHAUSTIVE with no `_` arm, and that is normative (PRD §4 D48 clause 2).** A
+    /// new subcommand must fail to COMPILE here until its author classifies it: that forces the
+    /// question. Nothing checks the answer — which is stated here rather than left to be discovered.
+    /// The `Update` arm is `cfg`-gated because the VARIANT is; a wildcard would build under
+    /// `--no-default-features` at the cost of silently classifying every future subcommand.
+    pub(crate) fn stdout_role(&self) -> StdoutRole {
+        match self {
+            // `unblock mcp` speaks MCP over stdio: fd 1 IS the JSON-RPC framing channel.
+            Self::Mcp(_) => StdoutRole::Protocol,
+            Self::Migrate(_)
+            | Self::Doctor(_)
+            | Self::Version(_)
+            | Self::Init(_)
+            | Self::Agents(_) => StdoutRole::Reports,
+            #[cfg(feature = "self-update")]
+            Self::Update(_) => StdoutRole::Reports,
+        }
+    }
 }
 
 /// `unblock mcp` — no v1 flags (the MCP surface is fixed; instructions are generated).
@@ -237,6 +270,45 @@ mod tests {
         assert_eq!(overrides.output_format, Some(OutputFormat::Csv));
         // `--prefix` never crosses here — there is no `CliOverrides.id_prefix`.
         assert!(overrides.db.is_none());
+    }
+
+    /// **D48 — the ONLY unit-layer pin of the classifier.** Every subcommand declares what its
+    /// stdout IS, and `mcp` is the one whose stdout is a wire-protocol framing channel.
+    ///
+    /// It kills a blanket classifier (one returning `Protocol` for everything); it does NOT kill a
+    /// flipped literal at the CALL SITE in `lib.rs`, which the classifier never sees — that one is
+    /// carried by the end-to-end suite, which is why D48 clause (7) requires both layers.
+    #[test]
+    fn each_subcommand_declares_its_stdout_role() {
+        use crate::exit::StdoutRole;
+
+        let role = |args: &[&str]| {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|e| panic!("parse {args:?}: {e}"))
+                .command
+                .stdout_role()
+        };
+
+        assert_eq!(
+            role(&["unblock", "mcp"]),
+            StdoutRole::Protocol,
+            "`unblock mcp` speaks MCP over stdio: fd 1 is the JSON-RPC framing channel (D48)"
+        );
+        for args in [
+            ["unblock", "migrate"],
+            ["unblock", "doctor"],
+            ["unblock", "version"],
+            ["unblock", "init"],
+            ["unblock", "agents"],
+        ] {
+            assert_eq!(
+                role(&args),
+                StdoutRole::Reports,
+                "{args:?} owns stdout as its OWN report channel and is byte-unchanged by D48"
+            );
+        }
+        #[cfg(feature = "self-update")]
+        assert_eq!(role(&["unblock", "update"]), StdoutRole::Reports);
     }
 
     #[test]

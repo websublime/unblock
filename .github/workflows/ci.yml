@@ -320,6 +320,22 @@ jobs:
       # code and not our taxonomy. Positive-only by design: a negative sweep for retired framing is
       # dodged by a rewrapped line. Specified in ci-cd-and-distribution.md §2.1 (the D47 sub-check).
       - run: scripts/checks/d47-envelope-id-claims.sh
+      # D48 (`ub-og3`) required landings: the PROTOCOL-CHANNEL carve-out — `unblock mcp` reports its
+      # structured error on STDERR, because its stdout IS the JSON-RPC framing channel. Its teeth are
+      # executable (injected-sink cells, a spawning suite, two INVERTED lifecycle cells), but three of
+      # its obligations are unreachable from any test: the SINGLE-CALLER invariant its blast-radius
+      # argument rests on, the four residual ids the PRD row names, and a rendered document
+      # (`docs/roadmap.html`) that sits outside every lint corpus here. This step asserts the positive:
+      # the classification type, its classifier and its consumer (the two-file co-occurrence — either
+      # half alone is a fix that does nothing), the carve-out arm itself, the sink-injected core, the
+      # spawning regression file, the hardened framing guard and the format-env scrub, `ub-og3` plus
+      # all four residual ids in the tracker export, the rendered roadmap's v1.0.1 card, this gate's
+      # own wiring, and the live D-range at every file the count-free `docs/PROCESS.md` §3 enumeration
+      # names — plus the contract version standing UNMOVED, since D48 moves a stream and mints no
+      # `ErrorCode`. It also checks two RELATIONS no row can express: exactly one `into_exit` caller,
+      # and every `Command` variant classified (a `_` arm would stop the compiler asking). Positive-only
+      # by design. Specified in ci-cd-and-distribution.md §2.1 (the D48 sub-check).
+      - run: scripts/checks/d48-stdout-channel-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.

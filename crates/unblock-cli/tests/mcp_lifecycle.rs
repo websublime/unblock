@@ -401,9 +401,18 @@ fn a_signal_during_the_workspace_open_exits_128_plus_signo_cleanly() {
 /// unverified "every Err path parks a read" story is the D38 discipline: the defect shipped behind a
 /// comment whose causal claim nobody had measured.
 ///
-/// This is ALSO the FR-11 anchor D38 scopes: the unsignalled `Err` path is the ONE `mcp` path that
-/// still renders the structured error to stdout (the default error-render format is `json`), so the
-/// payload is asserted to be valid JSON carrying `INTERNAL_ERROR`.
+/// This is ALSO the **D48 anchor**: the unsignalled `Err` path is the ONE `mcp` path that renders a
+/// `StructuredError` at all, and D48 moves that render OFF the JSON-RPC framing channel. Pre-D48
+/// this cell asserted the payload ON STDOUT and so pinned the ub-og3 defect as correct. FR-11
+/// always-valid-JSON-on-error is preserved in CONTENT and moved in CHANNEL: stdout must be
+/// FRAME-FREE (here EMPTY — rmcp answers a notification with nothing), and the FULL payload —
+/// `code`, `message`, `retryable`, any `hint` — lands on STDERR, still machine-readable for an MCP
+/// host that captures the child stderr. The exit code does NOT move: D48 moves the channel only, so
+/// the `Some(1)` above is unchanged and still carries the D38 half of this cell.
+///
+/// The fatality's CLASS, for the reader arriving from D48: any first frame that is neither
+/// `initialize` NOR `ping` kills the server, Request or Notification alike — `ping` is the one
+/// pre-handshake exception, answered by rmcp with the loop continuing.
 #[test]
 fn a_no_signal_run_loop_error_exits_1_and_never_hangs() {
     let ws = Workspace::init();
@@ -411,7 +420,8 @@ fn a_no_signal_run_loop_error_exits_1_and_never_hangs() {
 
     // A notification where rmcp expects the `initialize` request → a genuine handshake Err.
     client.notify("notifications/initialized", &json!({}));
-    // Retain stdout so the FR-11 payload survives (and so no unread pipe can stall the child).
+    // Retain stdout so the D48 frame-free NEGATIVE is read from a COMPLETE buffer (and so no unread
+    // pipe can stall the child). `wait_for` below joins the drain before either snapshot is read.
     client.capture_stdout();
 
     let status = client.wait_for(Duration::from_secs(20));
@@ -424,19 +434,31 @@ fn a_no_signal_run_loop_error_exits_1_and_never_hangs() {
         client.stderr_snapshot()
     );
 
-    // FR-11 (scoped to the unsignalled Err path by D38): stdout is still always-valid JSON, and it
-    // NAMES the failure — the error is surfaced, never swallowed.
+    // D48: stdout is the JSON-RPC framing channel for the whole process lifetime. Here the server
+    // never framed anything, so it must be EMPTY — and the FULL payload must be on stderr instead.
     let stdout = client.stdout_snapshot();
-    let payload: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+    common::assert_stdout_is_frame_only(&stdout, "unsignalled run-loop Err");
+    assert!(
+        stdout.trim().is_empty(),
+        "D48: the structured error must NOT reach the JSON-RPC framing channel — an MCP client \
+         parsing this as a frame gets a protocol violation. stdout was: `{stdout}`"
+    );
+    // The POSITIVE half. Without it this cell stays GREEN under a mutation that deletes the
+    // diagnostic entirely, because stdout is legitimately empty on this path either way.
+    let stderr = client.stderr_snapshot();
+    let payload = common::structured_error_on_stderr(&stderr).unwrap_or_else(|| {
         panic!(
-            "FR-11: the unsignalled Err path must render always-valid JSON on stdout, got \
-             `{stdout}`: {e}. Child stderr:\n{}",
-            client.stderr_snapshot()
+            "D48: the run-loop failure must be REPORTED on stderr, never swallowed. \
+             Child stderr:\n{stderr}"
         )
     });
     assert_eq!(
         payload["code"], "INTERNAL_ERROR",
         "the run-loop failure surfaces as INTERNAL_ERROR (D27/AF-4), never swallowed: {payload}"
+    );
+    assert!(
+        payload.get("retryable").is_some(),
+        "the FULL structured payload moves (D48), not a degraded `error[CODE]` line: {payload}"
     );
 }
 
@@ -583,6 +605,17 @@ fn a_clean_pre_initialize_request_still_works() {
 /// latent.
 ///
 /// Mutant: deleting the `Absent => {}` arm.
+///
+/// **D48 note.** The `INTERNAL_ERROR` this cell reads now arrives on STDERR, not stdout: the
+/// fatality itself is unchanged (that is what this cell pins), only the channel of its report
+/// moved. The stdout-side assertion is therefore a frame-free NEGATIVE, and the identification of
+/// the failure is carried by the stderr payload.
+///
+/// The fatality's CLASS, for the reader who arrives here from D48: any first frame that is neither
+/// `initialize` NOR `ping` kills the server, Request or Notification alike. `ping` is the one
+/// pre-handshake exception — rmcp answers it and the loop continues, which is exactly why
+/// `ping_barrier` works as a readiness barrier without completing the handshake. The id-less
+/// notification this cell sends is one INSTANCE of the class, not its definition.
 #[test]
 fn an_id_less_notification_before_initialize_still_exits_1() {
     let ws = Workspace::init();
@@ -599,10 +632,20 @@ fn an_id_less_notification_before_initialize_still_exits_1() {
          fatality is unchanged. Child stderr:\n{}",
         client.stderr_snapshot()
     );
+    let stdout = client.stdout_snapshot();
+    common::assert_stdout_is_frame_only(&stdout, "id-less notification before initialize");
     assert!(
-        client.stdout_snapshot().contains("INTERNAL_ERROR"),
-        "and it still surfaces as INTERNAL_ERROR: {}",
-        client.stdout_snapshot()
+        stdout.trim().is_empty(),
+        "D48: nothing but framing on stdout, got: `{stdout}`"
+    );
+    let stderr = client.stderr_snapshot();
+    let payload = common::structured_error_on_stderr(&stderr).unwrap_or_else(|| {
+        panic!("D48: it must still SURFACE, on stderr. Child stderr:\n{stderr}")
+    });
+    assert_eq!(
+        payload["code"], "INTERNAL_ERROR",
+        "and it still surfaces as INTERNAL_ERROR (channel moved by D48, fatality unchanged): \
+         {payload}"
     );
 }
 

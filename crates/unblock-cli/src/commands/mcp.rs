@@ -21,7 +21,10 @@
 //! BEFORE the run loop starts (`Session::open`, the config open) is not a consequence of the
 //! cancellation and keeps its spine §2.3 0–8 code, so a coinciding signal can never mask an
 //! unrelated DB fault. With NO signal recorded a genuine `Err` keeps `InternalError`/exit 1,
-//! rendered by `exit::into_exit` per FR-11 — never swallowed.
+//! rendered by `exit::into_exit` — never swallowed. **Since D48 that render lands on STDERR**, not
+//! on stdout: this command owns stdout as the JSON-RPC framing channel, so its structured error
+//! (the FULL `code`/`message`/`hint`/`retryable` document — FR-11 is preserved in CONTENT and moved
+//! in CHANNEL) goes where every other diagnostic already goes. The exit code is unmoved.
 //!
 //! **The unsignalled pre-`initialize` disconnect → exit 0 carve-out (D40, spine §5b).** One `Err` on
 //! the unsignalled path is NOT a genuine fault: an `Err(McpServerError::Transport{ConnectionClosed})`
@@ -223,7 +226,9 @@ fn resolve_mcp_exit(
 ///
 /// Neither branch drops the error: `Debug` records it through tracing (surfaced by `-vv`), `Stderr`
 /// writes the `error[CODE]: message` line (NFR-14). stdout is never touched — on `mcp` it carries
-/// MCP framing ONLY.
+/// MCP framing ONLY. **Since D48 that holds of the WHOLE command, not just of this function:** the
+/// one remaining stdout writer, `exit::into_exit`'s machine arm, now writes its document to stderr
+/// too, so the loophole this note used to describe around itself is closed.
 fn report(diagnostic: Diagnostic) {
     match diagnostic.route {
         // Rendered via Debug (`?`) rather than Display so the line NAMES the rmcp outcome it demoted
@@ -315,7 +320,8 @@ pub async fn run(_args: &McpArgs, overrides: &CliOverrides) -> Result<Option<u8>
             outcome,
             diagnostics,
         } => {
-            // `outcome`'s Err (if any) is rendered downstream by `exit::into_exit` (FR-11). These
+            // `outcome`'s Err (if any) is rendered downstream by `exit::into_exit` — onto STDERR,
+            // since this command owns stdout as the JSON-RPC framing channel (D48). These
             // are the errors it DISPLACED — nothing downstream will ever see them, so report them
             // here; the signalled arm above already did, and D38 tolerates no asymmetry.
             for diagnostic in diagnostics {
