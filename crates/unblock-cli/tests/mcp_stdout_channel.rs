@@ -331,6 +331,24 @@ fn the_frame_only_assertion_rejects_a_blob_and_a_bare_line() {
         message.contains("StructuredError blob"),
         "arm 3: the shape test is what catches a blob dressed as a frame: {message}"
     );
+
+    // Arm 3 is a CONJUNCTION (`code.is_none() && retryable.is_none()`) and the hybrid above carries
+    // BOTH members, so either half alone still rejects it — dropping one is invisible to it. These
+    // two inputs carry ONE member each, so each half is independently load-bearing. Same defect
+    // class as `is_jsonrpc_framing`'s (H5), in the sibling helper four cells call.
+    for (line, half) in [
+        (r#"{"jsonrpc":"2.0","code":"X"}"#, "code"),
+        (r#"{"jsonrpc":"2.0","retryable":true}"#, "retryable"),
+    ] {
+        let caught = catch_unwind(|| common::assert_stdout_is_frame_only(line, "H3 half-blob"))
+            .expect_err("arm 3 must reject a line carrying ONE of the two blob members");
+        let message = panic_message(&caught);
+        assert!(
+            message.contains("StructuredError blob"),
+            "arm 3's `{half}` half is load-bearing on its own — `{line}` must be rejected BY IT, \
+             got: {message}"
+        );
+    }
 }
 
 /// **H4** — the guard's CALL SITE inside `read_response`, which H1 cannot reach.
@@ -369,6 +387,170 @@ fn the_read_response_guard_is_actually_installed() {
     assert!(
         message.contains("must be JSON-RPC framing"),
         "the guard must be the thing that fired, not a downstream symptom: {message}"
+    );
+}
+
+/// **H5 — each membership clause of the framing predicate is INDEPENDENTLY load-bearing.**
+///
+/// H1's three rejection inputs cannot tell the two blob-shape clauses apart: the measured ub-og3
+/// blob carries no `jsonrpc` member at all (so the FIRST clause rejects it on its own), and the
+/// hybrid carries BOTH `code` and `retryable` (so either clause rejects it on its own). Dropping
+/// EITHER shape clause therefore left H1 green — measured, not supposed. These two inputs carry one
+/// blob member each ALONGSIDE a `jsonrpc` member, so exactly one clause can be what rejects them.
+///
+/// The inputs are not exotic: a partially-populated `StructuredError`, or a future frame that grew
+/// a top-level `code`, is precisely the line the guard exists to keep off the framing channel.
+#[test]
+fn each_blob_shape_clause_of_the_framing_predicate_is_load_bearing() {
+    let parse = |s: &str| serde_json::from_str::<Value>(s).expect("fixture parses");
+    assert!(
+        !common::is_jsonrpc_framing(&parse(r#"{"jsonrpc":"2.0","retryable":true}"#)),
+        "the `retryable` clause alone must reject this — no other clause can: `code` is absent \
+         and `jsonrpc` is present"
+    );
+    assert!(
+        !common::is_jsonrpc_framing(&parse(r#"{"jsonrpc":"2.0","code":"INTERNAL_ERROR"}"#)),
+        "the mirror: the `code` clause alone must reject this one"
+    );
+}
+
+/// **H6 — "all three membership tests are TOP-LEVEL", the predicate's docstring claim, pinned.**
+///
+/// H1 pins ONE third of it (the D47 `-32600` frame, whose `code` is nested under `error`, is
+/// accepted). The other two thirds were prose. Both are reachable on the real wire:
+/// - a `tools/call` answer carrying an in-band tool failure nests the WHOLE `StructuredError` —
+///   `code` AND `retryable` — under `result.structuredContent`, and that is legitimate framing; a
+///   recursive reading would reject the single most common error-carrying frame this server emits;
+/// - a blob whose nested payload happens to carry a `jsonrpc` member must still be rejected — a
+///   recursive reading of the FIRST clause would accept it.
+#[test]
+fn every_membership_test_of_the_framing_predicate_is_top_level() {
+    let parse = |s: &str| serde_json::from_str::<Value>(s).expect("fixture parses");
+    assert!(
+        common::is_jsonrpc_framing(&parse(
+            r#"{"jsonrpc":"2.0","id":7,"result":{"isError":true,"structuredContent":{"code":"VALIDATION_FAILED","retryable":false}}}"#
+        )),
+        "an in-band tool failure nests the StructuredError inside a REAL frame; rejecting it \
+         would break the commonest error frame the server sends"
+    );
+    assert!(
+        !common::is_jsonrpc_framing(&parse(r#"{"method":"x","params":{"jsonrpc":"2.0"}}"#)),
+        "the `jsonrpc` test is top-level too: a nested one does not make a line into framing"
+    );
+}
+
+/// **H7 — the stderr ORACLE's own shape test, driven directly.**
+///
+/// `structured_error_on_stderr` is the POSITIVE half of every spawning cell in this file (they all
+/// funnel through `assert_diagnostic_on_stderr`) and of the two INVERTED `mcp_lifecycle.rs` cells, so
+/// weakening its `.find` predicate weakens all of them at once. The callers that DO re-assert the
+/// shape cannot notice: they run against the real product output, which always carries both members,
+/// so a weakened oracle returns the same document to them either way. Only a DEGRADED input
+/// discriminates, and nothing in the product produces one — which is why it has to be constructed
+/// here rather than waited for.
+///
+/// Both halves are therefore driven with a document carrying ONE member each. A degraded payload is
+/// exactly what a "fix" that routed the `error[CODE]` line's fields through the machine arm would
+/// produce, which is the mutation the oracle exists to refuse.
+#[test]
+fn the_stderr_oracle_refuses_a_degraded_document() {
+    const STARTUP: &str = "unblock: workspace bound to /ws/.unblock (source: cwd walk-up)\n";
+
+    let full = format!("{STARTUP}{UB_OG3_BLOB}\n");
+    let payload = common::structured_error_on_stderr(&full)
+        .expect("the control: a COMPLETE StructuredError document is found");
+    assert_eq!(payload["code"], "INTERNAL_ERROR");
+
+    for degraded in [
+        r#"{"code":"INTERNAL_ERROR","message":"mcp server error"}"#,
+        r#"{"retryable":false,"message":"mcp server error"}"#,
+    ] {
+        let stderr = format!("{STARTUP}{degraded}\n");
+        assert!(
+            common::structured_error_on_stderr(&stderr).is_none(),
+            "the oracle spells `a StructuredError blob` as BOTH members; half a document must not \
+             satisfy it, or every cell built on it would accept a degraded payload: {degraded}"
+        );
+    }
+}
+
+/// **H8 — the oracle locates the payload by SHAPE, never by POSITION** (its docstring's claim).
+///
+/// The claim passes today only by accident: the D39 startup line, the one non-payload line the
+/// shipped cells actually meet, is not JSON — so "the first line that parses" and "the line with
+/// the payload shape" coincide, and replacing the shape search with a first-parseable-line search
+/// survived the whole suite. This buffer breaks that coincidence: its FIRST parseable JSON line is
+/// a JSON-formatted log record, the shape a `tracing` JSON subscriber or an MCP host's own wrapper
+/// puts on the same stream, and the payload is the THIRD line.
+#[test]
+fn the_stderr_oracle_finds_the_payload_by_shape_not_by_position() {
+    let stderr = format!(
+        "{}\n{}{}\n",
+        r#"{"timestamp":"2026-08-06T10:00:00Z","level":"DEBUG","fields":{"message":"mcp: workspace opened"}}"#,
+        "unblock: workspace bound to /ws/.unblock (source: cwd walk-up)\n",
+        UB_OG3_BLOB
+    );
+    let payload = common::structured_error_on_stderr(&stderr)
+        .expect("the payload is on this buffer — it is simply not the first JSON line");
+    assert_eq!(
+        payload["code"], "INTERNAL_ERROR",
+        "a positional search returns the LOG record instead, which is the whole difference \
+         between locating by shape and locating by luck: {payload}"
+    );
+}
+
+/// **H9 — `wait_for` JOINS the retained drains before it returns** (the D48 fail-silent fix in
+/// `common/mod.rs`'s `drains` field, which nothing drove).
+///
+/// The two D48 buffer reads are a NEGATIVE on stdout and a POSITIVE on stderr, and both are read
+/// AFTER `wait_for` returns. Without the join, `wait_for` returns the moment `try_wait` sees the
+/// child gone — a still-draining pipe then leaves the stdout buffer SHORT, which is exactly what
+/// "stdout is empty" looks like, so the headline channel-revert mutation could survive its own
+/// regression pin intermittently.
+///
+/// **Deterministic by construction: it reads the SYNCHRONISATION, not its outcome.** Deleting the
+/// `join_drains()` call was MEASURED to survive the whole suite, and a completeness assertion over
+/// the buffers would not have changed that on most runs (an unjoined drain usually wins the race) —
+/// it would merely have converted a silent hole into a flake. The count of unjoined handles is
+/// exact. Buffer completeness is asserted too, but as a consequence, never as the discriminator.
+#[test]
+fn wait_for_joins_the_retained_drains_before_the_buffers_are_read() {
+    use std::time::Duration;
+
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg("printf 'out-first\\nout-last\\n'; printf 'err-first\\nerr-last\\n' >&2; exit 0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the fabricated child");
+
+    let mut client = common::McpClient::from_child(child);
+    client.capture_stdout();
+    assert_eq!(
+        client.pending_drain_count(),
+        2,
+        "the control: both pipes are drained by RETAINED threads (stderr from `from_child`, \
+         stdout from `capture_stdout`) — without this, the assertion below could pass vacuously \
+         over a client that never had a drain to join"
+    );
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(status.code(), Some(0), "the fabricated child exits cleanly");
+    assert_eq!(
+        client.pending_drain_count(),
+        0,
+        "every retained drain must be JOINED before `wait_for` returns: a D48 buffer read after \
+         it is only sound over a COMPLETE buffer, and a short one is indistinguishable from the \
+         empty stdout the frame-only negative expects"
+    );
+    assert!(
+        client.stdout_snapshot().contains("out-last")
+            && client.stderr_snapshot().contains("err-last"),
+        "and the consequence: both buffers are complete. stdout=`{}` stderr=`{}`",
+        client.stdout_snapshot(),
+        client.stderr_snapshot()
     );
 }
 

@@ -131,7 +131,15 @@ pub fn unblock() -> Command {
 /// (`code` + `retryable`, the pair this suite already uses to spell "a `StructuredError` blob"), never
 /// by position. A whole-buffer `serde_json::from_str(stderr.trim())` would be red from the D39 line
 /// alone. The render is COMPACT single-line JSON (`RenderOptions::default().pretty_json == false`),
-/// so one line is the whole payload.
+/// so one line is the whole payload — pinned at the source by `exit.rs`'s U9 cell, which asserts the
+/// payload is ONE line plus ONE terminator.
+///
+/// **Both halves of this claim have their OWN cells, because this function is the POSITIVE half of
+/// every D48 cell in two files and no CALLER can notice it weakening — each runs against real
+/// product output, which always carries both members:** the
+/// SHAPE-not-position half is `mcp_stdout_channel.rs`'s H8 (a buffer whose first parseable JSON line
+/// is a log record), and the two-member shape test is H7 (a degraded document carrying one member).
+/// Weakened here, the oracle would start accepting a degraded payload with every caller still green.
 #[must_use]
 pub fn structured_error_on_stderr(stderr: &str) -> Option<Value> {
     stderr
@@ -152,6 +160,10 @@ pub fn structured_error_on_stderr(stderr: &str) -> Option<Value> {
 /// (`mcp_stdout_channel.rs`): every production call site asserts stdout is EMPTY immediately
 /// afterwards, so the loop below never sees a byte and replacing the whole body with `{}` would
 /// leave the matrix green. A guard nobody drives is a guard that can be deleted.
+///
+/// The shape assertion below is a CONJUNCTION, and each half is driven by its own single-member
+/// input in that self-test (H3): a line carrying BOTH `code` and `retryable` is rejected by either
+/// half alone, so it can never show that both are still there.
 pub fn assert_stdout_is_frame_only(stdout: &str, cell: &str) {
     for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
         let parsed: Value = serde_json::from_str(line.trim())
@@ -173,7 +185,10 @@ pub fn assert_stdout_is_frame_only(stdout: &str, cell: &str) {
 /// **All three membership tests are TOP-LEVEL, on the object's own keys — [`Value::get`], never a
 /// recursive search.** A recursive reading would reject the shipped D47 `-32600` frame, whose `code`
 /// member is nested under `error`; that frame is legitimate framing and this predicate must accept
-/// it.
+/// it. That claim is pinned for ALL THREE tests, not only for `code`, by `mcp_stdout_channel.rs`'s
+/// H6; and each of the two blob-shape clauses is pinned as INDEPENDENTLY load-bearing by H5, whose
+/// inputs carry one blob member each — H1's inputs cannot discriminate them, so dropping either
+/// clause was green until H5 existed.
 #[must_use]
 pub fn is_jsonrpc_framing(value: &Value) -> bool {
     value.get("jsonrpc").is_some()
@@ -408,6 +423,20 @@ impl McpClient {
         for handle in self.drains.drain(..) {
             let _ignored = handle.join();
         }
+    }
+
+    /// How many retained drain threads are still UNJOINED — the deterministic observation of
+    /// [`join_drains`](Self::join_drains) having run.
+    ///
+    /// It exists because the alternative is a TIMING assertion. The defect this accessor guards
+    /// against (deleting the `join_drains()` call in [`wait_for`](Self::wait_for)) is fail-SILENT
+    /// and RARE — an unjoined drain usually finishes first, so a cell that asserted on buffer
+    /// COMPLETENESS alone would pass under the mutation on nearly every run and then flake for real
+    /// on a loaded machine. The count is exact, so the self-test (`mcp_stdout_channel.rs` H9) reads
+    /// the synchronisation itself rather than gambling on its outcome.
+    #[must_use]
+    pub fn pending_drain_count(&self) -> usize {
+        self.drains.len()
     }
 
     /// Everything the child has written to STDOUT since [`capture_stdout`](Self::capture_stdout)
