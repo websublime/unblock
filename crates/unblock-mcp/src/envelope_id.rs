@@ -220,6 +220,7 @@ impl<'de> Visitor<'de> for IdVisitor<'_> {
 mod tests {
     use super::{EnvelopeId, scan};
     use crate::envelope_id_corpus::divergence_corpus;
+    use proptest::prelude::*;
     use rmcp::model::{NumberOrString, RequestId};
     use serde::Deserialize as _;
 
@@ -304,6 +305,16 @@ mod tests {
                 "{entry} must be Unusable"
             );
         }
+        // The EMPTY array, which the corpus does not carry: D09 spells the array case `[1]`, a
+        // different byte shape reaching the same `RequestId` rejection. Asserted here rather than
+        // added to the shared corpus because it grades nothing at the wire — the two frames are
+        // answered with identical bytes — so a corpus entry would cost every duplex and CLI tier a
+        // round trip to re-prove one library decision.
+        assert_eq!(
+            scan(br#"{"jsonrpc":"2.0","id":[],"method":"ping"}"#),
+            EnvelopeId::Unusable,
+            "an EMPTY array id is no representable RequestId either"
+        );
     }
 
     /// **A6** — a number outside what `RequestId` accepts is unusable, and the neighbours that ARE
@@ -364,6 +375,52 @@ mod tests {
             scan(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":[{"id":3}]}"#),
             EnvelopeId::Absent
         );
+    }
+
+    /// **A14** — the ROOT SHAPES that are not an object: every scalar root, an array root, and an
+    /// `id` sitting inside a ROOT-LEVEL array element are ALL `Absent`.
+    ///
+    /// A root-level array element is NOT what A8 drives: that cell nests its array under `params`,
+    /// so the root is still an object and [`IdVisitor::visit_map`] still runs. These lines are the
+    /// only ones in the module that reach the visitor's scalar arms and [`IdVisitor::visit_seq`] at
+    /// all.
+    ///
+    /// **What this cell does NOT do, stated because "it exercises them" reads as "it grades them":
+    /// it does not grade those arms.** Delete every scalar arm and `visit_seq` and the verdict is
+    /// UNCHANGED — `deserialize_any` then fails with an `invalid_type` error and [`scan`] maps a
+    /// failed seed to `Absent` too (the `seeded.is_err()` guard), so arm-deletion is an EQUIVALENT
+    /// mutant by construction, not a hole a byte corpus could close. What the cell does pin is the
+    /// property D47's out-of-scope carve-out rests on: a non-object root NEVER produces a reply.
+    ///
+    /// One arm is unreachable even here, and saying so is cheaper than leaving a reader to
+    /// rediscover it: `visit_none` is never called by `serde_json`'s `deserialize_any`, which
+    /// renders JSON `null` through `visit_unit`. `visit_none` belongs to the `Option` protocol and
+    /// no `Option` is ever deserialized on this path.
+    #[test]
+    fn scan_is_absent_on_a_non_object_root() {
+        for line in [
+            &b"null"[..],
+            &b"true"[..],
+            &b"42"[..],
+            &b"-1"[..],
+            &b"1.5"[..],
+            &b"18446744073709551615"[..],
+            // A STRING root that spells the key itself: the scan is structural, never a substring
+            // hunt for the bytes `id`.
+            &br#""id""#[..],
+            &b"[]"[..],
+            &b"[1,2,3]"[..],
+            // The plan's root-level array ELEMENT: `id` at depth 1 of an ARRAY root, which is the
+            // one root shape neither A1 nor A8 reaches.
+            &br#"[{"id":3}]"#[..],
+        ] {
+            assert_eq!(
+                scan(line),
+                EnvelopeId::Absent,
+                "a non-object root has no envelope id: {}",
+                String::from_utf8_lossy(line)
+            );
+        }
     }
 
     /// **A9** — exactly ONE prefix BOM is stripped, mirroring the parser.
@@ -440,11 +497,14 @@ mod tests {
         assert_eq!(scan(&bytes), text("a"));
     }
 
-    /// **A12** — `scan` agrees with `RequestId::deserialize` for ANY value spliced as the id.
+    /// **A12** — `scan` agrees with `RequestId::deserialize` on a FIXED TABLE of the boundary
+    /// values that decide recoverability. The "for ANY value" half of that property is A15, the
+    /// proptest below; this cell is its named-boundary regression corpus, kept because a shrunk
+    /// proptest counterexample is not a guarantee that `i64::MIN` is retried on every run.
     ///
-    /// **A12 splices exactly ONE `id` member, so it never exercises the COMPARISON at all** — it
-    /// grades the recoverability decision only. Equality is graded by A3/A4/A10/A13. Saying so is
-    /// the point: read as equality coverage it would be a false claim.
+    /// **This cell splices exactly ONE `id` member, so it never exercises the COMPARISON at all**
+    /// — it grades the recoverability decision only. Equality is graded by A3/A4/A10/A13. Saying so
+    /// is the point: read as equality coverage it would be a false claim.
     ///
     /// Mutation: `RequestId::deserialize` replaced by a hand-written type table at the collector.
     #[test]
@@ -480,6 +540,67 @@ mod tests {
                 scan(&bytes),
                 expected,
                 "scan disagreed with RequestId::deserialize on {value}"
+            );
+        }
+    }
+
+    /// Every JSON shape, bounded in depth and width, as an envelope-`id` candidate.
+    ///
+    /// Bounded deliberately: the property below is about the value's TYPE, and `RequestId` rejects
+    /// every container outright, so unbounded nesting would trade retries of the interesting
+    /// scalars — the i64 boundaries, the float/integer split, the empty string — for deep trees
+    /// that all decide the same way. `f64` is generated over its FULL range on purpose, NaN and the
+    /// infinities included: `serde_json` has no JSON spelling for those, so they arrive as `Null`
+    /// and cost nothing, while every finite `f64` round-trips exactly through `ryu`.
+    fn any_json_value() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::from),
+            any::<i64>().prop_map(serde_json::Value::from),
+            any::<u64>().prop_map(serde_json::Value::from),
+            any::<f64>().prop_map(serde_json::Value::from),
+            ".*".prop_map(serde_json::Value::from),
+        ];
+        leaf.prop_recursive(3, 16, 3, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..3).prop_map(serde_json::Value::Array),
+                proptest::collection::vec((".*", inner), 0..3)
+                    .prop_map(|members| serde_json::Value::Object(members.into_iter().collect())),
+            ]
+        })
+    }
+
+    // **A15** — the PROPERTY the crate plan names: `scan` agrees with `RequestId::deserialize` for
+    // ANY value spliced as the envelope `id`. A12 is the same claim over 14 hand-picked values;
+    // this is the claim itself, and the two are kept apart so neither is read as the other.
+    //
+    // The agreement is meant to be STRUCTURAL — `scan` calls rmcp's own deserializer rather than a
+    // type table — so the only way this property can fail is if the SPLICE loses information: a
+    // value whose JSON encoding does not parse back to itself would make the two sides disagree
+    // about what they were even asked. That is exactly the failure a fixed table cannot look for,
+    // because whoever writes the table picks values that round-trip.
+    //
+    // Mutation: `RequestId::deserialize` replaced by a hand-written type table at the collector
+    // (the same mutant A12 names) — the table gets the i64/u64 boundary or the float-vs-integer
+    // split wrong on some generated value and the property shrinks straight to it.
+    proptest::proptest! {
+        #[test]
+        fn recovery_agrees_with_rmcp_for_any_spliced_value(value in any_json_value()) {
+            let frame = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": value,
+                "method": "ping",
+            });
+            let bytes = serde_json::to_vec(&frame).expect("frame serialises");
+            let expected = match RequestId::deserialize(value.clone()) {
+                Ok(id) => EnvelopeId::Recovered(id),
+                Err(_) => EnvelopeId::Unusable,
+            };
+            prop_assert_eq!(
+                scan(&bytes),
+                expected,
+                "scan disagreed with RequestId::deserialize on {}",
+                value
             );
         }
     }
