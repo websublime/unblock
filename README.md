@@ -257,7 +257,10 @@ Command-specific flags: `init` takes `--prefix <PREFIX>` and `--force`; `update`
 **Exit codes** — a stable 0–8 contract: `0` ok · `1` internal · `2` workspace/db · `3` not-found/id ·
 `4` validation · `5` dependency/cycle · `6` sync/path · `7` config · `8` io/json. The full
 code → exit → retryable table is in the generated `AGENTS.md` and in `unblock://capabilities`.
-Structured output goes to **stdout**; diagnostics go to **stderr** (NFR-14).
+Structured output goes to **stdout**; diagnostics go to **stderr** (NFR-14). One carve-out: `unblock mcp` owns
+stdout as the MCP JSON-RPC framing channel, so **once the server starts** it writes nothing there but frames —
+its structured errors go to stderr too, whole and machine-readable (the exit code is the same either way).
+`unblock mcp --help` never starts the server, so it keeps its usage text on stdout like every other subcommand.
 
 ## Self-update
 

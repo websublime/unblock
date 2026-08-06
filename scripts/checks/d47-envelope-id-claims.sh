@@ -68,11 +68,11 @@ cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exi
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves: the
-# prose range `(D1..D47)` and the tokenizer's regex ALTERNATION `\bD(47|46|45|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D47 finding — the lint would stop tokenizing
+# prose range `(D1..D48)` and the tokenizer's regex ALTERNATION `\bD(48|47|46|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D48 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D47'
-RANGE_ALT_RE='D\(47\|46\|'
+RANGE_RE='D1\.\.D48'
+RANGE_ALT_RE='D\(48\|47\|'
 
 # The LIVE published contract version. D47 does NOT move it (see the header): this row is the
 # affirmative record of that, so a silent bump riding this decision goes red.
