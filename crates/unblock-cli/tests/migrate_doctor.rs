@@ -373,35 +373,11 @@ fn stamped_user_version(ws: &Workspace) -> i64 {
     })
 }
 
-/// A tiny current-thread runtime for the raw-libsql fixtures (the harness itself is sync).
-fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build a current-thread runtime")
-}
-
-/// Stamp `PRAGMA user_version = <version>` on the workspace DB via a raw libsql open (the same bundled
-/// `SQLite` the backend uses). This makes the on-disk schema look NEWER than this build so the next
-/// migrate rejects it with `SchemaMismatch` (D27/AF-2). The connection is dropped before the CLI child
-/// opens the file, so there is no writer contention.
-fn stamp_user_version(db: &std::path::Path, version: i64) {
-    // A tiny current-thread runtime just to drive the async libsql open/exec (the harness is sync).
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build a current-thread runtime");
-    rt.block_on(async {
-        let database = libsql::Builder::new_local(db)
-            .build()
-            .await
-            .expect("open the workspace db");
-        let conn = database.connect().expect("connect");
-        conn.execute(&format!("PRAGMA user_version = {version}"), ())
-            .await
-            .expect("stamp user_version");
-    });
-}
+// `runtime()` and `stamp_user_version()` were PROMOTED into `common/mod.rs` (D48): the `mcp`
+// channel suite provokes the same future-`user_version` case, and two copies of a fixture is how
+// two provocations drift apart. Both are re-exported here under their original names so every
+// call site below reads as it did.
+use common::{runtime, stamp_user_version};
 
 #[test]
 fn doctor_healthy_routes_through_session_doctor_and_exits_0() {

@@ -9,9 +9,15 @@
 //! not a user `IoError` (exit 8). CLI-local variants: `AlreadyInitialized` (exit 2, the init clobber
 //! guard — `ConfigError` has none), scaffold/agents `Io` (exit 8), `Update` (exit 1).
 //!
-//! **NFR-14 + FR-11 stream split:** in `json`/`robot` the structured error renders to STDOUT (always
-//! valid JSON even on error, FR-11); in `plain`/`csv`/`markdown` a human `error[CODE]: message` line
-//! goes to STDERR (diagnostics, NFR-14).
+//! **NFR-14 + FR-11 stream split:** in `json`/`robot` the structured error renders to the command's
+//! REPORT channel (always valid JSON even on error, FR-11); in `plain`/`csv`/`markdown` a human
+//! `error[CODE]: message` line goes to STDERR (diagnostics, NFR-14).
+//!
+//! **D48 — which stream the report channel IS.** For six of the seven commands it is STDOUT, exactly
+//! as NFR-14's generic reading says. For a command that owns stdout as a wire-protocol FRAMING
+//! channel ([`StdoutRole::Protocol`] — `unblock mcp` on MCP stdio, the only member today) every byte
+//! on fd 1 must be a JSON-RPC frame, so the SAME structured document goes to STDERR instead, whole
+//! and undegraded. The CHANNEL moves; the payload and the 0–8 exit codes do not.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -20,6 +26,22 @@ use std::process::ExitCode;
 use snafu::Snafu;
 use unblock_error::{ErrorCode, StructuredError};
 use unblock_render::{OutputFormat, RenderOptions, renderer_for};
+
+/// D48: what a command's STDOUT *is* — its own report channel, or a wire-protocol framing channel.
+///
+/// The rule is stated over this PROPERTY rather than over a command NAME so a future
+/// protocol-owning command inherits it instead of re-deriving it (PRD §4 D48 clause 1). It is a
+/// two-valued ENUM and never a `bool`: that makes both call sites self-describing and makes a
+/// flipped classification a visible one-token edit rather than an invisible `!`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StdoutRole {
+    /// stdout is this command's OWN report channel: the `json`/`robot` structured error renders
+    /// there (NFR-14's generic rule — `version`, `migrate`, `doctor`, `init`, `agents`, `update`).
+    Reports,
+    /// stdout is a wire-protocol FRAMING channel: every byte on it must be a JSON-RPC frame, so the
+    /// structured error renders to STDERR instead (D48). `unblock mcp` is the only member today.
+    Protocol,
+}
 
 /// The `unblock-cli` error type — the single L7 surface mapped to a 0–8 exit code (spine §2.3).
 #[derive(Debug, Snafu)]
@@ -121,37 +143,107 @@ fn to_structured(err: CliError) -> StructuredError {
 
 /// Convert a `CliError` into the process `ExitCode`, emitting the structured error per NFR-14/FR-11.
 ///
-/// - `json`/`robot`: the `StructuredError` renders to STDOUT (always valid JSON even on error);
-/// - `plain`/`csv`/`markdown`: a human `error[CODE]: message` line goes to STDERR (diagnostics).
+/// - `json`/`robot`: the `StructuredError` renders to the command's REPORT channel — STDOUT for a
+///   [`StdoutRole::Reports`] command, STDERR for a [`StdoutRole::Protocol`] one (D48). Either way it
+///   is the SAME document: always valid JSON even on error, `hint` retained;
+/// - `plain`/`csv`/`markdown`: a human `error[CODE]: message` line goes to STDERR (diagnostics) —
+///   role-independent, since that stream is already correct under both.
 ///
-/// The 0–8 cast is CLI-owned: `ExitCode::from(structured.exit_code())`.
+/// The 0–8 cast is CLI-owned and lives HERE: this wrapper is the single `ExitCode::from` site over
+/// [`into_exit_to`]'s raw byte. `role` is derived from the PARSED command
+/// ([`crate::cli::Command::stdout_role`]) at `lib.rs`, where `cli` is still in scope.
+///
+/// **Honest residue (the reason [`into_exit_to`] exists at all is testability, so its limit is
+/// stated rather than left to be discovered):** binding the two real streams below is the ONE line
+/// no unit cell can pin — swapping these two arguments compiles and survives every cell that drives
+/// the core against buffers. That is what the spawning end-to-end suite
+/// (`tests/mcp_stdout_channel.rs`) and the two inverted `tests/mcp_lifecycle.rs` cells cover, and
+/// why D48 clause (7) demands BOTH layers rather than treating either as sufficient.
 #[must_use]
-pub(crate) fn into_exit(err: CliError, fmt: OutputFormat) -> ExitCode {
+pub(crate) fn into_exit(err: CliError, fmt: OutputFormat, role: StdoutRole) -> ExitCode {
+    ExitCode::from(into_exit_to(
+        err,
+        fmt,
+        role,
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    ))
+}
+
+/// The sink-injected core of [`into_exit`], returning the RAW 0–8 code.
+///
+/// **Why both sinks are PARAMETERS.** [`into_exit`] writes through `std::io::stdout().lock()`, which
+/// bypasses libtest's capture, and `#![forbid(unsafe_code)]` with no `libc` dependency rules out
+/// redirecting the descriptor — so the stream CHOICE is observable in-process only through injection
+/// (the same argument [`emit_diagnostic`] already makes for itself below). The STDOUT sink is
+/// injected as well as the stderr one for one specific cell: that a `Reports` command's bytes still
+/// land on stdout, unmoved. That mirror is the only in-process guard against a renderer which
+/// IGNORES `role` and sends every command's report to stderr.
+///
+/// **Why it returns `u8` and not `ExitCode`.** `std::process::ExitCode` implements neither
+/// `PartialEq` nor any numeric accessor, which would leave D48 clause (4) — the exit code does NOT
+/// move when the channel does — unassertable in-process. The single cast stays in the wrapper.
+#[must_use]
+pub(crate) fn into_exit_to(
+    err: CliError,
+    fmt: OutputFormat,
+    role: StdoutRole,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> u8 {
     let structured = to_structured(err);
     let exit = structured.exit_code();
 
     match fmt {
-        // Machine formats: the structured payload to STDOUT (FR-11 always-valid JSON on error).
+        // Machine formats: the structured payload to the command's REPORT channel (FR-11
+        // always-valid JSON on error). D48 chooses the stream from `role` and changes NOTHING else —
+        // the same bytes, the same `hint`, the same `exit` returned below.
         OutputFormat::Json | OutputFormat::Robot => {
             let opts = RenderOptions::default();
             if let Ok(out) = renderer_for(fmt, opts.clone()).structured_error(&structured, &opts) {
-                let mut stdout = std::io::stdout().lock();
-                let _ignored = stdout.write_all(out.stdout.as_bytes());
-                let _ignored = stdout.write_all(b"\n");
+                match role {
+                    StdoutRole::Reports => write_payload(&out.stdout, stdout),
+                    // stdout is the JSON-RPC framing channel here: a StructuredError document is not
+                    // a frame, so it goes to stderr — whole, where an MCP host capturing the child's
+                    // stderr can still read it.
+                    StdoutRole::Protocol => write_payload(&out.stdout, stderr),
+                }
             } else {
-                // Rendering the error itself failed — still surface something machine-safe on stderr.
-                emit_human(&structured);
+                // Rendering the error itself failed — still surface something machine-safe on
+                // stderr. Deliberately does NOT branch on `role`: this destination is already
+                // correct under both, since stderr is never a framing channel.
+                let _ignored = write_human(&structured, stderr);
             }
         }
-        // Human formats: a one-line diagnostic to STDERR (NFR-14).
-        _ => emit_human(&structured),
+        // Human formats: a one-line diagnostic to STDERR (NFR-14) — role-independent, same reason.
+        _ => {
+            let _ignored = write_human(&structured, stderr);
+        }
     }
 
-    ExitCode::from(exit)
+    exit
+}
+
+/// Write a rendered machine payload plus its terminating newline onto `out` — the ONE place that
+/// shape exists, so the two [`StdoutRole`] arms cannot drift in anything but their destination.
+///
+/// A failing report stream never changes the exit code we were asked to deliver, so both writes are
+/// deliberately ignored (the same rule [`emit_diagnostic`] states).
+fn write_payload(payload: &str, out: &mut impl Write) {
+    let _ignored = out.write_all(payload.as_bytes());
+    let _ignored = out.write_all(b"\n");
 }
 
 /// Report a `CliError` as a human `error[CODE]: message` line on `out` **without deciding the exit
-/// code** (D38, spine §5b) — the `mcp` command's GENUINE-error diagnostic sink.
+/// code** (D38, spine §5b) — the `mcp` command's POST-SIGNAL and DISPLACED-teardown diagnostic sink.
+///
+/// **Since D48 this is one of TWO `mcp` stderr writers, and the pair differs in SHAPE, not in
+/// channel.** [`into_exit`] renders the unsignalled `Err` path's FULL structured document to stderr
+/// on this command; this function renders the degraded one-line form. The asymmetry is FROZEN by
+/// decision rather than repaired here (PRD §4 D48 clause 2): the lines below are not the report of
+/// the process's OUTCOME — the exit code was already decided by the recorded signal (D38) or by the
+/// root-cause error that displaced them — and they already went to stderr, so no channel moves.
+/// Widening them to the whole document would be a payload change on a D38-owned path.
 ///
 /// When the FR-17 handle recorded a signal, `commands/mcp.rs` returns `Ok(Some(128+signo))`, which
 /// takes `run_with`'s Ok arm and so never reaches [`into_exit`]; likewise the teardown error that
@@ -166,21 +258,18 @@ pub(crate) fn into_exit(err: CliError, fmt: OutputFormat) -> ExitCode {
 /// against a buffer, so gutting it to a no-op turns that test RED — the mutation that previously
 /// SURVIVED the whole suite. A pure-formatter split would not achieve that: gutting the emitter
 /// would still leave the formatter's test green. Callers pass STDERR: on `mcp`, stdout is MCP
-/// framing ONLY (NFR-14), and FR-11's always-valid-JSON-on-stdout rule binds only the UNSIGNALLED
-/// `Err` path (which renders via [`into_exit`], not here).
+/// framing ONLY (NFR-14) on EVERY path — since D48 the unsignalled `Err` path writes its structured
+/// document to stderr too (via [`into_exit`], in the full shape this function does not use), so the
+/// framing channel is no longer the exception it once was.
 pub(crate) fn emit_diagnostic(err: CliError, out: &mut impl Write) {
     // A diagnostic must never itself become a failure: a closed/failing stderr is not a reason to
     // change the exit code we were asked to deliver.
     let _ignored = write_human(&to_structured(err), out);
 }
 
-/// Write a human `error[CODE]: message` line to STDERR (NFR-14).
-fn emit_human(structured: &StructuredError) {
-    let _ignored = write_human(structured, &mut std::io::stderr().lock());
-}
-
 /// Render the single human diagnostic line shape (`error[CODE]: message`) onto `out` — the ONE
-/// place that shape exists, shared by [`into_exit`]'s human arm and [`emit_diagnostic`].
+/// place that shape exists, shared by [`into_exit_to`]'s human arm, its render-failure fallback arm,
+/// and [`emit_diagnostic`].
 fn write_human(structured: &StructuredError, out: &mut impl Write) -> std::io::Result<()> {
     writeln!(
         out,
@@ -371,5 +460,246 @@ mod tests {
         let structured = to_structured(err);
         assert_eq!(structured.code, ErrorCode::InternalError);
         assert_eq!(structured.exit_code(), 1);
+    }
+
+    // -- D48: the CHANNEL moves, the payload and the exit code do not. ------------------------
+    //
+    // These drive `into_exit_to` against two buffers, which is the only way to observe the stream
+    // CHOICE in-process: `into_exit` writes through `std::io::stdout().lock()` (bypassing libtest
+    // capture) and `#![forbid(unsafe_code)]` rules out redirecting the descriptor.
+    //
+    // What this layer can NEVER see is the CLASSIFIER (`Command::stdout_role`, covered by its own
+    // cell in `cli.rs`) or the wrapper's binding of the two real streams — every cell here supplies
+    // the role as a literal. A swapped pair of sink arguments in `into_exit` compiles and survives
+    // all of them, which is why `tests/mcp_stdout_channel.rs` and the two inverted
+    // `tests/mcp_lifecycle.rs` cells are required rather than optional (D48 clause 7).
+
+    use super::{StdoutRole, into_exit_to};
+    use unblock_render::OutputFormat;
+
+    /// The provocation these cells share: a CLI-local error with a stable code and exit 2.
+    fn already_initialized() -> CliError {
+        CliError::AlreadyInitialized {
+            path: "/ws/.unblock".into(),
+        }
+    }
+
+    /// A `SCHEMA_MISMATCH` wrapped exactly as the `mcp` open path produces it — through
+    /// `ConfigError`, which is what FORWARDS the hint to the CLI.
+    fn schema_mismatch() -> CliError {
+        CliError::Config {
+            source: unblock_config::ConfigError::MigrationFailed {
+                source: unblock_storage::StorageError::SchemaMismatch {
+                    found: 99,
+                    expected: 2,
+                },
+            },
+        }
+    }
+
+    fn parse_payload(bytes: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(bytes).unwrap_or_else(|e| {
+            panic!(
+                "the machine arm must emit ONE valid JSON document: `{}`: {e}",
+                String::from_utf8_lossy(bytes)
+            )
+        })
+    }
+
+    /// **U1 — the positive-landing cell.** For a PROTOCOL-channel command the `json` document lands
+    /// on STDERR and stdout is left untouched. The POSITIVE half (stderr parses and carries the
+    /// code) is what survives a delete-the-diagnostic mutation; the stdout-empty half alone would
+    /// not, since stdout is legitimately empty on every pre-run-loop failure.
+    #[test]
+    fn a_machine_error_for_a_protocol_role_lands_on_stderr() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = into_exit_to(
+            already_initialized(),
+            OutputFormat::Json,
+            StdoutRole::Protocol,
+            &mut out,
+            &mut err,
+        );
+        assert!(
+            out.is_empty(),
+            "D48: nothing may reach the framing channel, got `{}`",
+            String::from_utf8_lossy(&out)
+        );
+        let payload = parse_payload(&err);
+        assert_eq!(payload["code"], "ALREADY_INITIALIZED");
+        assert_eq!(payload["retryable"], false);
+        assert!(
+            !String::from_utf8_lossy(&err).starts_with("error["),
+            "the FULL document moves, never the degraded human line"
+        );
+        assert_eq!(code, 2, "the channel moved; the exit code did not");
+    }
+
+    /// **U2 — the `Reports` mirror.** The in-process guard that no OTHER command's bytes move: a
+    /// renderer ignoring the classification and writing everything to stderr turns this RED. It
+    /// says nothing about the classifier itself, which hands it a literal.
+    #[test]
+    fn a_machine_error_for_a_reports_role_still_lands_on_stdout() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = into_exit_to(
+            already_initialized(),
+            OutputFormat::Json,
+            StdoutRole::Reports,
+            &mut out,
+            &mut err,
+        );
+        let payload = parse_payload(&out);
+        assert_eq!(payload["code"], "ALREADY_INITIALIZED");
+        assert!(
+            err.is_empty(),
+            "a REPORTS command is byte-unchanged by D48, got stderr `{}`",
+            String::from_utf8_lossy(&err)
+        );
+        assert_eq!(code, 2);
+    }
+
+    /// **U3** — `robot` moves too. Kills a carve-out keyed on `Json` alone.
+    #[test]
+    fn robot_moves_too_not_only_json() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = into_exit_to(
+            already_initialized(),
+            OutputFormat::Robot,
+            StdoutRole::Protocol,
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 2);
+        assert!(
+            out.is_empty(),
+            "robot is a MACHINE format: it moves as well"
+        );
+        let payload = parse_payload(&err);
+        assert_eq!(payload["code"], "ALREADY_INITIALIZED");
+    }
+
+    /// **U4** — the human arm is role-INDEPENDENT: `plain` writes its one line to stderr under both
+    /// classifications and never to stdout.
+    #[test]
+    fn the_human_arm_is_unchanged_for_both_roles() {
+        for role in [StdoutRole::Reports, StdoutRole::Protocol] {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = into_exit_to(
+                already_initialized(),
+                OutputFormat::Plain,
+                role,
+                &mut out,
+                &mut err,
+            );
+            assert!(out.is_empty(), "{role:?}: the human arm never uses stdout");
+            let line = String::from_utf8(err).expect("utf8 diagnostic");
+            assert!(
+                line.starts_with("error[ALREADY_INITIALIZED]: "),
+                "{role:?}: the NFR-14 line shape is untouched, got `{line}`"
+            );
+            assert!(line.ends_with('\n'), "{role:?}: `{line}`");
+            assert_eq!(code, 2);
+        }
+    }
+
+    /// **U5 — D48's payload clause in full.** The relocated document is NOT degraded: the `hint`,
+    /// which is the actionable half of the D46 mixed-version case, survives the move. Degrading the
+    /// protocol arm to the `error[CODE]` line (which drops it) turns this RED.
+    #[test]
+    fn the_hint_survives_the_move_to_stderr() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = into_exit_to(
+            schema_mismatch(),
+            OutputFormat::Json,
+            StdoutRole::Protocol,
+            &mut out,
+            &mut err,
+        );
+        assert!(out.is_empty());
+        let payload = parse_payload(&err);
+        assert_eq!(payload["code"], "SCHEMA_MISMATCH");
+        let hint = payload["hint"].as_str().unwrap_or_default();
+        assert!(
+            hint.contains("NEWER") && hint.contains("unblock update"),
+            "the operator's next action rides in the `hint`, and it must not be dropped: {payload}"
+        );
+        assert_eq!(code, 2);
+    }
+
+    /// **U6 — the exit code does not move (D48 clause 4), asserted at the choke point.** Every
+    /// combination of role and format returns the error's OWN 0–8 code. A protocol arm returning a
+    /// fixed code turns this RED.
+    #[test]
+    fn the_channel_move_never_moves_the_exit_code() {
+        let cases: [(fn() -> CliError, u8); 2] = [
+            (
+                || CliError::Mcp {
+                    source: unblock_mcp::McpServerError::__transport_error("boom"),
+                },
+                1,
+            ),
+            (
+                || CliError::Config {
+                    source: unblock_config::ConfigError::WorkspaceNotFound {
+                        start: "/ws".into(),
+                    },
+                },
+                2,
+            ),
+        ];
+        for (make, expected) in cases {
+            for fmt in [OutputFormat::Json, OutputFormat::Plain] {
+                for role in [StdoutRole::Reports, StdoutRole::Protocol] {
+                    let (mut out, mut err) = (Vec::new(), Vec::new());
+                    let code = into_exit_to(make(), fmt, role, &mut out, &mut err);
+                    assert_eq!(
+                        code, expected,
+                        "D48 moves the CHANNEL and nothing else ({fmt:?}, {role:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **U8 — "byte for byte", ASSERTED rather than adjectival.** The same error at the same format
+    /// renders identical BYTES whichever channel it lands on; every other cell checks MEMBERS, so a
+    /// mutation that reformatted or reordered the document would pass them all. Injecting both
+    /// sinks is what makes this two comparisons instead of a spawned process.
+    ///
+    /// **The equality is RELATIVE, and that limit is stated rather than left to be assumed:** it
+    /// pins the two channels against EACH OTHER, not either of them against the bytes that shipped
+    /// before D48. A mutation that reformatted BOTH arms identically would survive this cell. What
+    /// closes that chain is the eight shipped end-to-end cells which still assert a payload on
+    /// STDOUT for the six report-channel commands — they are the anchor to today's bytes.
+    #[test]
+    fn the_relocated_payload_is_byte_identical() {
+        for fmt in [OutputFormat::Json, OutputFormat::Robot] {
+            let (mut reports_out, mut reports_err) = (Vec::new(), Vec::new());
+            let reports_code = into_exit_to(
+                already_initialized(),
+                fmt,
+                StdoutRole::Reports,
+                &mut reports_out,
+                &mut reports_err,
+            );
+            let (mut protocol_out, mut protocol_err) = (Vec::new(), Vec::new());
+            let protocol_code = into_exit_to(
+                already_initialized(),
+                fmt,
+                StdoutRole::Protocol,
+                &mut protocol_out,
+                &mut protocol_err,
+            );
+            assert_eq!(
+                reports_code, protocol_code,
+                "{fmt:?}: same input, same code"
+            );
+            assert!(!reports_out.is_empty(), "{fmt:?}: nothing was rendered");
+            assert_eq!(
+                reports_out, protocol_err,
+                "{fmt:?}: the SAME document, byte for byte — only the stream differs (D48 clause 3)"
+            );
+            assert!(reports_err.is_empty() && protocol_out.is_empty(), "{fmt:?}");
+        }
     }
 }

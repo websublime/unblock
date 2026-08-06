@@ -107,13 +107,126 @@ impl Workspace {
 /// per-case tempdir — flipping the D39 startup-line tier assertion (and any actor-derived field) RED
 /// purely from the host shell. Scrubbing them keeps every spawn hermetic (module doc invariant); a
 /// case that WANTS one of these sets it back with `Command::env` (which wins over this removal).
+///
+/// `UNBLOCK_OUTPUT_FORMAT` (FR-13/D48) is scrubbed for the same reason and one worse one: it selects
+/// the error-render FORMAT for every spawn, so a host shell exporting `plain` would make every D48
+/// frame-only assertion pass VACUOUSLY (the human arm writes nothing to stdout in any case) while
+/// turning the shipped `mcp_lifecycle.rs` payload assertion RED for a reason having nothing to do
+/// with the code under test.
 #[must_use]
 pub fn unblock() -> Command {
     let mut cmd = Command::cargo_bin("unblock").expect("locate the `unblock` binary");
     cmd.env_remove("CLAUDE_PROJECT_DIR");
     cmd.env_remove("UNBLOCK_DIR");
     cmd.env_remove("UNBLOCK_ACTOR");
+    // FR-13/D48: see the paragraph above — inherited, it makes the frame-only cells vacuous.
+    cmd.env_remove("UNBLOCK_OUTPUT_FORMAT");
     cmd
+}
+
+/// The D48 oracle: the ONE stderr line that IS the `StructuredError` payload, parsed.
+///
+/// `mcp` stderr legitimately carries non-payload lines — the D39 startup binding line
+/// (`commands/mcp.rs`) and `tracing` records on a `-vv` child — so the payload is located by SHAPE
+/// (`code` + `retryable`, the pair this suite already uses to spell "a `StructuredError` blob"), never
+/// by position. A whole-buffer `serde_json::from_str(stderr.trim())` would be red from the D39 line
+/// alone. The render is COMPACT single-line JSON (`RenderOptions::default().pretty_json == false`),
+/// so one line is the whole payload.
+#[must_use]
+pub fn structured_error_on_stderr(stderr: &str) -> Option<Value> {
+    stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .find(|v| v.get("code").is_some() && v.get("retryable").is_some())
+}
+
+/// Assert every non-empty stdout line is JSON-RPC framing (NFR-14 / D48): valid JSON carrying a
+/// `jsonrpc` member and NO `StructuredError` shape at the top level.
+///
+/// **This assertion is VACUOUSLY TRUE on empty stdout, which is the normal state for every
+/// pre-run-loop failure.** It is therefore never sufficient alone: every cell calling it MUST also
+/// assert the POSITIVE stderr landing via [`structured_error_on_stderr`], or the cell stays green
+/// under a mutation that deletes the diagnostic outright.
+///
+/// **And for that same reason this function is DRIVEN DIRECTLY by a self-test**
+/// (`mcp_stdout_channel.rs`): every production call site asserts stdout is EMPTY immediately
+/// afterwards, so the loop below never sees a byte and replacing the whole body with `{}` would
+/// leave the matrix green. A guard nobody drives is a guard that can be deleted.
+pub fn assert_stdout_is_frame_only(stdout: &str, cell: &str) {
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let parsed: Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("{cell}: stdout line is not JSON: `{line}`: {e}"));
+        assert!(
+            parsed.get("jsonrpc").is_some(),
+            "{cell}: not JSON-RPC framing: {line}"
+        );
+        assert!(
+            parsed.get("code").is_none() && parsed.get("retryable").is_none(),
+            "{cell}: a StructuredError blob reached the JSON-RPC framing channel: {line}"
+        );
+    }
+}
+
+/// Is `value` a JSON-RPC frame (a `jsonrpc` member) rather than a `StructuredError` blob
+/// (`code` + `retryable`)? The D48 hardening of the [`McpClient::read_response`] guard.
+///
+/// **All three membership tests are TOP-LEVEL, on the object's own keys — [`Value::get`], never a
+/// recursive search.** A recursive reading would reject the shipped D47 `-32600` frame, whose `code`
+/// member is nested under `error`; that frame is legitimate framing and this predicate must accept
+/// it.
+#[must_use]
+pub fn is_jsonrpc_framing(value: &Value) -> bool {
+    value.get("jsonrpc").is_some()
+        && value.get("code").is_none()
+        && value.get("retryable").is_none()
+}
+
+/// A tiny current-thread runtime for the raw-libsql fixtures (the harness itself is sync).
+#[must_use]
+pub fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a current-thread runtime")
+}
+
+/// Stamp `PRAGMA user_version = <version>` on the workspace DB via a raw libsql open (the same
+/// bundled `SQLite` the backend uses). This makes the on-disk schema look NEWER than this build so
+/// the next migrate rejects it with `SchemaMismatch` (D27/AF-2). The connection is dropped before
+/// the CLI child opens the file, so there is no writer contention.
+pub fn stamp_user_version(db: &Path, version: i64) {
+    runtime().block_on(async {
+        let database = libsql::Builder::new_local(db)
+            .build()
+            .await
+            .expect("open the workspace db");
+        let conn = database.connect().expect("connect");
+        conn.execute(&format!("PRAGMA user_version = {version}"), ())
+            .await
+            .expect("stamp user_version");
+    });
+}
+
+/// Corrupt the `SQLite` SCHEMA region (from byte 100 — after the file header, over `sqlite_master`)
+/// so the very first `open_local`/`migrate()` read fails as `database disk image is malformed` →
+/// `DATABASE_ERROR`, exit 2. Deterministic: fixed bytes at a fixed offset.
+///
+/// **NOT the same recipe as `migrate_doctor.rs`'s `corrupt_db`**, which starts at 4096 to keep page
+/// 1 intact: that one is INVISIBLE to the `mcp` open path (measured exit 0, clean EOF, empty
+/// stdout), so a cell built on it would pass today, pass after the fix, and pass under every
+/// mutation.
+pub fn corrupt_db_schema_page(db: &Path) {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(db)
+        .expect("open the workspace db for corruption");
+    file.seek(SeekFrom::Start(100))
+        .expect("seek past the SQLite file header");
+    file.write_all(&[0xAD; 16 * 1024])
+        .expect("scribble over the schema region");
+    file.flush().expect("flush the corruption");
 }
 
 /// A `Command` for the `unblock` binary anchored at `dir` (its cwd) — used when the case wants a
@@ -148,6 +261,19 @@ pub struct McpClient {
     /// The child's STDOUT once [`capture_stdout`](McpClient::capture_stdout) has moved it into a
     /// background capture thread (empty until then — the protocol cases own stdout themselves).
     stdout_capture: Arc<Mutex<String>>,
+    /// The two RETAINED drain handles (D48). They were previously dropped on the spot, and
+    /// [`wait_for`](Self::wait_for) returns the moment `try_wait` sees the child gone — it never
+    /// joins and never reads to EOF. That was fail-LOUD while the stdout assertion was a POSITIVE (a
+    /// lost race left the buffer short and the cell went RED); after the D48 inversion the same race
+    /// is fail-SILENT, because "stdout is EMPTY" is exactly what an unread buffer looks like. So the
+    /// headline channel-revert mutation could survive its own regression pin intermittently.
+    /// [`join_drains`](Self::join_drains) closes that window. Both pipes reach EOF at child exit, so
+    /// the joins cannot hang behind the existing deadline.
+    ///
+    /// Not reproduced — this is a read of the synchronisation, and it is rare precisely because the
+    /// 25 ms poll granularity usually hides it. It is fixed rather than measured because the failure
+    /// mode is a false GREEN.
+    drains: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl McpClient {
@@ -188,9 +314,11 @@ impl McpClient {
         // the assertion messages can quote. Draining also guarantees a full stderr pipe can never
         // stall the child mid-shutdown, which would itself masquerade as the hang under test.
         let stderr = Arc::new(Mutex::new(String::new()));
+        let mut drains = Vec::new();
         if let Some(pipe) = child.stderr.take() {
             let sink = Arc::clone(&stderr);
-            std::thread::spawn(move || drain_into(pipe, &sink));
+            // RETAINED, not detached (D48) — see the `drains` field.
+            drains.push(std::thread::spawn(move || drain_into(pipe, &sink)));
         }
 
         Self {
@@ -201,6 +329,42 @@ impl McpClient {
             seen_lines: Vec::new(),
             stderr,
             stdout_capture: Arc::new(Mutex::new(String::new())),
+            drains,
+        }
+    }
+
+    /// Wrap an ALREADY-SPAWNED child with piped stdio, wiring the same retained drain threads as
+    /// [`spawn_with_args`](Self::spawn_with_args) — the TEST-ONLY constructor behind the harness
+    /// self-test that proves the framing guard is actually INSTALLED inside
+    /// [`read_response`](Self::read_response).
+    ///
+    /// The predicate having a self-test does not prove it is CALLED: with the `assert!` deleted, an
+    /// orphaned `pub fn is_jsonrpc_framing` raises no dead-code warning (this module is
+    /// `#![allow(dead_code)]`) and every one of the inherited `spawn*` sites silently loses its
+    /// guard. Driving a FABRICATED child whose stdout emits a non-frame line is the only way to
+    /// observe the call site.
+    #[must_use]
+    pub fn from_child(mut child: Child) -> Self {
+        let stdin = child.stdin.take().expect("fabricated child stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("fabricated child stdout"));
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let mut drains = Vec::new();
+        if let Some(pipe) = child.stderr.take() {
+            let sink = Arc::clone(&stderr);
+            drains.push(std::thread::spawn(move || drain_into(pipe, &sink)));
+        }
+        Self {
+            child,
+            stdin: Some(stdin),
+            stdout: Some(stdout),
+            // The same seed as `spawn_with_args`: the guard-DELETED branch must be able to correlate
+            // the fabricated child's `id=1` response, or it would hang to the deadline instead of
+            // returning, and the self-test would stop discriminating between the two states.
+            next_id: 1,
+            seen_lines: Vec::new(),
+            stderr,
+            stdout_capture: Arc::new(Mutex::new(String::new())),
+            drains,
         }
     }
 
@@ -213,16 +377,36 @@ impl McpClient {
     }
 
     /// Move this client's STDOUT into a background CAPTURE thread, RETAINING every byte for
-    /// [`stdout_snapshot`](Self::stdout_snapshot) (T3.2.1/D38 — the FR-11 "always-valid JSON on
-    /// stdout" oracle for the unsignalled `Err` path). The retaining peer of
+    /// [`stdout_snapshot`](Self::stdout_snapshot) — since D48, **the NEGATIVE-side oracle**: the
+    /// buffer it fills must be FRAME-FREE (on the unsignalled `Err` path, EMPTY), because the
+    /// structured error no longer goes anywhere near this stream. The POSITIVE now lives on stderr,
+    /// via [`structured_error_on_stderr`]. It is the retaining peer of
     /// [`write_without_reading`](Self::write_without_reading), which DISCARDS what it drains.
     ///
     /// Like that method this consumes the stdout reader, so no further request/response traffic is
     /// possible on this client afterwards — call it only on a case that just signals/waits.
+    ///
+    /// A negative assertion over this buffer is only sound once the drain has been JOINED, which
+    /// [`wait_for`](Self::wait_for) now does: an unread buffer is empty too.
     pub fn capture_stdout(&mut self) {
         if let Some(stdout) = self.stdout.take() {
             let sink = Arc::clone(&self.stdout_capture);
-            std::thread::spawn(move || drain_into(stdout, &sink));
+            // RETAINED, not detached (D48) — see the `drains` field.
+            self.drains
+                .push(std::thread::spawn(move || drain_into(stdout, &sink)));
+        }
+    }
+
+    /// Join every retained drain thread, so both capture buffers are COMPLETE (D48).
+    ///
+    /// Called by [`wait_for`](Self::wait_for) once the child is gone — both pipes are then at EOF,
+    /// so each drain returns promptly and no join can hang behind the caller's deadline. The
+    /// deliberately-detached third drain (`drain_to_eof`, behind
+    /// [`write_without_reading`](Self::write_without_reading)) is NOT retained: it discards every
+    /// byte, so no assertion can ever read what it drained.
+    fn join_drains(&mut self) {
+        for handle in self.drains.drain(..) {
+            let _ignored = handle.join();
         }
     }
 
@@ -237,12 +421,19 @@ impl McpClient {
     /// peer that, on a TIMEOUT (i.e. the D38 hang), reports the child's captured STDERR instead of a
     /// bare "did not exit". Prefer this over [`wait_for`] whenever an `McpClient` owns the child.
     ///
+    /// On a clean exit it JOINS the retained drains (D48) before returning, so a `stdout_snapshot()`
+    /// read as a NEGATIVE — or a `stderr_snapshot()` read as a POSITIVE — sees the complete buffer
+    /// rather than whatever the race left in it. The deadline panic below deliberately precedes any
+    /// join: a HUNG child never reaches EOF, so joining first would replace a diagnosable timeout
+    /// with a silent block.
+    ///
     /// # Panics
     /// If the child does not exit within `timeout` (the no-hang invariant, spine §5b).
     pub fn wait_for(&mut self, timeout: Duration) -> std::process::ExitStatus {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.child.try_wait().expect("try_wait") {
+                self.join_drains();
                 return status;
             }
             assert!(
@@ -302,7 +493,13 @@ impl McpClient {
     }
 
     /// Read newline-delimited lines until the response with `id` arrives. EVERY line read must be
-    /// valid JSON — this is the NFR-14 "stdout carries only MCP framing" guard.
+    /// JSON-RPC FRAMING — this is the NFR-14/D48 "stdout carries only MCP framing" guard.
+    ///
+    /// Merely PARSING as JSON is not enough, and that is not a hypothetical: the ub-og3
+    /// `StructuredError` blob IS valid JSON, which is exactly how it passed this guard for the whole
+    /// life of the suite while sitting on the framing channel. The predicate is
+    /// [`is_jsonrpc_framing`]; this call site is what INSTALLS it for all the inherited `spawn*`
+    /// sites, and it has its own self-test because deleting it here would be green and silent.
     fn read_response(&mut self, id: i64) -> Value {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
@@ -324,6 +521,12 @@ impl McpClient {
             let value: Value = serde_json::from_str(trimmed).unwrap_or_else(|e| {
                 panic!("NFR-14: every stdout line must be JSON-RPC framing, got `{trimmed}`: {e}")
             });
+            assert!(
+                is_jsonrpc_framing(&value),
+                "NFR-14/D48: every stdout line must be JSON-RPC framing — a line that merely \
+                 PARSES as JSON is not enough, which is exactly how the ub-og3 StructuredError \
+                 blob passed this guard for the whole life of the suite. Got `{trimmed}`"
+            );
             self.seen_lines.push(trimmed.to_string());
             // Responses have an `id`; notifications from the server (no id) are skipped.
             if value.get("id").and_then(Value::as_i64) == Some(id) {

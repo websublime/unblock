@@ -138,8 +138,16 @@ impl ToDiagnosticReport for InitReport {
     }
 }
 
-/// Render `report` in `fmt` and write the structured payload to STDOUT (the CLI owns the stream —
-/// NFR-14; all five formats via `Renderer::diagnostics`).
+/// Render `report` in `fmt` and write the structured payload to STDOUT (all five formats via
+/// `Renderer::diagnostics`).
+///
+/// **NORMATIVE CONSTRAINT (D48): only a command that owns stdout as its OWN report channel may call
+/// this.** It writes to stdout UNCONDITIONALLY and takes no `StdoutRole`, so a command whose stdout
+/// is a wire-protocol framing channel (`unblock mcp`) would leak a report onto that channel with no
+/// compile error, no lint and no test. The hazard is LATENT, not live: `commands/mcp.rs` makes no
+/// `output::` call, and all four callers here — `version`, `doctor`, `migrate`, `init` — own stdout
+/// as reports. Threading the classification through this second seam is deliberately OUT of D48's
+/// scope and is tracked as its own open issue, `ub-c5o` (PRD §4 D48 clause 6(iii)).
 ///
 /// # Errors
 /// - [`CliError::Render`] if the format cannot represent a diagnostic report;
