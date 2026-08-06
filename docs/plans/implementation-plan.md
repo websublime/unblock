@@ -151,6 +151,53 @@
   `cargo insta test`, `cargo xtask doc-lint`, `cargo xtask check-layering`. Both gates ≥3 agents
   (+`/security-review`); Claude opens the PR, a human merges.)*
 
+- **T3.11 — `unblock mcp` reports its structured error on STDERR, not on the JSON-RPC framing channel
+  (v1.0.1, additive/non-semver). Implements D48.** *(Next free top-level M3 id — a peer of T3.10, not a
+  sub-task.)* The design is normative in the **D48 PRD §4 row** + spine §2.4/§5b + `unblock-cli.md`
+  (`src/lib.rs`/`src/cli.rs`/`src/exit.rs`/`src/output.rs`/`src/commands/mcp.rs` rows and the test-file
+  table) — **read those before implementing; this bullet is a checklist of touched sites, not the spec.**
+  Depends on **T3.2.1** (the `resolve_mcp_exit` return shape it renders) and **T3.1**. ONE PR; the
+  spec cascade already landed in its own commit, so this PR carries the CODE, the tests, the gate script
+  and the two prose edits that ADD that script to the ci-cd §2.1 and `docs/PROCESS.md` section 3
+  enumerations. Scope: **(1)** a two-valued stdout classification declared in `crates/unblock-cli/src/exit.rs`
+  and produced by an EXHAUSTIVE `Command::stdout_role()` in `src/cli.rs` with NO `_` arm (its `Update` arm
+  `#[cfg(feature = "self-update")]`-gated like the variant, so `--no-default-features` still builds);
+  **(2)** `src/lib.rs` reads it BEFORE `dispatch::dispatch(cli)` consumes `cli` and passes it at the single
+  `into_exit` call site; **(3)** `into_exit` splits into a thin real-stream wrapper over a sink-injected core
+  taking BOTH an stdout and a stderr sink and returning the RAW `u8`, and its `Json | Robot` arm picks the
+  stream from the classification — the FULL `StructuredError`, never the degraded `error[CODE]` line;
+  **(4)** the doc comments this makes false or incomplete are corrected in the same PR (`src/exit.rs`,
+  `src/commands/mcp.rs`, `src/output.rs`, `src/lib.rs`, `src/cli.rs`), and the D48 prose stays OUT of the
+  `Command::Mcp` clap doc comment (its first line is also the top-level help summary — one word there
+  re-blesses TWO insta snapshots); **(5)** the shared test harness hardens (the `read_response` stdout guard
+  requires a `jsonrpc` member rather than merely valid JSON, `common::unblock()` also scrubs
+  `UNBLOCK_OUTPUT_FORMAT`, both drain threads are JOINED rather than detached, and `capture_stdout`'s
+  docstring is rewritten as the negative-side oracle); **(6)** the two shipped `mcp_lifecycle.rs` cells that
+  assert the payload on `stdout_snapshot()` INVERT to `stderr_snapshot()` with stdout asserted frame-free.
+  *(AC: **(1)** injected-sink unit cells pin the POSITIVE stderr landing for a protocol-channel command and
+  the mirror stdout landing for a non-protocol one, the `hint` present on the `SchemaMismatch` case, the
+  `robot` format moving too, the human arm unmoved under both classifications, and a BYTE-equality
+  comparison of the two sinks' contents for the same input (the row's "byte for byte" claim, asserted
+  rather than adjectival); **(2)** a classifier unit cell parses each subcommand and asserts its
+  classification, which is the ONLY unit-layer pin of a flipped predicate; **(3)** a NEW spawning e2e file
+  covers every REACHABLE pre-run-loop route — a missed workspace (`NOT_INITIALIZED`/2), an explicit `--dir`
+  at a non-workspace (`CONFIG_ERROR`/7), a rejected `UNBLOCK_OUTPUT_FORMAT` (`CONFIG_ERROR`/7), a future
+  `user_version` (`SCHEMA_MISMATCH`/2, `hint` asserted) and a corrupt schema page (`DATABASE_ERROR`/2) —
+  each asserting the POSITIVE stderr payload AND a frame-free stdout, never the negative alone, plus a
+  `-o plain` control; the structurally unreachable `Session::open` and teardown routes get NO cell and the
+  AC does not claim them; **(4)** four harness self-tests pin the framing predicate, the frame-only
+  assertion helper (whose body never executes at any production call site), the env scrub and the guard's
+  INSTALLATION inside `read_response`; **(5)** non-vacuity: reverting the channel branch, gutting the
+  machine arm, flipping the classifier, degrading the payload to the human line, dropping the `hint` or
+  moving the exit code each turns a NAMED cell RED; **(6)** no golden and no snapshot re-bless, no new
+  `ErrorCode`, no exit-table change, and `CONTRACT_HASH`/`CONTRACT_VERSION` unmoved (`unblock.mcp.v1.9`
+  stands); **(7)** `scripts/checks/d48-stdout-channel-claims.sh` lands, is wired as a required `doc-lint`
+  step, carries the LIVE D-range, pins the older siblings' knobs, asserts the four residual ids
+  (`ub-kp7`, `ub-b1a`, `ub-c5o`, `ub-5v5`) in `.unblock/issues.jsonl` and asserts the single-`into_exit`-
+  caller invariant; **(8)** full CI-equivalent probe green — `cargo fmt --check`, clippy pedantic,
+  `cargo test --workspace`, `cargo insta test --check`, `cargo xtask doc-lint`, `cargo xtask check-layering`
+  and every `scripts/checks/*.sh`. Both gates >=3 agents; Claude opens the PR, a human merges.)*
+
 ## 6. MCP surface — concrete v1 taxonomy (closes PRD §12.2)
 
 Consolidated to keep the client tool list small (target **≤ 8 tools**); read-heavy state is exposed as resources.

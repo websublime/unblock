@@ -14,7 +14,7 @@ codes are stable, a breaking change → 2.0.0. (Original source for reference on
 
 | Doc | Role |
 |---|---|
-| `docs/PRD.md` | Product truth — decisions (§4 D1..D47), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
+| `docs/PRD.md` | Product truth — decisions (§4 D1..D48), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
 | **unblock (MCP)** — tracker | **System of record for tasks** (dogfooded) — next-ready/status/deps live here, not in a doc. Git record: `.unblock/issues.jsonl`; wiring + tool surface: `.mcp.json` / `AGENTS.md` / `unblock://capabilities`. |
@@ -68,8 +68,9 @@ session** by default (template: `docs/plans/templates/drift-gap-report.md`).
   discovery input** (injected by Claude Code as the project root; consumed by workspace discovery, never emitted) —
   DISTINCT from the `UNBLOCK_` prefix family (D10), honored as a ROOT-probe tier below `--dir`/`UNBLOCK_DIR` (D39).
 - Crates `unblock-*` are **workspace-internal (not published to crates.io)**; only the `unblock` binary ships (via `dist`).
-- Config is **TOML**. Output: **structured to stdout, diagnostics to stderr** (NFR-14); output shapes are
-  snapshot-pinned (`insta`).
+- Config is **TOML**. Output: **structured to stdout, diagnostics to stderr** (NFR-14) — **D48 carve-out: a
+  command whose stdout is a protocol channel (`unblock mcp`, once the server starts) reports on stderr instead,
+  full payload, same exit code (PRD §4 D48)**; output shapes are snapshot-pinned (`insta`).
 - **No git operations, no git library linked, no network on any normal command path** (D13/NFR-6). Network only
   on explicit `unblock update` (axoupdater runs the dist installer; SHA256-checksum-verified before swap). libsql `remote` feature is **off by default**.
 - libsql is the source of truth; JSONL is an **optional** export/import (no 3-way merge, no locks) — model B (D5).

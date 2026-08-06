@@ -254,13 +254,47 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   carries no `id` member at all, is outside this class and is unaffected. **Residuals stay OPEN and
   are disclosed rather than claimed shut:** a duplicated `jsonrpc`/`method` still answers `-32700` with the id
   OMITTED, so an rmcp client stays pending (scoped out by Miguel; tracked as `ub-788`); an **id-less** notification
-  before `initialize` still kills the server, which D47's class excludes by decision; the CLI writes a
+  before `initialize` still kills the server, which D47's class excludes by decision — and `ub-kp7`, which tracks it, is
+  scoped to the WHOLE class rather than to that one spelling: **any first frame that is neither `initialize` NOR `ping`
+  kills the server, Request or Notification alike.** `ping` is the single pre-handshake exception (rmcp answers it with an
+  empty result at `rmcp-1.7.0/src/service/server.rs:175-189` and the server lives on to a normal handshake); a non-Request
+  first frame dies at `:193` and a non-`initialize` Request dies at `:201`, on the same `ExpectedInitializeRequest`. The CLI writes a
   non-JSON-RPC structured-error blob onto STDOUT on that death, embedding a `Debug` rendering of
-  attacker-controlled bytes into the framing channel — a separate defect with its own issue; and the `-32600`
+  attacker-controlled bytes into the framing channel — TWO separate defects with their own issues: the CHANNEL half
+  is `ub-og3`, CLOSED in this same cut by **D48** (the payload moves whole to stderr; exit codes unmoved), and the
+  `Debug`-rendering half is `ub-b1a`, which stays OPEN because moving a stream sanitises nothing; and the `-32600`
   itself is LOST whenever rmcp cancels the `receive()` future, since the reply is written inside that future and
   rmcp polls it as one arm of an unbiased `select!` — measured from one unreplicated harness at 0 of 40 with the
   connection idle, 25 of 40 with four requests in flight and 39 of 40 with eight, a pre-existing property of the
   seam that the shipped `-32700` arm shares (scoped out by Miguel; tracked as `ub-nbz`).
+- **The mcp startup-failure report lands on the JSON-RPC FRAMING channel** (P1, tracker `ub-og3`, PRD §4
+  **D48**) — the residual D47 clause 8(iii) named and did not design, now closed in the same cut and minting its
+  own D-id because it REVERSES a shipped D38 clause (`docs/PROCESS.md` section 3). When `unblock mcp` fails, the
+  generic CLI exit boundary renders a `StructuredError` — `{"code":...,"message":...,"retryable":...}`, no
+  `jsonrpc`, no `id` — onto STDOUT, which on the MCP stdio transport IS the JSON-RPC framing channel: a client
+  parsing frames meets an unparseable line exactly where a frame belongs, so the server's own diagnostic
+  corrupts the channel it is diagnosing. The likeliest trigger is the most mundane: a committed `.mcp.json`
+  whose cwd and D39 tier both miss, where the workspace open fails BEFORE the D39 binding line is written, so
+  stderr is EMPTY and the only bytes the operator gets are on the stream that cannot carry them. **D48 moves the
+  CHANNEL and nothing else:** the exit boundary learns, from the PARSED command, that a command may own stdout
+  as a protocol channel, and its json/robot arm then writes to STDERR — the FULL document, `hint` included,
+  because the actionable half of the D46 mixed-version case is exactly that member, and machine-readable
+  because an MCP host captures the child's stderr. **Exit codes do NOT move:** a failed handshake keeps exit 1,
+  and each pre-run-loop failure keeps its own 0–8 code (a missed workspace is `NOT_INITIALIZED`/2 — not a
+  config 7 — a rejected `UNBLOCK_OUTPUT_FORMAT` is `CONFIG_ERROR`/7, and the schema/corruption cases are 2),
+  preserving the D38 scope boundary and D40's delegated exit 0. **`unblock mcp --help` is explicitly OUT** —
+  clap's usage prose goes to stdout with exit 0, but the server never starts, so the framing channel was never
+  live (guarded by `crates/unblock-cli/tests/help_snapshots.rs:26-28`; no byte count is quoted, because the
+  sibling `insta` snapshot pins the TEXT and any future word would falsify a number). **`unblock-cli` (L7) is the only crate that gains code.** It mints no `ErrorCode`, moves no published
+  byte, and carries **no `contract_version` bump and no `CONTRACT_HASH` re-pin** — `unblock.mcp.v1.9` stands.
+  **What it does NOT close, named rather than implied — four residuals, each with its own OPEN issue:** a first
+  frame that is neither `initialize` nor `ping` still kills the server (`ub-kp7`); the relocated message still
+  embeds an unbounded `Debug` rendering of attacker-controlled bytes, minted upstream in rmcp's
+  `ExpectedInitializeRequest` display and merely serialised by the CLI (`ub-b1a`); `output::emit_report` still
+  writes to stdout unconditionally with no classification, a LATENT sibling hole that no protocol-channel command
+  calls today (`ub-c5o`); and a response larger than the transport buffer can leave a TRUNCATED frame on the same
+  channel — a different mechanism from the blob, reasoned from source and never reproduced, with no response-size
+  cap (`ub-5v5`). Two shipped cells assert the defect as correct and INVERT with the fix.
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
   self-update promise is exercised, not just unit-asserted.
@@ -753,8 +787,19 @@ Notes:
   column is **no longer sparse**, and that framing is retired here rather than restated.
   **D47 (`ub-cnv`) moves NO cell:** `unblock-mcp` is already full, and D47 lands there alone — the transport's
   un-decodable-`id` `-32600` arm, the new `src/envelope_id.rs` predicate, and the three-tier CD-7 harness —
-  with `unblock-cli` gaining wire tests only. It is the smallest-scoped decision in this slot and the only one
-  that touches a single crate.
+  with `unblock-cli` gaining wire tests only. It is the smallest-scoped decision in this slot. **The clause that
+  used to stand here calling it "the only one that touches a single crate" is RETIRED, not restated: D48 touches
+  exactly one crate too**, so uniqueness was never the durable fact — single-crate scope is, and it is now shared.
+  **D48 (`ub-og3`) moves NO cell either, but it CORRECTS what this column's `unblock-cli` marker means.**
+  `unblock-cli` (L7) is the one crate D48 touches, and it gains **CODE, not tests only** — `src/exit.rs` (the
+  two-valued stdout classification, the wrapper/sink-injected-core split and the re-channelled `Json | Robot` arm),
+  `src/cli.rs` (the exhaustive classifier over the subcommand enum) and `src/lib.rs` (reading the classification
+  while `cli` is still in scope, and passing it at the single `into_exit` call site), plus the doc-comment
+  corrections in `src/commands/mcp.rs` and `src/output.rs` and the test surface (two INVERTED cells, a hardened
+  shared harness, new injected-sink unit cells and a new end-to-end file). This is the same in-place amendment D46
+  had to make to the earlier "tests only" framing of this very cell, for the same reason: the cell's glyph does not
+  move, but the sentence explaining it goes false. D48 mints no `ErrorCode`, moves no published byte, and carries
+  no `contract_version` bump and no `CONTRACT_HASH` re-pin — `unblock.mcp.v1.9` stands.
 - **100% Rust, no Node:** the TUI adds **no npm/Node build stage** to `dist` and **no `ui` Cargo feature** —
   `cargo-deny` covers the whole tree and the binary gains no npm supply-chain surface. (The web dashboard's
   npm/Node ecosystem lives in the separate v2+ commercial PRO product — roadmap §7 — not the OSS tree.)
