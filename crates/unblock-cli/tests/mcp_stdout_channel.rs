@@ -14,13 +14,32 @@
 //! for the whole life of the suite.
 //!
 //! **The non-regression half needs no cell here, and the shipped cells that carry it are NAMED so a
-//! future reader does not add a redundant one.** A "classify everything as a protocol channel"
-//! mutation is killed by eight shipped cells asserting a `StructuredError` payload on STDOUT for
-//! other commands: `exit_codes.rs`'s `update`, `init` (the clobber guard), `migrate` (no workspace),
-//! the config-parse case, the io case and its robot peer; plus `migrate_doctor.rs`'s
-//! future-`user_version` cell and `doctor_on_a_corrupt_db_exits_2`. (`exit_codes.rs`'s `version`
-//! cell is NOT among them: it is an exit-0 SUCCESS report rendered by `output::emit_report`, which
-//! D48 does not touch — clause 6(iii) — so it stays green under that mutation and pins nothing.)
+//! future reader does not add a redundant one.** The set below is MEASURED, never derived: the
+//! "classify everything as a protocol channel" mutation was applied to `cli.rs`'s `stdout_role` and
+//! `cargo test -p unblock-cli --no-fail-fast` was read off. EVERY cell it turned red is named here
+//! with the command it drives, so the LIST is the rule and carries no count and no "n of m
+//! commands" summary. An earlier version of this paragraph carried a COUNT ("eight shipped cells")
+//! and its sibling sentence in `exit.rs` carried a COMMANDS summary ("the six report-channel
+//! commands"); both were wrong, in different directions, which is why there is now one enumeration
+//! and it lives here.
+//!
+//! - `exit_codes.rs` — `exit_2_not_initialized_no_workspace` and `exit_7_config_parse_error`
+//!   (`migrate`); `exit_2_already_initialized_clobber_guard`,
+//!   `exit_8_io_error_from_init_into_a_file_path` and `robot_mode_error_is_valid_json_on_stdout`
+//!   (`init`); `exit_1_internal_error_from_update_unconfigured` (`update`).
+//! - `init_agents.rs` — `agents_requires_a_workspace` (`agents`; the only cell in the crate that
+//!   covers that command at all).
+//! - `migrate_doctor.rs` — `migrate_on_a_future_schema_db_exits_2_with_schema_mismatch` and
+//!   `a_lying_stamp_exits_2_with_a_hint_that_names_the_repair_and_the_missing_columns` (`migrate`);
+//!   `doctor_on_a_corrupt_db_exits_2` (`doctor`).
+//! - `update_verify.rs` — `update_refuses_a_receiptless_binary_and_swaps_nothing` and
+//!   `update_rejects_a_tampered_download_and_swaps_nothing` (`update`).
+//! - `cli.rs`'s unit cell `each_subcommand_declares_its_stdout_role` — the unit-layer half, and the
+//!   only member of this set that does not spawn a process.
+//!
+//! `version` is covered by NONE of them, which is expected rather than a hole: `exit_codes.rs`'s
+//! `version` cell is an exit-0 SUCCESS report rendered by `output::emit_report`, which D48 does not
+//! touch (clause 6(iii)), so it stays green under that mutation and pins nothing here.
 //!
 //! **Two routes deliberately get no cell here.** The non-`initialize`-first-frame route is what the
 //! two INVERTED cells in `tests/mcp_lifecycle.rs` provoke, and a third cell on the same frame would
@@ -105,8 +124,11 @@ fn no_workspace_reports_on_stderr_not_on_the_framing_channel() {
 
 /// **E2 — the self-referential case.** `pick_cli_format` read the SAME variable leniently and
 /// resolved `Json`, so the format resolver's own failure is reported in the format it defaulted to.
-/// Post-D48, on stderr. The per-child `env` beats the harness's `env_remove` — the one cell that
-/// depends on that ordering.
+/// Post-D48, on stderr. The per-child `env` beats the harness's `env_remove`, which is what makes
+/// this cell possible at all — E6's second spelling
+/// (`an_explicit_dir_at_a_non_workspace_reports_on_stderr`, which sets `UNBLOCK_DIR` back per child
+/// and says so) relies on exactly the same ordering, so it is a shared property of the harness
+/// rather than anything special to this cell.
 #[test]
 fn an_unparseable_output_format_env_reports_on_stderr() {
     let ws = common::Workspace::init();
@@ -508,18 +530,42 @@ fn the_stderr_oracle_finds_the_payload_by_shape_not_by_position() {
 /// "stdout is empty" looks like, so the headline channel-revert mutation could survive its own
 /// regression pin intermittently.
 ///
-/// **Deterministic by construction: it reads the SYNCHRONISATION, not its outcome.** Deleting the
-/// `join_drains()` call was MEASURED to survive the whole suite, and a completeness assertion over
-/// the buffers would not have changed that on most runs (an unjoined drain usually wins the race) —
-/// it would merely have converted a silent hole into a flake. The count of unjoined handles is
-/// exact. Buffer completeness is asserted too, but as a consequence, never as the discriminator.
+/// **The discriminator is a HAPPENS-BEFORE the mutation cannot fabricate, and it had to be.** The
+/// first version of this cell read `pending_drain_count()` and nothing else, which was measured to
+/// be worthless: `join_drains` empties the handle vector with `drain(..)` whether or not it joins,
+/// so replacing `handle.join()` with `drop(handle)` — the exact detached state this fix exists to
+/// repair — left the count at 0 and this cell green. A count of handles observes that `join_drains`
+/// was CALLED, never that a thread was JOINED.
+///
+/// So the fixture makes the two states physically distinguishable. The child writes one line to each
+/// stream, hands both pipe write ends to a BACKGROUND grandchild, and exits immediately; the
+/// grandchild writes the `-last` lines a second later and only then do the pipes reach EOF. A real
+/// join therefore BLOCKS until those late bytes are in the buffers, and nothing that skips the join
+/// can put them there — at the moment such a `wait_for` returns, those bytes have not been written
+/// yet. The same fact is read twice, as content and as elapsed time.
+///
+/// **The child exits 1 on purpose.** Both cells this join protects
+/// (`mcp_lifecycle.rs`'s `a_no_signal_run_loop_error_exits_1_and_never_hangs` and
+/// `an_id_less_notification_before_initialize_still_exits_1`) drive a child that exits 1, so a join
+/// gated on `status.success()` would be skipped on precisely the path that matters. An exit-0
+/// fixture — which is what this cell used — cannot see that mutation at all.
+///
+/// `pending_drain_count()` is still read twice, but only as an anti-vacuity CONTROL: 2 before proves
+/// there were drains to join at all, 0 after proves the call ran. Neither reading can tell a join
+/// from a drop; that is what the late bytes are for.
 #[test]
 fn wait_for_joins_the_retained_drains_before_the_buffers_are_read() {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
+    // The `{ … } &` subshell inherits BOTH pipe write ends and outlives its parent, so EOF — and
+    // therefore the end of any real join — comes a second AFTER the child itself is reaped.
     let child = Command::new("sh")
         .arg("-c")
-        .arg("printf 'out-first\\nout-last\\n'; printf 'err-first\\nerr-last\\n' >&2; exit 0")
+        .arg(
+            "printf 'out-first\\n'; printf 'err-first\\n' >&2; \
+             { sleep 1; printf 'out-last\\n'; printf 'err-last\\n' >&2; } & \
+             exit 1",
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -532,25 +578,44 @@ fn wait_for_joins_the_retained_drains_before_the_buffers_are_read() {
         client.pending_drain_count(),
         2,
         "the control: both pipes are drained by RETAINED threads (stderr from `from_child`, \
-         stdout from `capture_stdout`) — without this, the assertion below could pass vacuously \
+         stdout from `capture_stdout`) — without this, the assertions below could pass vacuously \
          over a client that never had a drain to join"
     );
 
+    let started = Instant::now();
     let status = client.wait_for(Duration::from_secs(20));
-    assert_eq!(status.code(), Some(0), "the fabricated child exits cleanly");
+    let waited = started.elapsed();
+
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "the fixture exits 1 DELIBERATELY — it is the exit code of both cells this join protects, \
+         so a join gated on a SUCCESSFUL exit fails here instead of being silently skipped"
+    );
+
+    // THE DISCRIMINATOR. These bytes reach the pipes ~1s after the child is reaped, so they can be
+    // in the buffers only if `wait_for` waited for the drains to read to EOF.
+    let (stdout, stderr) = (client.stdout_snapshot(), client.stderr_snapshot());
+    assert!(
+        stdout.contains("out-last") && stderr.contains("err-last"),
+        "every retained drain must be JOINED before `wait_for` returns, not merely dropped: these \
+         bytes are written a second after the child exits, so an unjoined drain has not read them \
+         yet — and a short stdout buffer is indistinguishable from the empty stdout the D48 \
+         frame-only negative expects. stdout=`{stdout}` stderr=`{stderr}`"
+    );
+    // The same happens-before, read as a duration. ONE-SIDED by construction: a loaded machine can
+    // only make this longer, so it can fail only when the synchronisation is absent.
+    assert!(
+        waited >= Duration::from_millis(500),
+        "`wait_for` must BLOCK on the drains: it returned after {waited:?}, i.e. before the pipes \
+         could possibly have reached EOF"
+    );
+
     assert_eq!(
         client.pending_drain_count(),
         0,
-        "every retained drain must be JOINED before `wait_for` returns: a D48 buffer read after \
-         it is only sound over a COMPLETE buffer, and a short one is indistinguishable from the \
-         empty stdout the frame-only negative expects"
-    );
-    assert!(
-        client.stdout_snapshot().contains("out-last")
-            && client.stderr_snapshot().contains("err-last"),
-        "and the consequence: both buffers are complete. stdout=`{}` stderr=`{}`",
-        client.stdout_snapshot(),
-        client.stderr_snapshot()
+        "the closing control: `join_drains` ran. It empties the vector whether or not it joins, so \
+         this can never be the discriminator — the late bytes above are"
     );
 }
 

@@ -13,8 +13,11 @@
 //! REPORT channel (always valid JSON even on error, FR-11); in `plain`/`csv`/`markdown` a human
 //! `error[CODE]: message` line goes to STDERR (diagnostics, NFR-14).
 //!
-//! **D48 — which stream the report channel IS.** For six of the seven commands it is STDOUT, exactly
-//! as NFR-14's generic reading says. For a command that owns stdout as a wire-protocol FRAMING
+//! **D48 — which stream the report channel IS.** For every command but one it is STDOUT, exactly
+//! as NFR-14's generic reading says. (No count is stated: `Command::Update` is behind the default-on
+//! `self-update` feature, so the subcommand enum has a different size under
+//! `--no-default-features` and any number written here would be false in one of the two builds.)
+//! For a command that owns stdout as a wire-protocol FRAMING
 //! channel ([`StdoutRole::Protocol`] — `unblock mcp` on MCP stdio, the only member today) every byte
 //! on fd 1 must be a JSON-RPC frame, so the SAME structured document goes to STDERR instead, whole
 //! and undegraded. The CHANNEL moves; the payload and the 0–8 exit codes do not.
@@ -36,7 +39,9 @@ use unblock_render::{OutputFormat, RenderOptions, renderer_for};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StdoutRole {
     /// stdout is this command's OWN report channel: the `json`/`robot` structured error renders
-    /// there (NFR-14's generic rule — `version`, `migrate`, `doctor`, `init`, `agents`, `update`).
+    /// there (NFR-14's generic rule — `version`, `migrate`, `doctor`, `init`, `agents`, plus
+    /// `update` whenever the default-on `self-update` feature is enabled; under
+    /// `--no-default-features` that variant does not exist and its arm is `cfg`-gated out).
     Reports,
     /// stdout is a wire-protocol FRAMING channel: every byte on it must be a JSON-RPC frame, so the
     /// structured error renders to STDERR instead (D48). `unblock mcp` is the only member today.
@@ -176,9 +181,18 @@ pub(crate) fn into_exit(err: CliError, fmt: OutputFormat, role: StdoutRole) -> E
 /// bypasses libtest's capture, and `#![forbid(unsafe_code)]` with no `libc` dependency rules out
 /// redirecting the descriptor — so the stream CHOICE is observable in-process only through injection
 /// (the same argument [`emit_diagnostic`] already makes for itself below). The STDOUT sink is
-/// injected as well as the stderr one for one specific cell: that a `Reports` command's bytes still
-/// land on stdout, unmoved. That mirror is the only in-process guard against a renderer which
-/// IGNORES `role` and sends every command's report to stderr.
+/// injected as well as the stderr one for the `Reports` MIRROR: that a non-protocol command's bytes
+/// still land on stdout, unmoved. `U2` below is the cell written FOR that mirror and is the only one
+/// here whose entire purpose it is.
+///
+/// **It is not the only cell that reads the stdout sink, and this used to say it was.** That
+/// exclusivity is the sentence a later reader would act on when deleting a "redundant" cell, so what
+/// actually happens is recorded instead, MEASURED by applying the mutation the mirror exists to
+/// catch — rewriting the `Reports` arm below to write to `stderr` — and reading the failures off:
+/// `U2` fails as the mirror, `U8` fails because comparing the two sink buffers against each other
+/// starts by asserting the stdout one is NON-EMPTY, and `U9` fails because it reads the terminator
+/// off whichever sink `role` selected. Each has its own reason to need the sink, which is why none
+/// of the three is redundant with the others.
 ///
 /// **Why it returns `u8` and not `ExitCode`.** `std::process::ExitCode` implements neither
 /// `PartialEq` nor any numeric accessor, which would leave D48 clause (4) — the exit code does NOT
@@ -266,9 +280,14 @@ fn write_payload(payload: &str, out: &mut impl Write) {
 /// against a buffer, so gutting it to a no-op turns that test RED — the mutation that previously
 /// SURVIVED the whole suite. A pure-formatter split would not achieve that: gutting the emitter
 /// would still leave the formatter's test green. Callers pass STDERR: on `mcp`, stdout is MCP
-/// framing ONLY (NFR-14) on EVERY path — since D48 the unsignalled `Err` path writes its structured
-/// document to stderr too (via [`into_exit`], in the full shape this function does not use), so the
-/// framing channel is no longer the exception it once was.
+/// framing ONLY (NFR-14) ONCE THE SERVER STARTS — since D48 the unsignalled `Err` path writes its
+/// structured document to stderr too (via [`into_exit`], in the full shape this function does not
+/// use), so the framing channel is no longer the exception it once was.
+///
+/// The qualifier is D48 clause (5)'s and is load-bearing rather than cautious: `unblock mcp --help`
+/// never starts the server, so clap prints its usage prose to stdout and exits 0, and
+/// `tests/help_snapshots.rs`'s `mcp_help` asserts exactly that. "On every path" — which this note
+/// used to say — is refuted by a shipped green test.
 pub(crate) fn emit_diagnostic(err: CliError, out: &mut impl Write) {
     // A diagnostic must never itself become a failure: a closed/failing stderr is not a reason to
     // change the exit code we were asked to deliver.
@@ -677,8 +696,12 @@ mod tests {
     /// **The equality is RELATIVE, and that limit is stated rather than left to be assumed:** it
     /// pins the two channels against EACH OTHER, not either of them against the bytes that shipped
     /// before D48. A mutation that reformatted BOTH arms identically would survive this cell. What
-    /// closes that chain is the eight shipped end-to-end cells which still assert a payload on
-    /// STDOUT for the six report-channel commands — they are the anchor to today's bytes.
+    /// closes that chain is the shipped end-to-end cells which still assert a rendered payload on
+    /// STDOUT for the OTHER commands — they are the anchor to today's bytes. They are ENUMERATED
+    /// (never counted, and never summarised as a number of commands) in `tests/mcp_stdout_channel.rs`'s
+    /// module doc, each with the command it drives; that enumeration was measured by applying the
+    /// blanket-`Protocol` classifier mutation and reading the failures off. Between them they cover
+    /// every `Reports` command except `version`, which by design pins nothing here (clause 6(iii)).
     #[test]
     fn the_relocated_payload_is_byte_identical() {
         for fmt in [OutputFormat::Json, OutputFormat::Robot] {
