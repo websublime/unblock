@@ -3,6 +3,10 @@
     "unblock": {
       "command": "cargo",
       "args": ["run", "--bin", "unblock", "mcp"]
+    },
+    "codebase-memory": {
+      "command": "codebase-memory-mcp",
+      "args": ["serve"]
     }
   }
 }
