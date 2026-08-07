@@ -443,7 +443,9 @@ impl McpClient {
     /// say it observed the synchronisation itself. It does not: [`join_drains`](Self::join_drains)
     /// empties the vector with `drain(..)` REGARDLESS of whether it joins, so replacing the join
     /// with a `drop` leaves this reading 0 — that is simply what `drain(..)` does — and the previous
-    /// version of H9, which asserted only this count, stayed GREEN under exactly that mutation
+    /// version of H9, which leaned on this count as its discriminator (it also asserted the late
+    /// bytes, but under an immediately-exiting child that assertion was VACUOUS, not absent),
+    /// stayed GREEN under exactly that mutation
     /// (measured at the D48 Verify gate, not supposed). What this number is genuinely good for is
     /// bracketing a cell: non-zero BEFORE proves
     /// there were drains to join at all (so the later assertion is not vacuous), zero AFTER proves
