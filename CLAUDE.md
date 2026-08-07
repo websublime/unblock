@@ -34,7 +34,7 @@ session** by default (template: `docs/plans/templates/drift-gap-report.md`).
 - **Never decide to simplify the solution.** If you reach a point where simplifying seems necessary, **stop and ask**.
 - **Ask before anything hard to reverse** or outward-facing (publishing, deleting, network sends).
 - **A task/plan description is never authoritative** — always read the referenced spec (spine/PRD §) before implementing.
-- **Semantic search (`ccc`/cocoindex) is discovery, not authority** — it locates `file:line` ranges; it **never** replaces a full read of the authoritative spec (spine/PRD) or original source (`temp/beads_rust-main`) when exact fidelity matters (byte layouts, complete rule sets, contract field sets). A returned chunk is a pointer, not the whole answer.
+- **Search and the code graph are discovery, not authority** — a *structural* question (who calls this, is this reachable, which paths do X, what does this symbol depend on) goes to the **code-graph MCP tools before any grep sweep** (server + phase mechanics: PROCESS.md §4); *text* questions (a zero-live-hits sweep, doc/config content, a literal string) stay grep's. If the graph is unavailable, unindexed, or indexed at another commit, fix it or say so in the task's issue comment — **never silently fall back**. The graph and semantic search (`ccc`/cocoindex) locate `file:line` ranges; they **never** replace a full read of the authoritative spec (spine/PRD) or original source (`temp/beads_rust-main`) when exact fidelity matters (byte layouts, complete rule sets, contract field sets). A returned chunk is a pointer, not the whole answer.
 - **Converse in Portuguese; write all artifacts (code, docs, comments) in English.**
 
 ## Architecture & layering (NFR-15 — enforced, acyclic)

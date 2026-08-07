@@ -103,7 +103,16 @@ coordinator**, run adversarially.
 | **Verify** (quality gate, ≥3) | `code-reviewer`, `qa-expert`, `rust-engineer` (+ `/security-review` for sync/storage/MCP-input changes) | `multi-agent-coordinator` |
 | **Track** | `project-manager`, `git-workflow-manager` | `multi-agent-coordinator` |
 
-`fullstack-developer` is not used (no full-stack/UI surface). `Explore` may augment **Understand** for broad search.
+`fullstack-developer` is not used (no full-stack/UI surface). `Explore` may augment **Understand** for broad *text* search.
+
+**Understand opens at the code graph.** The boundary and the never-silently-fall-back duty live in the
+`CLAUDE.md` hard rule; the mechanics are here. The graph is the `codebase-memory` MCP server wired in
+`.mcp.json`; its index is machine-local and commit-stamped — `index_status` reports readiness plus the
+branch and sha it was built at, `index_repository` builds or rebuilds it for a repo path — index or
+re-index the MAIN checkout, never a throwaway worktree. Branch work is thus the normal case in which the
+graph answers for main's commit, and declaring it stale while naming what answered instead is the correct
+outcome, not a process violation. The Understand comment on the task's issue (§6) carries one field —
+`graph: used | stale@<lowercase-short-sha> | unavailable(<reason>)` — non-`used` values name what answered.
 
 ## 5. Review & QA discipline
 - **No close without review.** Mark a finding/CF **RESOLVED only after the fix LANDS** in the authoritative doc (the
