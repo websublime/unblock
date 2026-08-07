@@ -116,7 +116,7 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 #       whole D-range cascade self-checking, and which can otherwise rot silently.
 #
 # THERE IS NO `P3`, DELIBERATELY. It became `Q15` (see the Q table) and the remaining rows were NOT
-# renumbered: a row code is how a failure names itself, so shifting fifteen of them to close one gap
+# renumbered: a row code is how a failure names itself, so shifting every row that follows it to close one gap
 # would silently repoint every reference to this table. A gap costs one comment; a renumber costs a
 # reader who trusts an old citation.
 # =================================================================================================

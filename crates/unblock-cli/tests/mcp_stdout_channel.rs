@@ -27,8 +27,10 @@
 //!   (`migrate`); `exit_2_already_initialized_clobber_guard`,
 //!   `exit_8_io_error_from_init_into_a_file_path` and `robot_mode_error_is_valid_json_on_stdout`
 //!   (`init`); `exit_1_internal_error_from_update_unconfigured` (`update`).
-//! - `init_agents.rs` — `agents_requires_a_workspace` (`agents`; the only cell in the crate that
-//!   covers that command at all).
+//! - `init_agents.rs` — `agents_requires_a_workspace` (`agents`; the only cell that asserts an
+//!   ERROR PAYLOAD ON STDOUT for that command — `init_agents.rs` and `help_snapshots.rs` cover
+//!   `agents` in other ways, so the exclusivity is over this list's own predicate, not over the
+//!   command).
 //! - `migrate_doctor.rs` — `migrate_on_a_future_schema_db_exits_2_with_schema_mismatch` and
 //!   `a_lying_stamp_exits_2_with_a_hint_that_names_the_repair_and_the_missing_columns` (`migrate`);
 //!   `doctor_on_a_corrupt_db_exits_2` (`doctor`).
@@ -531,8 +533,10 @@ fn the_stderr_oracle_finds_the_payload_by_shape_not_by_position() {
 /// regression pin intermittently.
 ///
 /// **The discriminator is a HAPPENS-BEFORE the mutation cannot fabricate, and it had to be.** The
-/// first version of this cell read `pending_drain_count()` and nothing else, which was measured to
-/// be worthless: `join_drains` empties the handle vector with `drain(..)` whether or not it joins,
+/// first version of this cell leaned on `pending_drain_count()` as its discriminator — it DID also
+/// assert the late bytes, but under a fixture whose child exited immediately that assertion was
+/// VACUOUS, never absent. The count was measured to be worthless on its own: `join_drains` empties
+/// the handle vector with `drain(..)` whether or not it joins,
 /// so replacing `handle.join()` with `drop(handle)` — the exact detached state this fix exists to
 /// repair — left the count at 0 and this cell green. A count of handles observes that `join_drains`
 /// was CALLED, never that a thread was JOINED.
