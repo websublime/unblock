@@ -282,8 +282,16 @@ pub struct McpClient {
     /// lost race left the buffer short and the cell went RED); after the D48 inversion the same race
     /// is fail-SILENT, because "stdout is EMPTY" is exactly what an unread buffer looks like. So the
     /// headline channel-revert mutation could survive its own regression pin intermittently.
-    /// [`join_drains`](Self::join_drains) closes that window. Both pipes reach EOF at child exit, so
-    /// the joins cannot hang behind the existing deadline.
+    /// [`join_drains`](Self::join_drains) closes that window.
+    ///
+    /// **What bounds the join is the pipe reaching EOF, i.e. the LAST writer closing it — which is
+    /// the child itself only when no descendant outlived it.** That holds for every `unblock mcp`
+    /// child (it forks nothing) and is why the join sits safely after the deadline assert in
+    /// [`wait_for`](Self::wait_for); it is NOT a universal, and [`from_child`](Self::from_child)
+    /// takes an arbitrary [`Child`]. The `mcp_stdout_channel.rs` H9 self-test deliberately builds
+    /// the exception — a background grandchild holding both write ends for a second — because that
+    /// delay is the only thing that can tell a JOINED drain from a dropped one. A fabricated child
+    /// that never released its pipes would block here forever rather than fail the deadline.
     ///
     /// Not reproduced — this is a read of the synchronisation, and it is rare precisely because the
     /// 25 ms poll granularity usually hides it. It is fixed rather than measured because the failure
@@ -414,9 +422,10 @@ impl McpClient {
 
     /// Join every retained drain thread, so both capture buffers are COMPLETE (D48).
     ///
-    /// Called by [`wait_for`](Self::wait_for) once the child is gone — both pipes are then at EOF,
-    /// so each drain returns promptly and no join can hang behind the caller's deadline. The
-    /// deliberately-detached third drain (`drain_to_eof`, behind
+    /// Called by [`wait_for`](Self::wait_for) once the child is gone. Each drain returns as soon as
+    /// its pipe reaches EOF, which for a child that forked nothing is immediate — see the `drains`
+    /// field for the bound this join actually has, and for the one shipped fixture that stretches
+    /// it on purpose. The deliberately-detached third drain (`drain_to_eof`, behind
     /// [`write_without_reading`](Self::write_without_reading)) is NOT retained: it discards every
     /// byte, so no assertion can ever read what it drained.
     fn join_drains(&mut self) {
@@ -425,15 +434,22 @@ impl McpClient {
         }
     }
 
-    /// How many retained drain threads are still UNJOINED — the deterministic observation of
-    /// [`join_drains`](Self::join_drains) having run.
+    /// How many retained drain handles are still HELD — i.e. whether
+    /// [`join_drains`](Self::join_drains) has RUN. An anti-vacuity control, never a proof that a
+    /// thread was joined.
     ///
-    /// It exists because the alternative is a TIMING assertion. The defect this accessor guards
-    /// against (deleting the `join_drains()` call in [`wait_for`](Self::wait_for)) is fail-SILENT
-    /// and RARE — an unjoined drain usually finishes first, so a cell that asserted on buffer
-    /// COMPLETENESS alone would pass under the mutation on nearly every run and then flake for real
-    /// on a loaded machine. The count is exact, so the self-test (`mcp_stdout_channel.rs` H9) reads
-    /// the synchronisation itself rather than gambling on its outcome.
+    /// **The limit is stated because this accessor once carried a claim it cannot support.** It read
+    /// "the count of unjoined handles is exact", and `mcp_stdout_channel.rs`'s H9 leaned on that to
+    /// say it observed the synchronisation itself. It does not: [`join_drains`](Self::join_drains)
+    /// empties the vector with `drain(..)` REGARDLESS of whether it joins, so replacing the join
+    /// with a `drop` leaves this reading 0 — that is simply what `drain(..)` does — and the previous
+    /// version of H9, which asserted only this count, stayed GREEN under exactly that mutation
+    /// (measured at the D48 Verify gate, not supposed). What this number is genuinely good for is
+    /// bracketing a cell: non-zero BEFORE proves
+    /// there were drains to join at all (so the later assertion is not vacuous), zero AFTER proves
+    /// the call was not simply deleted. Telling a JOIN from a DROP needs an observation the mutation
+    /// cannot reproduce, which is why H9 delays its child's last pipe bytes past the child's own
+    /// exit and reads THOSE.
     #[must_use]
     pub fn pending_drain_count(&self) -> usize {
         self.drains.len()
@@ -450,11 +466,12 @@ impl McpClient {
     /// peer that, on a TIMEOUT (i.e. the D38 hang), reports the child's captured STDERR instead of a
     /// bare "did not exit". Prefer this over [`wait_for`] whenever an `McpClient` owns the child.
     ///
-    /// On a clean exit it JOINS the retained drains (D48) before returning, so a `stdout_snapshot()`
-    /// read as a NEGATIVE — or a `stderr_snapshot()` read as a POSITIVE — sees the complete buffer
-    /// rather than whatever the race left in it. The deadline panic below deliberately precedes any
-    /// join: a HUNG child never reaches EOF, so joining first would replace a diagnosable timeout
-    /// with a silent block.
+    /// Once the child is gone — on ANY exit status, which is deliberate and not an oversight: the
+    /// two D48 cells whose buffers this protects both drive a child that exits 1 — it JOINS the
+    /// retained drains (D48) before returning, so a `stdout_snapshot()` read as a NEGATIVE, or a
+    /// `stderr_snapshot()` read as a POSITIVE, sees the complete buffer rather than whatever the
+    /// race left in it. The deadline panic below deliberately precedes any join: a HUNG child never
+    /// reaches EOF, so joining first would replace a diagnosable timeout with a silent block.
     ///
     /// # Panics
     /// If the child does not exit within `timeout` (the no-hang invariant, spine §5b).

@@ -88,12 +88,13 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 #
 # Every row had ZERO matches before the D48 commits, so none can pass vacuously.
 #
-# P1/P2/P3 are THE MECHANISM, and they are THREE rows rather than one because the classification can be
-#       broken in three independent places: the TYPE can lose a variant (collapsing the carve-out), the
-#       CLASSIFIER can vanish from `cli.rs`, or the classification can be produced and then DROPPED
-#       instead of threaded into the boundary. P2/P3 are the two-file co-occurrence: `stdout_role` must
-#       appear in `cli.rs` (produced) AND in `lib.rs` (consumed), because either half alone is a fix
-#       that does nothing.
+# P1/P2 and Q15 are THE MECHANISM, and they are THREE rows rather than one because the classification
+#       can be broken in three independent places: the TYPE can lose a variant (collapsing the
+#       carve-out), the CLASSIFIER can vanish from `cli.rs`, or the classification can be produced and
+#       then DROPPED instead of threaded into the boundary. P2 and Q15 are the two-file co-occurrence:
+#       `stdout_role` must appear in `cli.rs` (produced) AND in `lib.rs` (consumed), because either
+#       half alone is a fix that does nothing. The CONSUMER half is a Q row and not a P one — see
+#       Q15 below for the measurement that moved it.
 # P4   is the SINK-INJECTED core. Without it the stream choice is unobservable in-process and the whole
 #       unit layer of clause (7) collapses back to the spawning cells it was written to complement.
 # P5   is the spawning regression FILE. Its cells are what cover the one thing no unit cell can reach:
@@ -113,11 +114,15 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 #       script that exists but is unwired fails on its own rows rather than passing silently.
 # P16  is the count-free LIST in PROCESS.md §3 naming this script — the enumeration that makes the
 #       whole D-range cascade self-checking, and which can otherwise rot silently.
+#
+# THERE IS NO `P3`, DELIBERATELY. It became `Q15` (see the Q table) and the remaining rows were NOT
+# renumbered: a row code is how a failure names itself, so shifting fifteen of them to close one gap
+# would silently repoint every reference to this table. A gap costs one comment; a renumber costs a
+# reader who trusts an old citation.
 # =================================================================================================
 REQUIRE="
 P1@crates/unblock-cli/src/exit.rs@enum StdoutRole@the two-valued classification TYPE still exists — a bool, or a collapse to one variant, is what this row notices
 P2@crates/unblock-cli/src/cli.rs@fn stdout_role@the classifier over the PARSED command still exists where the subcommand enum lives
-P3@crates/unblock-cli/src/lib.rs@stdout_role@the classification is CONSUMED at the exit boundary, not merely produced — the two-file co-occurrence is the point
 P4@crates/unblock-cli/src/exit.rs@fn into_exit_to@the sink-injected core survives: without it the stream CHOICE is unobservable in-process
 P5@crates/unblock-cli/tests/mcp_stdout_channel.rs@assert_diagnostic_on_stderr@the spawning regression file still drives its shared oracle — the layer that covers the call site no unit cell can see
 P6@crates/unblock-cli/tests/common/mod.rs@fn is_jsonrpc_framing@the hardened stdout guard still requires FRAMING, not merely valid JSON — the blob IS valid JSON, which is how it passed for the life of the suite
@@ -154,6 +159,13 @@ P16@docs/PROCESS.md@d48-stdout-channel-claims@the count-free LIST that IS the ru
 #       anchor vanish, and a vanished anchor is a failure.
 # Q14  is the classifier's Mcp arm, anchored on its own production line. A blanket classifier that
 #       returned Reports for everything would rewrite exactly this line.
+# Q15  is the CONSUMER half of the two-file co-occurrence, and it is a Q row because it shipped as a
+#       P one and MEASURABLY proved nothing: a bare `stdout_role` token over `lib.rs` is also matched
+#       by that file's own doc comment about `Command::stdout_role`, so deleting the production line
+#       and hard-coding a role at the call site compiled and left this gate silent — the exact state
+#       the row says it catches. That is the case the two-rule header calls out ("a landing that can
+#       be satisfied by a doc comment is NOT a P row"), so the row now anchors on the production
+#       line itself and requires the call that produces the value.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@CLAUDE.md@^\| .docs/PRD\.md. \| Product truth@$RANGE_RE@PROSE D-range bump site, LOCATED on the document-map row that states the range
@@ -170,6 +182,7 @@ Q11@scripts/checks/d47-envelope-id-claims.sh@^RANGE_ALT_RE=@$RANGE_KNOB_ALT_RE@�
 Q12@crates/unblock-mcp/src/options.rs@^pub const CONTRACT_VERSION@$CONTRACT_RE@D48 mints no ErrorCode and bumps NO contract: it moves an already-formed document to another stream. An unstated 'we didn't bump' is indistinguishable from an oversight, so it is stated here
 Q13@crates/unblock-cli/src/exit.rs@^ +StdoutRole::Protocol =>@write_payload\(&out\.stdout, stderr\)@the CARVE-OUT itself: the machine arm routes a protocol-channel command's document to the STDERR sink. Anchored on the arm's own line, so the module doc that describes the rule cannot satisfy it
 Q14@crates/unblock-cli/src/cli.rs@^ +Self::Mcp\(_\) =>@StdoutRole::Protocol@mcp is classified as a PROTOCOL channel. Anchored on the arm's own production line, which a blanket classifier would rewrite
+Q15@crates/unblock-cli/src/lib.rs@^ +let stdout_role =@cli\.command\.stdout_role\(\)@the classification is CONSUMED at the exit boundary, not merely produced. Anchored on the production LINE — as a bare token over the file it was satisfied by lib.rs's own doc comment, so dropping the line and hard-coding a role passed
 "
 
 blocked=0
@@ -309,8 +322,11 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 
 # The floors are the counts this file shipped with. A floor may only move down together with the rows
 # it counts moving somewhere the other floor counts them — never because a rule became inconvenient.
-check_table_floor 'required-landing (P)' "$p_count" 16 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 14 || blocked=1
+# That is exactly what happened once, in the D48 Verify repair round: the consumer landing moved from
+# `P3` to `Q15` because a bare token was satisfiable by a doc comment, so the P floor dropped by one
+# and the Q floor rose by one IN THE SAME EDIT. The pair still totals what it shipped with.
+check_table_floor 'required-landing (P)' "$p_count" 15 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 15 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the classification type, its classifier and its consumer are all still in the tree with exactly one caller and no unclassified subcommand, the carve-out arm still routes a protocol-channel command to stderr, the sink-injected core and the spawning regression file still exist, the hardened framing guard and the format-env scrub still stand, the tracker names ub-og3 and all four residual ids the PRD row cites (ub-kp7, ub-b1a, ub-c5o, ub-5v5), the rendered roadmap lists the decision, this gate is both specified and wired, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates while the contract version stands unmoved."

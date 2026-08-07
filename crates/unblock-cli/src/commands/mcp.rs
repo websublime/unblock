@@ -226,9 +226,17 @@ fn resolve_mcp_exit(
 ///
 /// Neither branch drops the error: `Debug` records it through tracing (surfaced by `-vv`), `Stderr`
 /// writes the `error[CODE]: message` line (NFR-14). stdout is never touched — on `mcp` it carries
-/// MCP framing ONLY. **Since D48 that holds of the WHOLE command, not just of this function:** the
-/// one remaining stdout writer, `exit::into_exit`'s machine arm, now writes its document to stderr
-/// too, so the loophole this note used to describe around itself is closed.
+/// MCP framing ONLY. **Since D48 that holds of the whole command ONCE THE SERVER STARTS, not just of
+/// this function:** `exit::into_exit`'s machine arm — the last product writer that put a non-frame
+/// document on fd 1 while the framing channel was live — now writes it to stderr too, so the
+/// loophole this note used to describe around itself is closed.
+///
+/// Two qualifiers, both deliberate and both stated because an unqualified reading is falsified by
+/// something shipped and green. `unblock mcp --help` never starts the server and legitimately prints
+/// clap's usage prose to stdout (D48 clause 5; `tests/help_snapshots.rs`'s `mcp_help` asserts a
+/// non-empty stdout there). And `output::emit_report` is still an unclassified stdout writer — it is
+/// simply one this command never calls, which is a fact about the call graph and not a guarantee
+/// (D48 clause 6(iii), tracked as `ub-c5o`).
 fn report(diagnostic: Diagnostic) {
     match diagnostic.route {
         // Rendered via Debug (`?`) rather than Display so the line NAMES the rmcp outcome it demoted
