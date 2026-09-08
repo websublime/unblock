@@ -202,11 +202,15 @@ outcome, not a process violation. The Understand comment on the task's issue (§
   (`ci-cd-and-distribution.md` §2.3) — a distinct, stricter sense than §4's team-sizing use: every code
   change is gate-substantive, including a §4-legitimate solo one-liner. This rule fixes WHERE they land;
   **WHO writes them is §6's ownership bullet — the Track step, after both gates, on the same branch.**
-- **Enforcement is hard — failures block, never warn; no manual bypass, no discretionary label:** three
-  layers — `cargo xtask knowledge-lint` (checks k1–k6), the required `run-report-gate` CI job (the
-  structural substantive-PR predicate; the pr-create hook runs the same script), and PreToolUse hooks
-  (memories curation, sanctioned `memory-retire.sh` removal, `gh pr create`). Full normative spec:
-  `ci-cd-and-distribution.md` §2.3.
+- **Enforcement is hard — failures block, never warn; no manual bypass, no discretionary label.** The
+  layers are a list that carries no count: `cargo xtask knowledge-lint` (checks k1–k6); the required
+  `run-report-gate` CI job (the structural substantive-PR predicate; the pr-create hook runs the same
+  script); PreToolUse hooks (memories curation, sanctioned `memory-retire.sh` removal, `gh pr
+  create`); and the knowledge-layer invariants check
+  (`scripts/knowledge/knowledge-layer-invariants.sh`, a required `doc-lint` step asserting that the
+  other layers' machinery is still in the tree and that no name on its retired list survives in a
+  live document).
+  Full normative spec: `ci-cd-and-distribution.md` §2.3.
 - **The recurring consolidation sweep** (staleness/contradiction/duplicate across `.knowledge/` — the
   SEMANTIC layer above the structural `knowledge-lint`) is a runbook, not a rule: see the wiki topic
   `.knowledge/wiki/topics/knowledge-gardener.md`.
