@@ -36,7 +36,7 @@ Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.
 | `audit` | `cargo audit` (advisories; catches e.g. an archived retry crate) | NFR-3, NFR-9 | **M0 (T0.9)** |
 | `deny` | `cargo deny check` (licenses, bans, sources, advisories; **no-git ban**: no git crate in tree; transitive budget) | NFR-6, NFR-9, NFR-10 | **M0 (T0.9)** |
 | `toolchain` | pin `rust-toolchain.toml` to **stable `1.96.0`** and build the workspace with `--locked`; a green stable build (no nightly-only features) is the gate. Fails if any crate requires nightly. | NFR-12 | **M0 (T0.9)** |
-| `doc-lint` | `cargo xtask doc-lint` — **doc-corpus consistency lint** (see §2.1) over the fixed 19-file corpus; catches the D-id / FR-tier / command-token / stamp / cross-ref / doc-count drift classes. Plus the knowledge-layer steps (§2.3): `cargo xtask knowledge-lint` (k1..k6, separate corpus) + `scripts/knowledge/tests/run-report-gate-selftest.sh` (the gate predicate's executable proof). | — | **M0 (T0.9)** |
+| `doc-lint` | `cargo xtask doc-lint` — **doc-corpus consistency lint** (see §2.1) over the fixed 19-file corpus; catches the D-id / FR-tier / command-token / stamp / cross-ref / doc-count drift classes. Plus the knowledge-layer steps (§2.3): `cargo xtask knowledge-lint` (k1..k6, separate corpus; §2.3.2) + `scripts/knowledge/tests/run-report-gate-selftest.sh` (the gate predicate's executable proof; §2.3.3) + `scripts/knowledge/knowledge-layer-invariants.sh` (the layer's standing invariants; §2.3.6) + `scripts/knowledge/tests/knowledge-layer-invariants-selftest.sh` (that check's fixture proof; §2.3.6). | — | **M0 (T0.9)** |
 | `fuzz-smoke` | short `cargo fuzz` run on the 9 ingestion targets, on a **scheduled** (nightly) workflow (`fuzz-smoke.yml`): nightly-`2026-04-01` (= rustc 1.96.0-nightly) + libFuzzer for the targets, plus a separate stable-1.96 step that runs the two `#[ignore]`d contention-lab controls (forced-spin, WAL-negative) to keep the M0 gate proven non-vacuous. Both controls are **core-independent** so they are non-flaky on the 4-vCPU runner: the forced-spin control asserts a busy-retry + CPU-burn (`cpu/wall`) hot-spin signature (not just `R > ceiling`), and the WAL-negative control drives a fixed write total — see `unblock-storage.md` and `STATUS.md` T0.8. Failure routing at M0 = just go red; `workflow_dispatch` allows a manual re-run; no issue-opening. **Repair note (post-T1.3):** this leg was effectively **DOA since T0.7/T0.9** — the former `nightly-2024-10-31` pin (cargo 1.84) predated edition 2024 (>= 1.85) + let-chains (>= 1.88) so the `unblock-*` tree could not parse, and the nested `fuzz/Cargo.toml` lacked an empty `[workspace]` table so `cargo fuzz` could not build it directly. Re-pinned to `nightly-2026-04-01` (>= the stable 1.96 target) + the `[workspace]` table added; the unwatched cron is now repaired. | NFR-16 | **M0 (T0.9)** — nightly schedule |
 | `bench-gate` | HYBRID `criterion` gate (D34): a hard per-PR **generous absolute-ms** budget on a pinned ≥2-vCPU runner (`benches/storage.rs`, `benches/engine.rs` + the existing policy/render `criterion` benches wired into the SAME gate, F-7 — `cargo xtask bench-gate`) plus the **advisory/nightly 10% relative-regression report** (`cargo xtask bench-compare` vs the committed `xtask/bench-baseline.json`, homed in the `fuzz-smoke` `perf-advisory` leg, **report-only — never fails a PR/nightly**) | NFR-1 | **landed at T3.5 (P1)**; the read ceilings were **re-tightened + the advisory relative-10% leg landed at T3.5.1** (once batch hydration fixed the `collect_hydrated` N+1) |
 | `scale` | 250k-issue corpus (storage-direct, validated but non-minted — D34) under the child-per-client topology (D14+D31); a **timed integration test** (`crates/unblock-storage/tests/scale.rs` + `crates/unblock-engine/tests/scale.rs`), NOT a `criterion` bench — per-PR with an explicit timeout + an `#[ignore]`-gated soak variant | NFR-2 | **owned by / lands at T3.5 (P1)** (the 250k corpus harness/`seed_corpus` is built at T3.5) |
@@ -85,16 +85,21 @@ Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.
 
 **Named sub-check (its D48 sibling — POSITIVE-ONLY, for the same reason as the D47 one plus one of its own):** D48 (PRD §4 — a subcommand whose stdout is a PROTOCOL channel reports its structured error on STDERR, tracked as `ub-og3`) has executable teeth — the injected-sink cells in `crates/unblock-cli/src/exit.rs`, the spawning `crates/unblock-cli/tests/mcp_stdout_channel.rs` suite, and the two INVERTED `mcp_lifecycle.rs` cells — so a behavioural regression is a red `test`. **But THREE of this decision's obligations are unreachable from any test at all**, which is the reason this gate exists rather than a stylistic preference: the SINGLE-CALLER invariant clause (2)'s blast-radius argument rests on (a second `into_exit` caller passing a literal `Reports` re-opens `ub-og3` with every unit and end-to-end cell still green); the FOUR residual ids clause (6) names and leaves OPEN; and `docs/roadmap.html`, which sits OUTSIDE the 19-file doc-lint corpus, so a v1.0.1 card listing a fix set missing a fix would ship unnoticed. `scripts/checks/d48-stdout-channel-claims.sh` is therefore a REQUIRED-LANDING check, and it is **deliberately positive-only** — not because D48 retires no framing (every "structured output strictly on stdout" sentence gains a carve-out) but because a NEGATIVE sweep for retired wording is the same defect in disguise: a claim REWRAPPED across two lines is unfindable in principle, so the sweep goes green while the false sentence is still in the tree. Every row is instead a spelling-INDEPENDENT positive landing keyed on a durable identifier. It asserts: the two-valued classification TYPE (a `bool`, or a collapse to one variant, is what that row notices); **the classifier and its CONSUMER as a two-file co-occurrence — `stdout_role` in both `src/cli.rs` and `src/lib.rs`, because a classification produced and then DROPPED is a fix that does nothing. The CONSUMER half is ROW-ANCHORED on the production line and requires the `cli.command.stdout_role()` call, NOT the bare token: as a file-level token it was MEASURABLY satisfied by `lib.rs`'s own doc comment about `Command::stdout_role`, so deleting the production line and hard-coding a role at the call site compiled and left the gate silent — the exact state the row exists to catch, and the case the script's own two-rule header calls a Q row and not a P one**; the carve-out arm itself, anchored on the line that routes the `Protocol` case to the stderr sink; the sink-injected `into_exit_to` core, without which the stream CHOICE is unobservable in-process; the spawning regression file; the hardened stdout framing guard (a line that merely PARSES as JSON is not enough — the blob IS valid JSON, which is exactly how it passed for the whole life of the suite) and the `UNBLOCK_OUTPUT_FORMAT` scrub that stops a host shell making every frame-only assertion vacuous; **`ub-og3` AND all FOUR residual ids in `.unblock/issues.jsonl` — `ub-kp7`, `ub-b1a`, `ub-c5o`, `ub-5v5` — one row EACH, so a failure says WHICH id vanished and the top document of the hierarchy carries no dangling id**; the rendered roadmap's D48 bullet; this gate's own two-sided wiring (SPECIFIED in this paragraph, RUNNING in the workflow); and `docs/PROCESS.md`'s count-free LIST naming this script. **AND the ROW-ANCHORED half pins the LIVE D-range at EVERY file that §3 list enumerates** — the three prose sites plus the `RANGE_RE`/`RANGE_ALT_RE` knob of each shipped required script, now including the D47 one — with **its own knob deliberately un-rowed**, following the precedent its D46/D47 siblings state: the newest script is the REFERENCE the others are compared against, and a self-row would be vacuous by construction. **It also carries TWO STRUCTURAL checks no table row can express, because each is a RELATION rather than the presence of a string:** the single-caller count above, and that every `Command` variant is classified inside `stdout_role` — clause (2) makes the no-`_`-arm exhaustiveness NORMATIVE, but rustc only asks the question while no wildcard exists, and `Self::Mcp(_) => Protocol, _ => Reports` satisfies the classifier's own unit cell COMPLETELY (a design-Review finding, not a hypothetical). **SEQUENCING, the same discipline all four siblings state:** the D-range knobs move with the SPEC commit (a range bump is normative text), while this script, its workflow step, and the two prose edits that ADD it to both enumerations belong to the IMPLEMENTATION commit — the one that actually mints the file — so no required-STEP ENUMERATION ever lists a step that is not in the tree. (Ordinary prose may name a planned script, and the D48 PRD row does; a CI job naming a missing one fails the job.) **THE CONTRACT KNOB IS THE INVERSE COUPLING AND IT DOES NOT MOVE HERE, stated affirmatively because an unstated "we didn't bump" is indistinguishable from an oversight:** D48 mints NO `ErrorCode` (`ErrorCode::ALL` stays 36), moves no published byte and changes only which STREAM an already-formed document is written to, so `capabilities()`/`schema_bundle()` are byte-unchanged and **`unblock.mcp.v1.9` stands**. This script's `CONTRACT_RE` row therefore pins the version as UNMOVED, and a silent bump riding this decision goes red.
 
-### 2.3 Knowledge layer — format contract, knowledge-lint, run-report gate & hooks
+### 2.3 Knowledge layer — format contract, knowledge-lint, run-report gate, hooks & the invariants check
 
 The repo-public knowledge layer `.knowledge/` (memories + wiki run-reports/topics — descriptive, never
 normative; process rules in `docs/PROCESS.md` section 8) is machine-enforced from day 1: failures BLOCK,
-never warn — no manual bypass, no discretionary label. Three layers: (i) `cargo xtask knowledge-lint`
-(§2.3.2), a step in the `doc-lint` job; (ii) the `run-report-gate` required CI job (§2.3.3) — every PR is
-classified by a structural substantive-PR predicate, and a substantive PR must carry its wiki
-run-report in the same commit/PR as the work; (iii) PreToolUse hooks (§2.3.4), which run the SAME predicate script before
-`gh pr create`. CI is the unbypassable server-side floor; hooks are the early in-session net; no rule
-exists only in a hook. §2.3.5 records the accepted residuals by name.
+never warn — no manual bypass, no discretionary label. Each layer is normative in its own subsection, and the list is the rule that carries no count: (i)
+`cargo xtask knowledge-lint` (§2.3.2), a step in the `doc-lint` job; (ii) the `run-report-gate`
+required CI job (§2.3.3) — every PR is classified by a structural substantive-PR predicate, and a
+substantive PR must carry its wiki run-report in the same commit/PR as the work; (iii) PreToolUse
+hooks (§2.3.4), which run the SAME predicate script before `gh pr create`; (iv) the knowledge-layer
+invariants check (§2.3.6), a step in the `doc-lint` job that scopes to the MACHINERY of the other
+layers and leaves `.knowledge/**` content to layer (i) — every layer script present and executable,
+the top-level hooks object, the templates, the lint module and its corpus test,
+the same-commit rule still stated in `docs/PROCESS.md`, `CLAUDE.md` and this file, and the absence
+of its listed retired names from live documents. CI is the unbypassable server-side floor; hooks are the
+early in-session net; no rule exists only in a hook. §2.3.5 records the accepted residuals by name.
 
 #### 2.3.1 Format contract — scaffold, slugs, frontmatter schemas, index grammars, consts
 
@@ -357,9 +362,9 @@ roadmap `R` rows) collide with the pattern; the remedy is tuning the ONE declare
 self-gated change), never per-file discretion.
 
 **CI wiring + budget:** offline, deterministic, sub-second, single pass per file (same budget class as
-doc-lint) — **one added step** in the existing `doc-lint` job, directly after `cargo xtask doc-lint`
-(a step in the existing job: identical always-on blocking property, one toolchain spin-up saved; the
-gate of §2.3.3 IS its own job because it is PR-only and toolchain-free).
+doc-lint) — **one added step** in the existing `doc-lint` job, after the `scripts/checks/` gates of
+§2.1 (a step in the existing job — identical always-on blocking property, one toolchain spin-up saved;
+the gate of §2.3.3 IS its own job because it is PR-only and toolchain-free).
 
 **Tests (the doc-lint proof pattern):** every planted fixture root ships the two out-of-tree stubs (a
 minimal `CLAUDE.md` importing a stub `docs/PROCESS.md`, and a synthetic one-line export mirroring the
@@ -676,7 +681,11 @@ Bypass surfaces (each with its closing layer):
 - **R-B1** An agent edits `.claude/settings.json` or `scripts/**` to defang hooks. Closure: hooks are
   the early net, **CI is the authority** — `run-report-gate` + `knowledge-lint` run server-side, and
   any such edit is itself SUBSTANTIVE (rule 3), demanding a run-report that documents the change in
-  front of the human merger. System-prompt rules already forbid agent permission/config changes.
+  front of the human merger. System-prompt rules already forbid agent permission/config changes. The
+  knowledge-layer invariants check (§2.3.6) NARROWS this further. A hook script deleted from the
+  committed tree or stripped of its executable bit, or a `.claude/settings.json` without its
+  top-level `hooks` object, turns a required `doc-lint` step red instead of only reaching the merger
+  as a diff.
 - **R-B2** A manifest-only dependency ADDITION passes as trivial (rule 2). Closure: an unused
   dependency is inert; using it requires `*.rs` changes → substantive then; `cargo-audit`/`cargo-deny`
   still gate the PR. Accepted residual.
@@ -713,6 +722,10 @@ Bypass surfaces (each with its closing layer):
   every hook-guarded rule EXCEPT pre-commit protection of uncommitted memories, whose practical
   exposure is in-session (where the landing-PR smoke canaries prove the hooks execute) — plus normal
   traffic exercises the hooks every session, so silent environmental rot surfaces immediately.
+  The knowledge-layer invariants check (§2.3.6) NARROWS it. Each hook script's presence and its
+  executable bit is a row that names the path, so the missing-script-file arm is caught for COMMITTED
+  state and the surviving residual is runtime-environmental only: an absent `python3`, an unset
+  `$CLAUDE_PROJECT_DIR`, or a non-Claude-Code client.
   Accepted residual, named — not softened (no warn path is added anywhere).
 - **R-B10** The road not taken on glossary depth, recorded with its true cost: under a
   presence-only k6 (shape checks alone), nothing machine-checks that comment-coined codes have
@@ -728,11 +741,179 @@ Bypass surfaces (each with its closing layer):
   shape the sanctioned flow emits; such a PR still faces every other predicate rule; and the k6
   comment scan re-covers the codes the moment any in-scope comment cites them. Accepted residual,
   named — no warn path added.
+- **R-B12** One edit removes BOTH §2.3.6 steps of the `doc-lint` job (the invariants check and its
+  selftest) at once. Closure: removing either one alone is caught. With the check's step gone, the
+  surviving selftest step fails its live-tree pin that the workflow names the check. With the
+  selftest's step gone, the surviving check step fails its wiring row over the workflow. Removing
+  both is a `.github/**` change, always substantive under rule 3, demanding a run-report in front of
+  the human merger (the R-B1 closure). Accepted residual, named — no warn path added.
 
 Consciously out of scope (per the approved design): Write/Edit-tool protection of `wiki/**`
 (memories-only; shell-side destructive commands on the whole `.knowledge` tree ARE denied; a runs
 deletion still surfaces via k1/k2 + the PR diff), and any private-memory migration content (a separate
 epic task).
+
+#### 2.3.6 Layer (iv): the knowledge-layer invariants check — `scripts/knowledge/knowledge-layer-invariants.sh` + its selftest
+
+**What it is.** The check is a POSIX `sh` + `git` step of the required `doc-lint` job. It asserts that
+the MACHINERY of layers (i)–(iii) is still in the tree, that the same-commit rule is still stated in
+`docs/PROCESS.md`, `CLAUDE.md` and this file, and that retired names have zero live hits. It carries
+no token allowlist and no proximity window over the same-commit sentences, and neither may be
+re-added. An allowlist is maintained state that goes red the moment later, legitimate work mentions
+its tokens. A line window cannot tell the run-report rule from the D-range cascade of §2.1(a), the
+tracker re-export rule and the D46 sequencing split, all of which are correct prose in this file and
+in `docs/PROCESS.md`. **This subsection is the check's SPECIFICATION and is normative over the
+script.** A row that exists in one and not the other is a defect to fix in the same change.
+
+**SAME-COMMIT rows.** Each row is a presence grep over one document, keyed on the phrasing that
+document uses for this rule. `docs/PROCESS.md` and this file also carry unrelated same-commit
+sentences (the D-range cascade; the sibling gates' knob sequencing), so their rows key on the phrasing
+only this rule uses there, while `CLAUDE.md` states the rule in the plain phrasing. A presence grep
+proves the phrase is in the file and nothing finer, so should an unrelated same-commit sentence ever
+be added to `CLAUDE.md`, that row moves to a discriminating phrasing the same way the rows over the
+other documents already did. `docs/PROCESS.md`, `CLAUDE.md` and this file are the documents this check
+rows; another file may state the rule and carry no row here. **The keyed literals are deliberately NOT
+quoted in this subsection.** This file is one of the scanned documents, and quoting a predicate's key
+in explanatory prose is exactly how a file-level pin passes vacuously — the defect §2.1(a) records
+against its own D-range row, and the reason that row is line-anchored and quotes its literal in one
+place only.
+
+**LANDED rows.** Each row is a named predicate whose failure message names the path.
+
+| Assertion | Paths |
+|---|---|
+| present AND executable | `scripts/knowledge/run-report-gate.sh`, `scripts/knowledge/memory-retire.sh`, `scripts/knowledge/tests/run-report-gate-selftest.sh`, `scripts/knowledge/knowledge-layer-invariants.sh`, `scripts/knowledge/tests/knowledge-layer-invariants-selftest.sh`, `scripts/hooks/knowledge-memories-write-guard.py`, `scripts/hooks/knowledge-memories-bash-guard.py`, `scripts/hooks/pr-create-run-report-gate.py` |
+| present | `.knowledge/memories/index.md`, `.knowledge/wiki/index.md`, `xtask/src/knowledge_lint.rs`, `xtask/tests/knowledge_lint_corpus.rs`, `docs/plans/templates/run-report.md`, `docs/plans/templates/topic-page.md` |
+| directory exists | `.knowledge/wiki/runs`, `.knowledge/wiki/topics` |
+
+One further landed row reads `.claude/settings.json` and anchors on the TOP-LEVEL `hooks` object's key
+line — its indentation plus the object opener — because the bare token also occurs in that file as
+nested per-matcher arrays and a bare-token grep survives the very mutation it exists to catch.
+
+**ZERO rows.** Each row is a `git grep` that must find nothing, and a failing row lists its hits on
+stderr above its own failure line.
+
+| Must find nothing | Scope |
+|---|---|
+| retired draft names of this layer's design — the pre-landing script and module names, and this check's own pre-rename filename | every tracked file EXCEPT `.knowledge/**` (descriptive pages quote anything), `.unblock/issues.jsonl` (the generated export), the check itself and its selftest (their literals are the rules and the fixture data) |
+| the retired `docs/PROCESS.md` section-7 title | the same scope |
+| stale `STATUS.md` references | `docs/plans/templates/` |
+| bracketed `R`, `MF` and `A` markers, the hyphen optional | this file, the templates, `docs/PROCESS.md`, `CLAUDE.md`, `.github/workflows/ci.yml` |
+| `MF` and `A` markers — bracketed, parenthesised or bare, the hyphen optional inside brackets — plus the bracketed `R` form | `run-report-gate.sh`, `memory-retire.sh`, `scripts/hooks/`, `.github/workflows/ci.yml` |
+
+The marker scans deliberately skip `run-report-gate-selftest.sh` and `xtask/src/knowledge_lint.rs`,
+whose fixtures coin such tokens as test data, and they never reach `scripts/knowledge/tests/`. The
+selftest file may therefore carry any retired name, which is a stated blind spot.
+
+**WIRING rows.** `.github/workflows/ci.yml` names the check AND its selftest, this file names both AND
+carries the §2.3.6 heading, and `docs/PROCESS.md` names the check. That last row proves only that the
+file names the check somewhere; its section 8 layer list is where it belongs and its section 3 knob
+list is where it must not go, and a file-level row cannot tell those apart. These rows implement the
+rule §2.1 already states for the `scripts/checks/` gates that carry it — the gate cannot ship
+wired-but-unspecified or specified-but-unwired. A check that runs in no job goes red unnoticed, and
+`docs/PROCESS.md` is out of the doc-lint corpus while the sibling gates that read it pin only its
+section 3 script list, so without its row nothing in the tree notices the section 8 layer list going
+stale. Residual R-B12 (§2.3.5) names the one edit these rows cannot see.
+
+**Which rows are the UNIQUE coverage.** These rows are the only coverage in CI their subject has:
+`scripts/hooks/knowledge-memories-write-guard.py`,
+`scripts/hooks/knowledge-memories-bash-guard.py`, `scripts/hooks/pr-create-run-report-gate.py` and
+`scripts/knowledge/memory-retire.sh` — presence and executable bit alike, since CI executes none of
+them and a hook whose file is missing fails OPEN (residual R-B9); the top-level `hooks` object; both
+templates, which sit outside the 19-file doc-lint corpus and are asserted by nothing else in CI;
+`xtask/tests/knowledge_lint_corpus.rs`, whose deletion is a silent coverage loss under `cargo test`;
+the same-commit rows; every ZERO row; and the wiring rows over this file, over `docs/PROCESS.md`, and
+over the workflow for the selftest.
+
+**Which rows have alternative coverage elsewhere in CI.** Every one is RETAINED, because the list is
+the rule and a redundant row costs a line while a dropped one is silent. The list below is complete,
+so the unique-coverage claim above is checkable.
+
+| Row | What else covers it |
+|---|---|
+| `.knowledge/memories/index.md`, `.knowledge/wiki/index.md`, `.knowledge/wiki/runs`, `.knowledge/wiki/topics` | knowledge-lint's structure guard (§2.3.2), which fails closed on their absence |
+| `run-report-gate.sh` present and executable | its own selftest asserts it, by path and by name (§2.3.3) |
+| `run-report-gate-selftest.sh`, and this check's selftest | each is invoked by a `doc-lint` step, so losing either already turns the job red — for a reason unrelated to the layer and without naming the file |
+| `xtask/src/knowledge_lint.rs` | its absence is a compile failure of `cargo xtask knowledge-lint` |
+| this check's OWN presence-and-mode row | it cannot fail while its own step is what runs it, and its honest cover is the selftest's live-tree pin that the check is executable here, which runs from a different step |
+| the wiring row asserting the workflow names the CHECK | near-vacuous for the same reason — its teeth are a local run and that same live-tree pin |
+
+The selftest's own presence-and-mode row belongs to this list rather than to the unique one, because a
+missing or non-executable selftest turns its own step red. The row's value is that it names the file
+first.
+
+**Not a decision cascade.** It pins no decision range, so it carries no `RANGE_RE` knob and must NOT
+join the `docs/PROCESS.md` section 3 list of knob-bearing scripts — the same footing as
+`scripts/knowledge/tests/run-report-gate-selftest.sh`, a required `doc-lint` step with no such knob.
+It carries no contract knob either, because it asserts nothing about published bytes.
+
+**Exit codes.** 0 = every row clean (one stdout line, no count); 1 = at least one row failed (every
+row runs; each failure is one stderr line naming the row, a failing ZERO row prints its hits above
+that line, then a trailer); 2 = cannot evaluate (not inside a git repository; fail-closed).
+
+**Selftest — `scripts/knowledge/tests/knowledge-layer-invariants-selftest.sh` (0755).** The check's
+failure mode is proven by EXECUTION against fixture trees, and the live tree is never mutated. The
+wiki directory rows cannot be proven live at all, because the PreToolUse bash guard (§2.3.4) denies
+any Bash command pairing a mutating verb with the literal `.knowledge`, and the shapes that would
+evade it are the R-B5 bypasses. The selftest is a fixture-repo harness in pure POSIX `sh` + git,
+offline and deterministic, following the §2.3.3 pattern. For each case a throwaway repo under
+`mktemp -d` carries every landed path as a stub at its own relative path, the documents that state the
+same-commit rule, both wiki directories, a `.claude/settings.json` reproducing the live nested-array
+`hooks` shape, and a workflow stub and a stub of this file naming both scripts. Those same-commit
+documents also carry the DECOY sentences the live files carry, so a negative case proves each row keys
+on this rule rather than on a neighbour; the stub of this file also cites §2.3.6 in prose, so the
+heading row must anchor at the start of a line to stay green; and the baseline plants the retired
+names in every excluded path, so each exclusion is proven to exclude. The check runs with the fixture
+as its working directory — it resolves git's toplevel, so the fixture IS the repository, no
+testability flag exists on the check, and no `--repo` flag may be added. The table below is the
+mandatory case matrix. Every case asserts the exit code and the EXACT count of failure lines, which
+is one where the case regresses a row. A case that expects a failure also asserts that row's
+distinguishing stderr substring and an empty stdout, and a case that expects a pass asserts the OK
+line.
+
+| Mutation (one per case) | Expect |
+|---|---|
+| none (baseline; retired names present only in the excluded paths) | 0, the OK line |
+| cwd inside no git repository | 2 (`not a git repository`) |
+| the keyed same-commit phrasing stripped from one of those documents, its decoy sentences left in place (one case each) | 1 (`no longer states the … same-commit rule`) |
+| a retired draft name appended to a plain doc; the same via a NEW staged file (pins hits-on-stderr and that staged additions are seen); the check's pre-rename filename appended to a plain doc | 1 each (`retired draft names`) |
+| a retired draft name appended to the selftest's own path stub | 0 (the exclusion excludes) |
+| the retired section-7 title appended to a plain doc | 1 (`retired PROCESS section-7 title`) |
+| `STATUS.md` appended to a template | 1 (`stale STATUS.md refs`) |
+| a square-bracket marker appended to the process-document stub (a path the script-marker row does not scan) | 1 (`audit markers in landed normative docs`) |
+| a parenthesised marker appended to a hook script (a path the doc-marker row does not scan) | 1 (`audit markers in non-fixture scripts`) |
+| one landed script removed (one case per script); one landed script chmod 0644 (one case per script) | 1 each (`missing landed script: <path>` / `not executable (0755 expected): <path>`) |
+| one landed file removed (one case per file) | 1 each (`missing landed file: <path>`) |
+| one wiki directory removed (one case per directory) | 1 each (`missing dir: <path>`) |
+| the top-level `hooks` key renamed while the nested `hooks` arrays stay (the case also asserts a bare token survives — the shape the old bare-token grep passed) | 1 (`no top-level "hooks" object`) |
+| the check's step / the selftest's step dropped from the workflow stub (one case each) | 1 each (`does not name …`) |
+| the check's path / the selftest's path / the §2.3.6 heading dropped from the stub of this file (one case each) | 1 each (`does not name …` / `carries no §2.3.6 heading`) |
+| the check's path dropped from the process-document stub | 1 (`the section 8 layer list must name …`) |
+
+The selftest also carries its own live-tree pins. The check is executable in this checkout, and
+`.github/workflows/ci.yml` names the check — the check cannot observe its own absence from the job,
+and the selftest can. Its success line carries no case count. The landed-set lists are spelled once in
+the selftest and drive both the base tree and the negative cases, so a list that drifts from the
+check's is red in both directions. One throwaway git repository per case costs tens of seconds of wall
+time, so a slow step here is expected.
+
+**CI wiring (always-on, blocking).** The `doc-lint` job runs the check and then its selftest, directly
+after the gate selftest step of §2.3.3. Each needs only git and `sh`.
+
+**Sequencing.** The check, its selftest, both `doc-lint` steps, this subsection, the §2 job-table row,
+the §2.3 intro list, the §2.3.5 residual clauses and the `docs/PROCESS.md` section 8 list land in ONE
+commit. The workflow may never name a script absent from the tree; the job-table row is that
+enumeration in prose; the check's landed and wiring rows and the selftest's live pins are mutual; the
+retired-name row for the old filename is red on any tree where the rename has not landed; and every
+`§2.3.6` cross-reference is a class-(e) finding until this heading exists. The spec-first split the
+`scripts/checks/` siblings state does not apply here, because it governs knobs this check does not
+have. A decision-range knob moves with the SPEC commit, since a range bump is itself normative text,
+while a contract-version knob moves the opposite way, with the implementation commit that changes the
+code constant. This check carries neither. The "specification is normative over the script" principle
+is honoured INSIDE the commit, so this subsection is written first and the script is reconciled
+against it. The Track step then adds the run-report and the tracker re-export on the same branch
+(`docs/PROCESS.md` section 6). The 2026-07-23 landing run-report names this check's earlier filename
+and is left as history.
 
 ## 3. Release / distribution pipeline (`dist`) — at v1 GA
 

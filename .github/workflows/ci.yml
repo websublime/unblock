@@ -340,6 +340,21 @@ jobs:
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
       - run: scripts/knowledge/tests/run-report-gate-selftest.sh
+      # The knowledge layer's standing invariants (ci-cd section 2.3, specified at section 2.3.6).
+      # The check asserts that every layer script is present and executable, and that the lint module
+      # and its corpus test, both templates, both index files and both wiki dirs are present. It also
+      # asserts the TOP-LEVEL hooks object of .claude/settings.json, the same-commit rule still stated
+      # in docs/PROCESS.md, CLAUDE.md and the CI specification, zero live hits of retired names and of
+      # audit markers in the paths its rows name, and its own wiring on both sides. It pins no
+      # decision range, so it carries no RANGE_RE knob, the same footing as the selftest step above.
+      # The next step proves its failure mode against fixture repos, and the live tree is never
+      # mutated.
+      - run: scripts/knowledge/knowledge-layer-invariants.sh
+      # This step is the check's executable proof. A positive fixture tree is green, and each row has
+      # a negative fixture that is red on exactly that row. The fixture repos live under mktemp and
+      # never in the live .knowledge tree, so the harness is guard-compatible by construction.
+      # Exits 0/1.
+      - run: scripts/knowledge/tests/knowledge-layer-invariants-selftest.sh
 
   verify-pins:
     name: verify-pins (NFR-9 action SHA-pinning)
