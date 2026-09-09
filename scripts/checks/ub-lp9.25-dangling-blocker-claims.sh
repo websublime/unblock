@@ -106,11 +106,11 @@ CONTRACT_FAMILY_RE='unblock\\?\.mcp\\?\.v1\\?\.[0-9]+'
 # everywhere instead of only where it was observed.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves: the
-# prose range `(D1..D48)` and the tokenizer's regex ALTERNATION `\bD(48|47|46|…)\b`. Pinning only the
+# prose range `(D1..D49)` and the tokenizer's regex ALTERNATION `\bD(49|48|47|…)\b`. Pinning only the
 # prose is exactly how that site rots into an undefined-D48 finding — the lint would stop tokenizing the
 # id it is being told exists. Both halves are therefore separate Q rows on the same anchor.
-RANGE_RE='D1\.\.D48'
-RANGE_ALT_RE='D\(48\|47\|'
+RANGE_RE='D1\.\.D49'
+RANGE_ALT_RE='D\(49\|48\|'
 
 # =================================================================================================
 # FORBIDDEN FRAMING — `code@mode@regex@second`
