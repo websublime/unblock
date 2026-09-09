@@ -198,6 +198,110 @@
   `cargo test --workspace`, `cargo insta test --check`, `cargo xtask doc-lint`, `cargo xtask check-layering`
   and every `scripts/checks/*.sh`. Both gates >=3 agents; Claude opens the PR, a human merges.)*
 
+- **T3.12 — the `unblock mcp` startup-failure message renders a BOUNDED STRUCTURAL SUMMARY of the
+  rejected first frame, never the frame itself (v1.0.1, additive/non-semver). Implements D49.**
+  *(Next free top-level M3 id — a peer of T3.11, not a sub-task.)* The design is normative in the
+  **D49 PRD §4 row** + spine §2.4/§5b + `unblock-mcp.md` (the `src/error.rs` and
+  `src/tools/bulk_markdown.rs` rows) + `unblock-error.md` (the `src/sanitize.rs` row) — **read those
+  before implementing; this bullet is a checklist of touched sites, not the spec.** Depends on
+  **T3.11** (the D48 stderr channel this document travels on) and **T3.1** (the CLI exit boundary
+  that renders it). ONE PR; the spec cascade already landed in its own commit, so this PR carries the
+  CODE, the tests, the gate script and the prose edits that ADD that script to the ci-cd §2.1
+  named-sub-check paragraph, to `docs/PROCESS.md` section 3's knob enumeration and to the `doc-lint`
+  job in `.github/workflows/ci.yml` — plus the correction to that section's "always the NEWEST
+  script" sentence, which names `d48` and goes false the moment this script exists, and a refresh of
+  the `test-util` feature comment at `crates/unblock-mcp/Cargo.toml:14-19`, which lists the seam's
+  `McpServerError` constructors and gains the new one. Scope: **(1)**
+  ONE crate-private description function in `crates/unblock-mcp/src/error.rs` rendering every
+  `ServerInitializeError` variant, interpolated by the `Transport` variant's `#[snafu(display(…))]`;
+  **(2)** the summary grammar for the four `ClientJsonRpcMessage` shapes plus the `None` case, with
+  a Request's method from `ClientRequest::method()` and a Notification's from a HAND-WRITTEN
+  exhaustive five-arm match over `ClientNotification` (rmcp exposes no accessor there), and an id
+  through `NumberOrString`'s `Display` for numbers and `clip` for strings; **(3)** every
+  STRING-VALUED client member of that summary through `unblock_error::clip` BEFORE the quoting,
+  which is the INLINE `format!("{clipped:?}")` and never hand-written plain quotes — the
+  positional spelling fires `clippy::uninlined_format_args`, which criterion (12) denies — with
+  `params`/`result`/`error.message`/`error.data` never rendered; **(4)** a DEDICATED
+  `TransportError { error, context }` arm rendering `a transport error while <context>: <inner>` over
+  the clipped inner error and the clipped context, NEITHER `Debug`-quoted and the transport TYPE NAME
+  never rendered (rmcp fills it from `std::any::type_name`, and it alone exceeds the clip);
+  **(5)** the `#[non_exhaustive]` wildcard passing rmcp's own `Display` through the same `clip`
+  WITHOUT that quoting, with the deprecated `ExpectedInitializedNotification` NEVER named in an arm;
+  **(6)** a `#[cfg(feature = "test-util")] #[doc(hidden)]` **`pub`** constructor building
+  `ExpectedInitializeRequest(Some(_))` from raw JSON for all four shapes; **(7)** the hard-coded
+  `…[truncated]` literal at `crates/unblock-mcp/src/tools/bulk_markdown.rs:129` folded onto
+  `unblock_error::TRUNCATION_MARKER`, with `MAX_ECHOED_HEADER_CHARS = 80` at `:120` untouched.
+  *(AC: **(1)** the FOUR-SHAPE unit cell over the `test-util` constructor is THE pin, and its
+  oversized members are named PER SHAPE because rmcp forbids most members on most shapes — Request
+  (method, string id, `params`), Notification (method, `params`), Response (string id, `result`),
+  Error (string id, `error.message`, `error.data`, plus rmcp's REQUIRED `error.code`, without
+  which the frame does not deserialize) — each member opening with its own DISTINCT sentinel token;
+  each shape asserts `assert_eq!` against the FULLY CONSTRUCTED expected message, which opens with
+  the 32-byte snafu prefix, and asserts `params`, `result`, `error.message` and `error.data` each
+  absent BY ITS OWN SENTINEL, one assertion each so a failure says which member leaked, while a
+  separate ESCAPE-DENSE cell pins the D49 row's **BOUND TWO** to the byte — a Notification method of
+  129 or more ESC bytes leaves `clip` exactly 128 of them, `Debug` renders each as `\u{1b}`, and the
+  cell `assert_eq!`s both the rendered member's length (128 × 6 + 14 + 2 = 784 bytes) and the whole
+  888-byte message, so no cell asserts a length as an upper bound, which an equality already beats;
+  **(2)** `Cancelled` renders byte-identical to `failed to start the MCP server: Cancelled`, the
+  literal the D38 doc comment quotes at `crates/unblock-mcp/src/error.rs:62`; **(3)** the WILDCARD
+  is a SINGLE arm and ONE cell pins it — a constructed `ServerInitializeError::ConnectionClosed`
+  carrying a string longer than 128 bytes, wrapped through `TransportSnafu`, whose render ends in
+  `TRUNCATION_MARKER`; **(4)** the DEDICATED transport arm is pinned separately by
+  `__transport_error` with an I/O message longer than 128 bytes, asserting the rendered `<inner>`
+  ends in `TRUNCATION_MARKER`; a SECOND cell built through rmcp's public
+  `ServerInitializeError::transport::<T>(error, context)`
+  (`rmcp-1.7.0/src/service/server.rs:86-94`) with a context longer than 128 bytes asserts the
+  rendered `<context>` ends in the marker, which `__transport_error`'s hard-coded context at
+  `crates/unblock-mcp/src/error.rs:141` can never reach; and the shipped
+  `emit_diagnostic_writes_the_error_line` (`crates/unblock-cli/src/exit.rs:435-457`) stays GREEN,
+  which is what pins that the arm keeps the inner I/O reason readable; **(5)** further NAMED cells
+  drive every arm the four-shape cell cannot reach, each `assert_eq!`ing its FULL message — the
+  no-frame sentence for `ExpectedInitializeRequest(None)`; the Error arm with `id` absent, carrying
+  an oversized `error.message` and `error.data` and asserting both absent; a NUMERIC id, pinned
+  unquoted and unclipped; and a TYPED `notifications/initialized` frame, since an oversized method
+  deserializes only as `CustomNotification` and leaves the four const-keyed arms undriven;
+  **(6)** an ORDERING cell driving a Notification whose method has an ESC at BYTE OFFSET 127,
+  the last byte `clip` keeps, asserts a WHOLE `\u{1b}` escape and never a fragment — the offset is
+  normative, since `Debug`'s leading quote shifts the escape by one byte under the
+  escape-before-clip mutation; **(7)** non-vacuity — removing the `clip`, rendering `params`,
+  rendering `error.data`, the wildcard calling `to_string()` unclipped, the transport arm falling
+  back to rmcp's whole string, dropping the id, dropping the method, `Debug`-rendering a numeric id,
+  swapping the typed `InitializedNotification` arm's method const, or escaping before clipping EACH
+  turns a NAMED cell red, and no cell asserts only the negative; reverting the `bulk_markdown.rs`
+  fold is the ONE mutation no cell catches, and (11)'s gate row is what turns it red;
+  **(8)** `bulk_markdown.rs` uses `TRUNCATION_MARKER`, the shipped `echoed_unknown_header_is_truncated`
+  cell KEEPS its `…[truncated]` literal at `:841` (rewriting it to the constant would compare the
+  constant with itself), and a NEW cell in `unblock-error`'s `src/sanitize.rs` tests pins the
+  marker's VALUE — equal to `…[truncated]`, 14 bytes, 12 chars — with the 80-char header bound
+  unmoved; BOTH cells pin that VALUE and (11)'s row alone pins the FOLD, since the literal and the
+  constant are equal bytes; **(9)** an end-to-end cell is OPTIONAL and no criterion rests on it —
+  it goes vacuous the day `ub-kp7` lands, which is why (1) is the pin; **(10)** no golden and no
+  `insta` re-bless, no new `ErrorCode` (`ErrorCode::ALL` stays 36), the exit table unchanged, the
+  D48 channel unmoved, the `StructuredError` member set unmoved (so D48 clause (3) stays true) and
+  `CONTRACT_HASH`/`CONTRACT_VERSION` unmoved (`unblock.mcp.v1.9` stands); no layer edge moves —
+  `unblock-error` is already a dependency at `crates/unblock-mcp/Cargo.toml:28`;
+  **(11)** `scripts/checks/d49-startup-failure-render-claims.sh` lands, is wired as a required
+  `doc-lint` step, carries the LIVE D-range, pins the FIVE older siblings' knobs INCLUDING `d48`'s
+  two (which `d48` cannot pin itself) and carries NO row for its own, asserts `ub-b1a`, `ub-o8s` and
+  `ub-wx3` in `.unblock/issues.jsonl` one row EACH, pins `docs/roadmap.html` for the literal `D49`,
+  pins the contract knob as UNMOVED, carries the THREE self-wiring rows every sibling carries
+  (ci-cd §2.1 SPECIFYING the script, `.github/workflows/ci.yml` RUNNING it, `docs/PROCESS.md`
+  section 3 LISTING it), and pins the code landings — the description function, the four-shape cell
+  and the `Cancelled` byte-identity cell as presence rows over `crates/unblock-mcp/src/error.rs`,
+  the `unblock_error::clip` call in `error.rs` and the `TRUNCATION_MARKER` in
+  `bulk_markdown.rs` as ROW-ANCHORED rows over their production lines, because a doc comment naming
+  either token would satisfy a bare presence grep; every row ASSERTING A NEW LANDING is confirmed to
+  have ZERO matches on the PRE-FIX TREE, which is the tree BEFORE the D49 spec commit — `main` at
+  `4f0ab59` — while the
+  contract row (a pinned NON-move) and the `ub-b1a` row (already in the export) are named as
+  deliberate unchanged-state exceptions, and the `ub-o8s`/`ub-wx3` rows are green only once the
+  Track commit re-exports the tracker — the same PR, since the required job evaluates the PR head;
+  **(12)** full CI-equivalent probe green — `cargo fmt --check`, clippy pedantic,
+  `cargo test --workspace`, `cargo insta test --check`, `cargo xtask doc-lint`,
+  `cargo xtask check-layering`, `cargo xtask knowledge-lint` and every `scripts/checks/*.sh`. Both
+  gates >=3 agents; Claude opens the PR, a human merges.)*
+
 ## 6. MCP surface — concrete v1 taxonomy (closes PRD §12.2)
 
 Consolidated to keep the client tool list small (target **≤ 8 tools**); read-heavy state is exposed as resources.

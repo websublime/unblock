@@ -262,11 +262,13 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   non-JSON-RPC structured-error blob onto STDOUT on that death, embedding a `Debug` rendering of
   attacker-controlled bytes into the framing channel — TWO separate defects with their own issues: the CHANNEL half
   is `ub-og3`, CLOSED in this same cut by **D48** (the payload moves whole to stderr; exit codes unmoved), and the
-  `Debug`-rendering half is `ub-b1a`, which stays OPEN because moving a stream sanitises nothing; and the `-32600`
-  itself is LOST whenever rmcp cancels the `receive()` future, since the reply is written inside that future and
-  rmcp polls it as one arm of an unbiased `select!` — measured from one unreplicated harness at 0 of 40 with the
-  connection idle, 25 of 40 with four requests in flight and 39 of 40 with eight, a pre-existing property of the
-  seam that the shipped `-32700` arm shares (scoped out by Miguel; tracked as `ub-nbz`).
+  `Debug`-rendering half is `ub-b1a`, CLOSED one decision later by **D49** — moving a stream sanitised nothing, so
+  the repair had to land at the message's origin, where a bounded structural summary of the refused frame now
+  replaces the `Debug` blob; and the `-32600` itself is LOST whenever rmcp cancels the `receive()` future, since
+  the reply is written inside that future and rmcp polls it as one arm of an unbiased `select!` — measured from
+  one unreplicated harness at 0 of 40 with the connection idle, 25 of 40 with four requests in flight and 39 of
+  40 with eight, a pre-existing property of the seam that the shipped `-32700` arm shares (scoped out by Miguel;
+  tracked as `ub-nbz`).
 - **The mcp startup-failure report lands on the JSON-RPC FRAMING channel** (P1, tracker `ub-og3`, PRD §4
   **D48**) — the residual D47 clause 8(iii) named and did not design, now closed in the same cut and minting its
   own D-id because it REVERSES a shipped D38 clause (`docs/PROCESS.md` section 3). When `unblock mcp` fails, the
@@ -287,14 +289,53 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   live (guarded by `crates/unblock-cli/tests/help_snapshots.rs:26-28`; no byte count is quoted, because the
   sibling `insta` snapshot pins the TEXT and any future word would falsify a number). **`unblock-cli` (L7) is the only crate that gains code.** It mints no `ErrorCode`, moves no published
   byte, and carries **no `contract_version` bump and no `CONTRACT_HASH` re-pin** — `unblock.mcp.v1.9` stands.
-  **What it does NOT close, named rather than implied — four residuals, each with its own OPEN issue:** a first
-  frame that is neither `initialize` nor `ping` still kills the server (`ub-kp7`); the relocated message still
-  embeds an unbounded `Debug` rendering of attacker-controlled bytes, minted upstream in rmcp's
-  `ExpectedInitializeRequest` display and merely serialised by the CLI (`ub-b1a`); `output::emit_report` still
+  **What it does NOT close, named rather than implied — four residuals, each with its own tracked issue, three of
+  them still OPEN:** a first frame that is neither `initialize` nor `ping` still kills the server (`ub-kp7`); the
+  relocated message still embedded an unbounded `Debug` rendering of attacker-controlled bytes, minted upstream
+  in rmcp's `ExpectedInitializeRequest` display and merely serialised by the CLI — `ub-b1a`, left open by D48 and
+  CLOSED by **D49** below, which bounds the rendering at that origin; `output::emit_report` still
   writes to stdout unconditionally with no classification, a LATENT sibling hole that no protocol-channel command
   calls today (`ub-c5o`); and a response larger than the transport buffer can leave a TRUNCATED frame on the same
   channel — a different mechanism from the blob, reasoned from source and never reproduced, with no response-size
   cap (`ub-5v5`). Two shipped cells assert the defect as correct and INVERT with the fix.
+- **The mcp startup-failure message embeds an unbounded `Debug` rendering of attacker-controlled bytes** (P1,
+  tracker `ub-b1a`, PRD §4 **D49**) — the OTHER half of the defect D47 clause 8(iii) named in one sentence with
+  the channel half, closed one decision after it and under its own D-id because D48 clause 6(ii) ruled the repair
+  belongs at the message's ORIGIN, in another crate. When a client's first frame is neither `initialize` nor
+  `ping`, rmcp's error display embeds a Rust `Debug` of the WHOLE frame, and that text becomes the `message`
+  member of the structured document D48 relocated to stderr. It is one byte out per byte in with no cap — a
+  5,000,000-byte `method` produced 5,000,422 bytes on stderr, and all FOUR frame shapes leak, since a
+  100,000-byte string id, a 20,000-byte `params`, a 20,000-byte `result` and a 20,000-byte `error.message` were
+  each measured through. Terminal injection is NOT the open half — Rust's `Debug` escapes control characters
+  itself, so `sanitize_message` already finds nothing to do. **Length and structure are the whole defect.**
+  **D49 replaces the blob with a bounded STRUCTURAL SUMMARY:** the frame KIND, the METHOD name and the envelope
+  ID, each clipped through the shared D43 `clip` (`MAX_ECHOED_BYTES` = 128), with `params`, `result` and the
+  error body NEVER rendered — not the value, not a byte count of it. **A length cap alone would not have
+  worked**, which is why it is ruled out rather than merely not chosen — a 128-byte clip on the rendered string
+  cuts at `…notification: Custo`, inside rmcp's structural prefix and before the first client byte, so the
+  operator learns nothing while the multi-megabyte string is still built in memory before the cut. **One
+  description function renders every variant**, including the `#[non_exhaustive]` wildcard, which passes rmcp's
+  own text through the same clip so a future client-echoing variant is bounded on arrival — with `Cancelled`
+  byte-identical to what D38 measured, and the deprecated `ExpectedInitializedNotification` never named in an
+  arm. **`unblock-mcp` (L7) is the only crate that gains PRODUCTION code**; `unblock-error` gains one
+  TEST cell, the marker value cell in its `src/sanitize.rs` tests, and no production line.
+  **Nothing else moves:** the D48 stderr channel, the exit codes, the `StructuredError` member set (so
+  D48's byte-for-byte payload claim stays true — only the CONTENT of `message` is bounded), the
+  `ErrorCode` set, the exit table and `unblock.mcp.v1.9` all stand, and no layer edge is added because
+  `unblock-error` is already a dependency of `unblock-mcp`. The same change folds
+  `bulk_markdown.rs`'s hard-coded `…[truncated]` literal onto `unblock_error::TRUNCATION_MARKER` and writes the
+  marker's value down as a contract. **What it does NOT close, named rather than implied — three residuals, each
+  with its own OPEN issue:** a first frame that is neither `initialize` nor `ping` still kills the server
+  (`ub-kp7`); the stdio transport still accepts a line of any length, so a 5 MB frame is read and parsed twice
+  before a short message describes it — a cap changes what the server ACCEPTS and needs its own decision
+  (`ub-o8s`); and rmcp's own post-handshake tracing still `Debug`-dumps every frame, live at a single `-v`
+  because the CLI's default filter directive sets a GLOBAL level floor rather than a target-scoped one
+  (`ub-wx3`). Two further paths are stated as NON-routes rather than left to be re-derived — rmcp's
+  `UnsupportedProtocolVersion` arm cannot fire, because `ProtocolVersion` derives `PartialOrd` over one
+  `Cow<str>` so the comparison is total, and the CLI's own tracing `Debug` sink cannot fire for this variant,
+  because the demotion predicate matches only cancellation and pre-`initialize` disconnect. No shipped cell
+  inverts; the regression pin is a UNIT cell over a `test-util` constructor, written that way from the start
+  because an end-to-end cell goes vacuous the day `ub-kp7` lands.
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
   self-update promise is exercised, not just unit-asserted.
@@ -800,6 +841,15 @@ Notes:
   had to make to the earlier "tests only" framing of this very cell, for the same reason: the cell's glyph does not
   move, but the sentence explaining it goes false. D48 mints no `ErrorCode`, moves no published byte, and carries
   no `contract_version` bump and no `CONTRACT_HASH` re-pin — `unblock.mcp.v1.9` stands.
+  **D49 (`ub-b1a`) moves NO cell either, and its PRODUCTION code lands in `unblock-mcp` (L7) alone.**
+  That crate gains CODE — `src/error.rs` (the one description function over every
+  `ServerInitializeError` variant, the dedicated transport arm, the clipped structural summary and the
+  `test-util` frame constructor) and
+  `src/tools/bulk_markdown.rs` (the truncation-marker fold) — plus unit cells in both files and a value cell in
+  `unblock-error`'s `src/sanitize.rs` tests, the one landing outside `unblock-mcp` and a TEST-only one.
+  `unblock-cli` gains nothing, because its shipped `emit_diagnostic_writes_the_error_line` cell keeps reading
+  the transport message and stays green. D49 mints no `ErrorCode`, moves no published byte,
+  and carries no `contract_version` bump and no `CONTRACT_HASH` re-pin — `unblock.mcp.v1.9` stands.
 - **100% Rust, no Node:** the TUI adds **no npm/Node build stage** to `dist` and **no `ui` Cargo feature** —
   `cargo-deny` covers the whole tree and the binary gains no npm supply-chain surface. (The web dashboard's
   npm/Node ecosystem lives in the separate v2+ commercial PRO product — roadmap §7 — not the OSS tree.)
