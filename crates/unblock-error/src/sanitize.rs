@@ -7,9 +7,11 @@
 //! display fields — see the render crate plan. The split is intentional: do not collapse them.
 //!
 //! [`clip`] is the SECOND boundary helper: it bounds how much attacker-controlled text an error
-//! payload may echo. It lives here (D43) rather than in one consumer crate because BOTH untrusted-
-//! JSON boundaries now echo attacker text — `unblock-mcp`'s argument seam and `unblock-sync`'s `bd`
+//! payload may echo. It lives here (D43) rather than in one consumer crate because both untrusted-
+//! JSON boundaries echo attacker text — `unblock-mcp`'s argument seam and `unblock-sync`'s `bd`
 //! line parser — and two copies of a security helper is exactly the drift this repo's rules forbid.
+//! D49 added a THIRD production consumer, `unblock-mcp`'s startup-failure render, which bounds each
+//! member of the rejected first frame through the same call.
 
 use std::borrow::Cow;
 
@@ -17,8 +19,12 @@ use std::borrow::Cow;
 ///
 /// **This is a SOFT bound.** [`sanitize_message`] runs *after* the clip and escapes control
 /// characters at up to ~6 bytes each (`\x1b` → `\u{1b}`), so a final `message` is bounded at
-/// roughly `6 * MAX_ECHOED_BYTES` ≈ 768 B, not 128 B. Clipping BEFORE sanitizing is deliberate:
-/// clipping after could cut inside an escape sequence and yield a misleading fragment.
+/// roughly `6 * MAX_ECHOED_BYTES` ≈ 768 B, not 128 B. Clipping BEFORE sanitizing is deliberate,
+/// because clipping after could cut inside an escape sequence and yield a misleading fragment.
+///
+/// D49's refused-first-frame arms expand at Rust's string `Debug` instead, which escapes the
+/// clipped member and leaves the sanitizer nothing to do. Its transport and wildcard arms carry
+/// unescaped text and still expand here. The ~6x is the same either way.
 pub const MAX_ECHOED_BYTES: usize = 128;
 
 /// The marker appended to clipped text.
@@ -117,6 +123,19 @@ pub fn sanitize_message(text: &str) -> Cow<'_, str> {
 mod tests {
     use super::{MAX_ECHOED_BYTES, TRUNCATION_MARKER, clip, sanitize_message};
     use std::borrow::Cow;
+
+    /// D49 makes the marker's VALUE a stated contract. `unblock-mcp`'s startup-failure arithmetic
+    /// rests on the 14, and its `bulk_markdown` header cell pins the same value from the other end.
+    #[test]
+    fn truncation_marker_value_is_the_stated_contract() {
+        assert_eq!(TRUNCATION_MARKER, "…[truncated]");
+        assert_eq!(
+            TRUNCATION_MARKER.len(),
+            14,
+            "U+2026 takes 3 bytes and eleven ASCII bytes follow it"
+        );
+        assert_eq!(TRUNCATION_MARKER.chars().count(), 12);
+    }
 
     #[test]
     fn clip_leaves_short_text_untouched() {

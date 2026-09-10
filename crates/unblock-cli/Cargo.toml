@@ -68,9 +68,11 @@ unblock-engine = { workspace = true }
 unblock-config = { workspace = true }
 unblock-model = { workspace = true }
 serde_json = { workspace = true }
-# Enable the `test-util` seam of unblock-mcp for the exit-code boundary unit test ONLY (the standard
-# cargo idiom): it exposes `McpServerError::__transport_error`/`__run_loop_error` so `exit.rs` can
-# construct BOTH `CliError::Mcp` arms and prove the D27/AF-4 mapping (→ InternalError, exit 1). The
+# Enable the `test-util` seam of unblock-mcp for this crate's error-boundary cells ONLY (the standard
+# cargo idiom). It exposes the four `McpServerError` constructors this crate calls —
+# `__transport_error` and `__run_loop_error`, which let `exit.rs` build BOTH `CliError::Mcp` arms and
+# prove the D27/AF-4 mapping (→ InternalError, exit 1), plus `__cancelled_error` and
+# `__connection_closed_error`, which drive the D38/D40 routing predicates in `commands/mcp.rs`. The
 # shipped `unblock` binary depends on unblock-mcp WITHOUT `test-util`, so its public surface is
 # unaffected. `test-util` is additive, so both the runtime dep + this dev entry unify cleanly.
 unblock-mcp = { workspace = true, features = ["test-util"] }
