@@ -54,7 +54,7 @@
 //! adapter owns the pre-mutation all-or-nothing parse + the `ParsedIssue → NewIssue` mapping, then
 //! hands the `Vec<NewIssue>` (carrying the symbolic refs verbatim) to the ATOMIC `Session::create_bulk`.
 
-use unblock_error::{ErrorCode, StructuredError};
+use unblock_error::{ErrorCode, StructuredError, TRUNCATION_MARKER};
 
 /// A parsed issue from the markdown document (mcp-owned; the `issue.rs` adapter maps it to a
 /// `NewIssue`). Mirrors the original `markdown_import.rs::ParsedIssue` field set.
@@ -121,12 +121,16 @@ const MAX_ECHOED_HEADER_CHARS: usize = 80;
 
 /// Truncate an echoed header on a char boundary. Sanitization happens downstream, in
 /// `StructuredError`'s constructors — truncate FIRST, so a cut can never land inside an escape.
+///
+/// The marker is `unblock_error::TRUNCATION_MARKER`, the one spelling of that string in PRODUCTION
+/// code (D49); the assertion literals that pin its value stay literal on purpose. The 80-CHAR bound
+/// beside it stays this file's own — it bounds a different surface.
 fn clip_header(header: &str) -> String {
     if header.chars().count() <= MAX_ECHOED_HEADER_CHARS {
         return header.to_string();
     }
     let kept: String = header.chars().take(MAX_ECHOED_HEADER_CHARS).collect();
-    format!("{kept}…[truncated]")
+    format!("{kept}{TRUNCATION_MARKER}")
 }
 
 impl Section {
@@ -828,6 +832,10 @@ mod tests {
 
     /// An over-long header is TRUNCATED before it enters `message`/`context.section`. The whole
     /// markdown document is ONE string, so a header is otherwise bounded only by `max_string_len`.
+    ///
+    /// The marker below stays a LITERAL (D49). `clip_header` takes its marker from the shared
+    /// constant, so this assertion proves that constant's VALUE reached the header end to end —
+    /// rewriting it to the constant would compare the constant with itself and pass for any value.
     #[test]
     fn echoed_unknown_header_is_truncated() {
         let header = "Z".repeat(4000);

@@ -436,7 +436,11 @@ async fn echoed_unknown_field_is_truncated() {
     );
     assert!(message.contains("…[truncated]"), "{message}");
     let field = payload["context"]["field"].as_str().expect("field");
-    assert!(field.len() <= 128 + "…[truncated]".len(), "{}", field.len());
+    assert!(
+        field.len() <= 128 + unblock_error::TRUNCATION_MARKER.len(),
+        "{}",
+        field.len()
+    );
 
     let _ = client.cancel().await;
     let _ = server.cancel().await;

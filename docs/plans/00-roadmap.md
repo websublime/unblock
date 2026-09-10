@@ -844,9 +844,9 @@ Notes:
   **D49 (`ub-b1a`) moves NO cell either, and its PRODUCTION code lands in `unblock-mcp` (L7) alone.**
   That crate gains CODE — `src/error.rs` (the one description function over every
   `ServerInitializeError` variant, the dedicated transport arm, the clipped structural summary and the
-  `test-util` frame constructor) and
-  `src/tools/bulk_markdown.rs` (the truncation-marker fold) — plus unit cells in both files and a value cell in
-  `unblock-error`'s `src/sanitize.rs` tests, the one landing outside `unblock-mcp` and a TEST-only one.
+  `test-util` frame constructor) and `src/tools/bulk_markdown.rs` (the truncation-marker fold) — plus
+  unit cells in `src/error.rs` and a value cell in `unblock-error`'s `src/sanitize.rs` tests, the one
+  landing outside `unblock-mcp` and a TEST-only one.
   `unblock-cli` gains nothing, because its shipped `emit_diagnostic_writes_the_error_line` cell keeps reading
   the transport message and stays green. D49 mints no `ErrorCode`, moves no published byte,
   and carries no `contract_version` bump and no `CONTRACT_HASH` re-pin — `unblock.mcp.v1.9` stands.

@@ -210,7 +210,7 @@
   named-sub-check paragraph, to `docs/PROCESS.md` section 3's knob enumeration and to the `doc-lint`
   job in `.github/workflows/ci.yml` — plus the correction to that section's "always the NEWEST
   script" sentence, which names `d48` and goes false the moment this script exists, and a refresh of
-  the `test-util` feature comment at `crates/unblock-mcp/Cargo.toml:14-19`, which lists the seam's
+  the `test-util` feature comment at `crates/unblock-mcp/Cargo.toml:14-22`, which lists the seam's
   `McpServerError` constructors and gains the new one. Scope: **(1)**
   ONE crate-private description function in `crates/unblock-mcp/src/error.rs` rendering every
   `ServerInitializeError` variant, interpolated by the `Transport` variant's `#[snafu(display(…))]`;
@@ -229,7 +229,8 @@
   WITHOUT that quoting, with the deprecated `ExpectedInitializedNotification` NEVER named in an arm;
   **(6)** a `#[cfg(feature = "test-util")] #[doc(hidden)]` **`pub`** constructor building
   `ExpectedInitializeRequest(Some(_))` from raw JSON for all four shapes; **(7)** the hard-coded
-  `…[truncated]` literal at `crates/unblock-mcp/src/tools/bulk_markdown.rs:129` folded onto
+  `…[truncated]` literal at `crates/unblock-mcp/src/tools/bulk_markdown.rs:129` (`:133` after the
+  fold) folded onto
   `unblock_error::TRUNCATION_MARKER`, with `MAX_ECHOED_HEADER_CHARS = 80` at `:120` untouched.
   *(AC: **(1)** the FOUR-SHAPE unit cell over the `test-util` constructor is THE pin, and its
   oversized members are named PER SHAPE because rmcp forbids most members on most shapes — Request
@@ -244,7 +245,7 @@
   cell `assert_eq!`s both the rendered member's length (128 × 6 + 14 + 2 = 784 bytes) and the whole
   888-byte message, so no cell asserts a length as an upper bound, which an equality already beats;
   **(2)** `Cancelled` renders byte-identical to `failed to start the MCP server: Cancelled`, the
-  literal the D38 doc comment quotes at `crates/unblock-mcp/src/error.rs:62`; **(3)** the WILDCARD
+  literal the D38 doc comment quotes at `crates/unblock-mcp/src/error.rs:193`; **(3)** the WILDCARD
   is a SINGLE arm and ONE cell pins it — a constructed `ServerInitializeError::ConnectionClosed`
   carrying a string longer than 128 bytes, wrapped through `TransportSnafu`, whose render ends in
   `TRUNCATION_MARKER`; **(4)** the DEDICATED transport arm is pinned separately by
@@ -253,7 +254,7 @@
   `ServerInitializeError::transport::<T>(error, context)`
   (`rmcp-1.7.0/src/service/server.rs:86-94`) with a context longer than 128 bytes asserts the
   rendered `<context>` ends in the marker, which `__transport_error`'s hard-coded context at
-  `crates/unblock-mcp/src/error.rs:141` can never reach; and the shipped
+  `crates/unblock-mcp/src/error.rs:272` can never reach; and the shipped
   `emit_diagnostic_writes_the_error_line` (`crates/unblock-cli/src/exit.rs:435-457`) stays GREEN,
   which is what pins that the arm keeps the inner I/O reason readable; **(5)** further NAMED cells
   drive every arm the four-shape cell cannot reach, each `assert_eq!`ing its FULL message — the
@@ -263,15 +264,22 @@
   deserializes only as `CustomNotification` and leaves the four const-keyed arms undriven;
   **(6)** an ORDERING cell driving a Notification whose method has an ESC at BYTE OFFSET 127,
   the last byte `clip` keeps, asserts a WHOLE `\u{1b}` escape and never a fragment — the offset is
-  normative, since `Debug`'s leading quote shifts the escape by one byte under the
-  escape-before-clip mutation; **(7)** non-vacuity — removing the `clip`, rendering `params`,
+  normative because it is the last byte kept and the only one at which the marker lands
+  immediately after the kept escape, while the escape-before-clip mutation spends a byte of the
+  budget on `Debug`'s opening quote and loses the closing quote with six trailing bytes, so the
+  full-message equality kills it at every offset that clips;
+  **(7)** non-vacuity — removing the `clip`, rendering `params`,
   rendering `error.data`, the wildcard calling `to_string()` unclipped, the transport arm falling
   back to rmcp's whole string, dropping the id, dropping the method, `Debug`-rendering a numeric id,
-  swapping the typed `InitializedNotification` arm's method const, or escaping before clipping EACH
+  swapping the typed `InitializedNotification` arm's method const, swapping the
+  `CancelledNotification`, `ProgressNotification` or `RootsListChangedNotification` arm's const
+  (which the typed-notification cell does not drive),
+  rendering a NUMBER id arm-locally on the Response or the Error arm instead of through the shared
+  `render_id`, or escaping before clipping EACH
   turns a NAMED cell red, and no cell asserts only the negative; reverting the `bulk_markdown.rs`
   fold is the ONE mutation no cell catches, and (11)'s gate row is what turns it red;
   **(8)** `bulk_markdown.rs` uses `TRUNCATION_MARKER`, the shipped `echoed_unknown_header_is_truncated`
-  cell KEEPS its `…[truncated]` literal at `:841` (rewriting it to the constant would compare the
+  cell KEEPS its `…[truncated]` literal at `:849` (rewriting it to the constant would compare the
   constant with itself), and a NEW cell in `unblock-error`'s `src/sanitize.rs` tests pins the
   marker's VALUE — equal to `…[truncated]`, 14 bytes, 12 chars — with the 80-char header bound
   unmoved; BOTH cells pin that VALUE and (11)'s row alone pins the FOLD, since the literal and the
@@ -280,7 +288,7 @@
   `insta` re-bless, no new `ErrorCode` (`ErrorCode::ALL` stays 36), the exit table unchanged, the
   D48 channel unmoved, the `StructuredError` member set unmoved (so D48 clause (3) stays true) and
   `CONTRACT_HASH`/`CONTRACT_VERSION` unmoved (`unblock.mcp.v1.9` stands); no layer edge moves —
-  `unblock-error` is already a dependency at `crates/unblock-mcp/Cargo.toml:28`;
+  `unblock-error` is already a dependency at `crates/unblock-mcp/Cargo.toml:31`;
   **(11)** `scripts/checks/d49-startup-failure-render-claims.sh` lands, is wired as a required
   `doc-lint` step, carries the LIVE D-range, pins the FIVE older siblings' knobs INCLUDING `d48`'s
   two (which `d48` cannot pin itself) and carries NO row for its own, asserts `ub-b1a`, `ub-o8s` and
