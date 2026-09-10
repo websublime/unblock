@@ -336,6 +336,27 @@ jobs:
       # and every `Command` variant classified (a `_` arm would stop the compiler asking). Positive-only
       # by design. Specified in ci-cd-and-distribution.md §2.1 (the D48 sub-check).
       - run: scripts/checks/d48-stdout-channel-claims.sh
+      # D49 (`ub-b1a`) required landings: the `unblock mcp` startup-failure message DESCRIBES the
+      # refused first frame — its kind, its method, its envelope id, each clipped — instead of echoing
+      # rmcp's `Debug` blob. Its teeth are executable (the cells behind the `test-util` seam render
+      # every arm the decision makes normative), but three of its obligations are unreachable
+      # from any test: the MARKER FOLD in `bulk_markdown.rs`, where the constant and the hard-coded
+      # literal are equal bytes, so reverting it leaves every cell green; the residual ids the PRD row
+      # names, three of them, of which this step rows two while `ub-kp7` rides the `d48` step's `P9` row;
+      # and `docs/roadmap.html`, which sits outside every lint corpus here. This step asserts
+      # the positive: the ONE description function, the four-shape regression pin and the `Cancelled`
+      # byte-identity cell, all three anchored on their own `fn` declarations so a comment left behind
+      # by a deletion fails the row instead of satisfying it; the clip on its own production lines and
+      # the folded marker on its own; `ub-b1a` plus the two residual ids it rows in the tracker export;
+      # rendered roadmap's v1.0.1 card, anchored on the card's own D49 bullet; this gate's own wiring;
+      # and the live D-range at the prose statements and every SIBLING script's knob that the count-free
+      # `docs/PROCESS.md` §3 enumeration names — three prose statements over four rows, and every sibling
+      # knob including `d48`'s two, which nothing pinned until this script landed, while this script's own
+      # knob stays deliberately un-rowed because a self-row cannot fail — plus the contract
+      # version standing UNMOVED, since D49 bounds the CONTENT of a message that appears in neither
+      # `capabilities()` nor `schema_bundle()`. Positive-only by design. Specified in
+      # ci-cd-and-distribution.md §2.1 (the D49 sub-check).
+      - run: scripts/checks/d49-startup-failure-render-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.

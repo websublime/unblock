@@ -291,15 +291,23 @@
   `unblock-error` is already a dependency at `crates/unblock-mcp/Cargo.toml:31`;
   **(11)** `scripts/checks/d49-startup-failure-render-claims.sh` lands, is wired as a required
   `doc-lint` step, carries the LIVE D-range, pins the FIVE older siblings' knobs INCLUDING `d48`'s
-  two (which `d48` cannot pin itself) and carries NO row for its own, asserts `ub-b1a`, `ub-o8s` and
-  `ub-wx3` in `.unblock/issues.jsonl` one row EACH, pins `docs/roadmap.html` for the literal `D49`,
+  two (which `d48` cannot pin itself) and carries NO row for its own, pins the THREE PROSE
+  bump sites that same section-3 list names as FOUR ROW-ANCHORED rows in the shape its D48
+  sibling ships at `scripts/checks/d48-stdout-channel-claims.sh:171-174` (`CLAUDE.md`'s
+  document-map row, ci-cd §2.1's class-(a) statement, and BOTH halves of the
+  `xtask/src/doc_lint.rs` tokenizer line, which carries the prose range and the tokenizer
+  alternation together), asserts `ub-b1a`, `ub-o8s` and
+  `ub-wx3` in `.unblock/issues.jsonl` one row EACH, pins `docs/roadmap.html` for the literal `D49`
+  ON the v1.0.1 card's own bullet,
   pins the contract knob as UNMOVED, carries the THREE self-wiring rows every sibling carries
   (ci-cd §2.1 SPECIFYING the script, `.github/workflows/ci.yml` RUNNING it, `docs/PROCESS.md`
-  section 3 LISTING it), and pins the code landings — the description function, the four-shape cell
-  and the `Cancelled` byte-identity cell as presence rows over `crates/unblock-mcp/src/error.rs`,
-  the `unblock_error::clip` call in `error.rs` and the `TRUNCATION_MARKER` in
-  `bulk_markdown.rs` as ROW-ANCHORED rows over their production lines, because a doc comment naming
-  either token would satisfy a bare presence grep; every row ASSERTING A NEW LANDING is confirmed to
+  section 3 LISTING it), and pins the code landings as ROW-ANCHORED rows — the description
+  function, the four-shape cell and the `Cancelled` byte-identity cell each on its own `fn`
+  declaration in `crates/unblock-mcp/src/error.rs`, the `unblock_error::clip` call in `error.rs`
+  and the `TRUNCATION_MARKER` in `bulk_markdown.rs` each on its production line, because a doc
+  comment naming any of them satisfies a bare presence grep while the item is gone, and because no
+  grep of either shape tells a RUNNING cell from an `#[ignore]`d one, which is the `test` job's
+  business; every row ASSERTING A NEW LANDING is confirmed to
   have ZERO matches on the PRE-FIX TREE, which is the tree BEFORE the D49 spec commit — `main` at
   `4f0ab59` — while the
   contract row (a pinned NON-move) and the `ub-b1a` row (already in the export) are named as
