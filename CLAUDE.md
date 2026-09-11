@@ -87,6 +87,7 @@ How we work — lifecycle, decisions, multi-agent orchestration, review & tracki
 process guide, imported so every session loads it:
 
 @docs/PROCESS.md
+@docs/STYLE.md
 
 Essentials: every lifecycle phase runs as a **hand-picked team** (PROCESS.md §4 — specialist mates +
 `multi-agent-coordinator`, spawned as a Workflow). **The main session is the *orchestrator*, not an implementer**:
