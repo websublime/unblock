@@ -249,16 +249,17 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   EFFECT, deliberately and with the reason recorded:** a `notifications/cancelled` frame carrying an un-decodable
   `id` is delivered today, and rmcp's serve loop cancels the matching in-flight request through it before any
   handler runs (`src/service.rs:981-996`); answered-and-dropped, that cancellation no longer happens. Preserving
-  it would mean delivering the frame after answering it — the one shape measured to kill the server when it lands
-  in the `initialize` slot — so the effect is traded for removing that fatality. A conforming cancellation, which
-  carries no `id` member at all, is outside this class and is unaffected. **Residuals stay OPEN and
-  are disclosed rather than claimed shut:** a duplicated `jsonrpc`/`method` still answers `-32700` with the id
+  it would mean delivering the frame after answering it — the one shape measured, before D50's gate, to kill the
+  server when it lands in the `initialize` slot — so the effect is traded for removing that fatality. A conforming cancellation, which
+  carries no `id` member at all, is outside this class and is unaffected. **What it does NOT close, named rather than
+  implied, each with its own tracked issue:** a duplicated `jsonrpc`/`method` still answers `-32700` with the id
   OMITTED, so an rmcp client stays pending (scoped out by Miguel; tracked as `ub-788`); an **id-less** notification
-  before `initialize` still kills the server, which D47's class excludes by decision — and `ub-kp7`, which tracks it, is
-  scoped to the WHOLE class rather than to that one spelling: **any first frame that is neither `initialize` NOR `ping`
-  kills the server, Request or Notification alike.** `ping` is the single pre-handshake exception (rmcp answers it with an
+  before `initialize` killed the server, which D47's class excludes by decision — and `ub-kp7`, which tracks it, was
+  scoped to the WHOLE class rather than to that one spelling, because **any first frame that is neither `initialize`
+  NOR `ping` killed the server, Request or Notification alike**, and **D50 below CLOSES that class** by gating all
+  four frame shapes. `ping` is the single pre-handshake exception (rmcp answers it with an
   empty result at `rmcp-1.7.0/src/service/server.rs:175-189` and the server lives on to a normal handshake); a non-Request
-  first frame dies at `:193` and a non-`initialize` Request dies at `:201`, on the same `ExpectedInitializeRequest`. The CLI writes a
+  first frame died at `:193` and a non-`initialize` Request died at `:201`, on the same `ExpectedInitializeRequest`. The CLI writes a
   non-JSON-RPC structured-error blob onto STDOUT on that death, embedding a `Debug` rendering of
   attacker-controlled bytes into the framing channel — TWO separate defects with their own issues: the CHANNEL half
   is `ub-og3`, CLOSED in this same cut by **D48** (the payload moves whole to stderr; exit codes unmoved), and the
@@ -289,8 +290,8 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   live (guarded by `crates/unblock-cli/tests/help_snapshots.rs:26-28`; no byte count is quoted, because the
   sibling `insta` snapshot pins the TEXT and any future word would falsify a number). **`unblock-cli` (L7) is the only crate that gains code.** It mints no `ErrorCode`, moves no published
   byte, and carries **no `contract_version` bump and no `CONTRACT_HASH` re-pin** — `unblock.mcp.v1.9` stands.
-  **What it does NOT close, named rather than implied — four residuals, each with its own tracked issue, three of
-  them still OPEN:** a first frame that is neither `initialize` nor `ping` still kills the server (`ub-kp7`); the
+  **What it does NOT close, named rather than implied, each with its own tracked issue:** a first frame that is
+  neither `initialize` nor `ping` killed the server — `ub-kp7`, left open by D48 and CLOSED by **D50** below; the
   relocated message still embedded an unbounded `Debug` rendering of attacker-controlled bytes, minted upstream
   in rmcp's `ExpectedInitializeRequest` display and merely serialised by the CLI — `ub-b1a`, left open by D48 and
   CLOSED by **D49** below, which bounds the rendering at that origin; `output::emit_report` still
@@ -324,9 +325,9 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   `ErrorCode` set, the exit table and `unblock.mcp.v1.9` all stand, and no layer edge is added because
   `unblock-error` is already a dependency of `unblock-mcp`. The same change folds
   `bulk_markdown.rs`'s hard-coded `…[truncated]` literal onto `unblock_error::TRUNCATION_MARKER` and writes the
-  marker's value down as a contract. **What it does NOT close, named rather than implied — three residuals, each
-  with its own OPEN issue:** a first frame that is neither `initialize` nor `ping` still kills the server
-  (`ub-kp7`); the stdio transport still accepts a line of any length, so a 5 MB frame is read and parsed twice
+  marker's value down as a contract. **What it does NOT close, named rather than implied, each with its own
+  tracked issue:** a first frame that is neither `initialize` nor `ping` killed the server — `ub-kp7`, CLOSED by
+  **D50** below; the stdio transport still accepts a line of any length, so a 5 MB frame is read and parsed twice
   before a short message describes it — a cap changes what the server ACCEPTS and needs its own decision
   (`ub-o8s`); and rmcp's own post-handshake tracing still `Debug`-dumps every frame, live at a single `-v`
   because the CLI's default filter directive sets a GLOBAL level floor rather than a target-scoped one
@@ -335,7 +336,47 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   `Cow<str>` so the comparison is total, and the CLI's own tracing `Debug` sink cannot fire for this variant,
   because the demotion predicate matches only cancellation and pre-`initialize` disconnect. No shipped cell
   inverts; the regression pin is a UNIT cell over a `test-util` constructor, written that way from the start
-  because an end-to-end cell goes vacuous the day `ub-kp7` lands.
+  because an end-to-end cell over those arms goes vacuous once the gate lands, which **D50** below does.
+- **A first frame that is neither `initialize` nor `ping` killed the MCP server** (P1, tracker `ub-kp7`, PRD §4
+  **D50**) — the residual D47 clause 8(ii), D48 clause 6(i) and D49 clause 6(i) each named and left open, now closed
+  in the same cut and minting its own D-id because it is a NEW decision about what the transport ACCEPTS rather than
+  a refinement of any of the three. rmcp's pre-handshake loop refuses everything but `initialize` and `ping` and
+  returns the same `ExpectedInitializeRequest` on both routes — a non-Request frame at
+  `rmcp-1.7.0/src/service/server.rs:192-196`, a Request that is not `initialize` at `:200-204` — so one
+  unauthenticated line killed the process, and the id-less notification is the cheapest spelling of it. `ping` is
+  the single exception, answered with an empty result after which the server lives on to a normal handshake.
+  **D50 adds a NEW transport decorator** between the CD-4 version clamp and the D43 duplicate-key scan, so the
+  receive order is scan, gate, clamp and the gate sees a frame AFTER D47's answer-and-drop arm, which is required
+  because a D47 frame's id lives only in the raw bytes. A premature Request is answered OUT-OF-BAND
+  `-32600 Invalid Request` on its own id and DROPPED; a premature Notification, Response or Error frame is DROPPED
+  with no reply, because JSON-RPC forbids replying to a notification and a reply to a reply is meaningless.
+  **The gate OPENS on the server's own `InitializeResult` as it passes through the decorator's
+  `send()`** — never on the pre-handshake `ping` reply, which carries an empty result, and never on
+  `notifications/initialized`, because rmcp serves a request arriving before that notification normally
+  and this transport must not be stricter. **`unblock-mcp` (L7) is the only crate that gains PRODUCTION
+  code** — one module and its `lib.rs` declaration, one type and one word at the composition line;
+  `unblock-cli` gains tests and one harness method only. It mints no `ErrorCode`, moves no published byte, and carries **no
+  `contract_version` bump and no `CONTRACT_HASH` re-pin** — `unblock.mcp.v1.9` stands. **The exit codes do not move
+  and one observable outcome does.** A premature frame followed by EOF used to raise `ExpectedInitializeRequest` and
+  exit 1, and it now reaches EOF alone and takes D40's delegation to the teardown, exit 0 on a clean shutdown.
+  D40's own caution — that after the GA tag a `1→0` flip is a D35-semver-relevant CLI-surface change — was about
+  reclassifying an unchanged event, while D50 removes the failure and lets an already-shipped rule decide what is
+  left, the additive bug-fix reading D47 clause (4) already shipped under post-GA. **Two shipped cells move, and
+  that is an INVERSION rather than an addition.** `an_id_less_notification_before_initialize_still_exits_1` inverts
+  to exit 0 and is RENAMED, and the D38 witness `a_no_signal_run_loop_error_exits_1_and_never_hangs` is REPOINTED at
+  a broken pipe on the pre-handshake `ping` reply, keeping its exit-1 and stderr-payload halves and losing its
+  frame-free-stdout half by construction. **What it does NOT close is named here rather than implied.** The gate's own
+  reply and read path inherit open residuals of their own — the `-32600` is lost whenever rmcp cancels the `receive()`
+  future (`ub-nbz`), the `-32700` arm still omits a readable id so a duplicated `method` or `jsonrpc` still leaves a
+  client pending (`ub-788`), and the stdio read still carries no maximum accepted line length, so an oversized
+  premature frame is read and scanned before the gate drops it (`ub-o8s`). The sibling rows' residuals are UNMOVED
+  by this decision and are named so none reads as closed by omission — `output::emit_report` still writes to stdout
+  unconditionally with no classification (`ub-c5o`), an oversized response can still leave a TRUNCATED frame on the
+  framing channel (`ub-5v5`), and rmcp's post-handshake tracing still `Debug`-dumps frames at a single `-v`
+  (`ub-wx3`). **One correction rides with it.** A server parked before `initialize` holds an open libsql connection
+  and its own pipes and blocks no other writer, because the D31 cross-process lock is taken per mutation and
+  released with that mutation's guard — so the gate is argued from availability and from what the client can
+  observe, never from lock pressure.
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
   self-update promise is exercised, not just unit-asserted.

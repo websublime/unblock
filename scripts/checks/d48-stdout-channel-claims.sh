@@ -59,16 +59,16 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; e
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
 # The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
-# the day a D49 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# the day a D51 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
 # goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves: the
-# prose range `(D1..D49)` and the tokenizer's regex ALTERNATION `\bD(49|48|47|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D49 finding — the lint would stop tokenizing
+# prose range `(D1..D50)` and the tokenizer's regex ALTERNATION `\bD(50|49|48|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D51 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D49'
-RANGE_ALT_RE='D\(49\|48\|'
+RANGE_RE='D1\.\.D50'
+RANGE_ALT_RE='D\(50\|49\|'
 
 # The LIVE published contract version. D48 does NOT move it (see the header): this row is the
 # affirmative record of that, so a silent bump riding this decision goes red.
@@ -128,7 +128,7 @@ P5@crates/unblock-cli/tests/mcp_stdout_channel.rs@assert_diagnostic_on_stderr@th
 P6@crates/unblock-cli/tests/common/mod.rs@fn is_jsonrpc_framing@the hardened stdout guard still requires FRAMING, not merely valid JSON — the blob IS valid JSON, which is how it passed for the life of the suite
 P7@crates/unblock-cli/tests/common/mod.rs@env_remove\(\"UNBLOCK_OUTPUT_FORMAT\"\)@the format env is still scrubbed at the ONE spawn root: inherited, it makes every frame-only assertion vacuous
 P8@.unblock/issues.jsonl@ub-og3@the tracker record names the work this implements (PROCESS.md §6: re-export in the SAME commit as the work)
-P9@.unblock/issues.jsonl@ub-kp7@residual 1 of 4: a first frame that is neither initialize NOR ping still kills the server — OPEN, and the PRD row names it
+P9@.unblock/issues.jsonl@ub-kp7@residual 1 of 4: a first frame that is neither initialize NOR ping killed the server — CLOSED by D50, and the export keeps closed rows, so this row still pins that the id the PRD row cites exists
 P10@.unblock/issues.jsonl@ub-b1a@residual 2 of 4: the relocated message still embeds an unbounded Debug rendering of attacker-controlled bytes — OPEN
 P11@.unblock/issues.jsonl@ub-c5o@residual 3 of 4: output::emit_report still writes to stdout unconditionally with no classification — OPEN
 P12@.unblock/issues.jsonl@ub-5v5@residual 4 of 4: an oversized response could leave a TRUNCATED frame on the same channel — reasoned from source, never reproduced, OPEN
