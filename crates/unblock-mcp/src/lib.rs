@@ -28,6 +28,7 @@
 mod envelope_id;
 mod error;
 mod options;
+mod pre_handshake;
 mod prompts;
 mod resources;
 mod server;
