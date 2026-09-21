@@ -468,12 +468,13 @@ impl McpClient {
     /// peer that, on a TIMEOUT (i.e. the D38 hang), reports the child's captured STDERR instead of a
     /// bare "did not exit". Prefer this over [`wait_for`] whenever an `McpClient` owns the child.
     ///
-    /// Once the child is gone — on ANY exit status, which is deliberate and not an oversight: the
-    /// two D48 cells whose buffers this protects both drive a child that exits 1 — it JOINS the
-    /// retained drains (D48) before returning, so a `stdout_snapshot()` read as a NEGATIVE, or a
-    /// `stderr_snapshot()` read as a POSITIVE, sees the complete buffer rather than whatever the
-    /// race left in it. The deadline panic below deliberately precedes any join: a HUNG child never
-    /// reaches EOF, so joining first would replace a diagnosable timeout with a silent block.
+    /// Once the child is gone it JOINS the retained drains (D48) before returning, so a
+    /// `stdout_snapshot()` read as a NEGATIVE, or a `stderr_snapshot()` read as a POSITIVE, sees the
+    /// complete buffer rather than whatever the race left in it. The join runs on ANY exit status,
+    /// which is deliberate — the cells whose buffers it protects exit 1 and 0 alike, so gating it on
+    /// `status.success()` would skip the failing paths that need it most. The deadline panic below
+    /// deliberately precedes any join, because a HUNG child never reaches EOF and joining first
+    /// would replace a diagnosable timeout with a silent block.
     ///
     /// # Panics
     /// If the child does not exit within `timeout` (the no-hang invariant, spine §5b).
@@ -540,6 +541,28 @@ impl McpClient {
         drop(self.stdin.take());
     }
 
+    /// Close this client's READ end of the child's stdout pipe, so the child's next stdout write
+    /// fails with `BrokenPipe` (D50). This is the peer of [`close_stdin`](Self::close_stdin) and the
+    /// only harness method that makes a write of the CHILD's own fail.
+    ///
+    /// [`capture_stdout`](Self::capture_stdout) and
+    /// [`write_without_reading`](Self::write_without_reading) move the same handle into a background
+    /// thread and hold the read end OPEN, so neither one can provoke that failure.
+    ///
+    /// Writing to the child's stdin keeps working afterwards. `read_response` panics, because the
+    /// reader is gone, and every method that awaits an answer panics through it.
+    /// [`capture_stdout`](Self::capture_stdout) no-ops wholly instead, since it `take()`s the handle
+    /// this call already took. [`write_without_reading`](Self::write_without_reading) writes its
+    /// request before that same `take()`, so the request still reaches the child and only its drain
+    /// half no-ops.
+    /// [`stdout_snapshot`](Self::stdout_snapshot) is the trap — it reads the separate capture buffer,
+    /// so it returns an empty string with no complaint and must not be read after this call. A cell
+    /// that closes stdout asserts on the exit code and on stderr and never on stdout.
+    pub fn close_stdout(&mut self) {
+        // Dropping the `BufReader<ChildStdout>` closes the last read end → the child gets EPIPE.
+        drop(self.stdout.take());
+    }
+
     /// Read newline-delimited lines until the response with `id` arrives. EVERY line read must be
     /// JSON-RPC FRAMING — this is the NFR-14/D48 "stdout carries only MCP framing" guard.
     ///
@@ -558,7 +581,7 @@ impl McpClient {
             let stdout = self
                 .stdout
                 .as_mut()
-                .expect("stdout still owned (no write_without_reading call yet)");
+                .expect("stdout still owned (close_stdout, capture_stdout and write_without_reading each take it)");
             let mut line = String::new();
             let n = stdout.read_line(&mut line).expect("read child stdout line");
             assert!(n > 0, "child stdout closed before response id={id}");
