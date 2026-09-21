@@ -47,9 +47,13 @@
 //! rmcp's client awaits untimed and DISCARDS an error that carries no id, so an id-less reply never
 //! releases it.
 //!
-//! It then **DROPS** the frame. Dropping is load-bearing: rmcp's `expect_next_message` returns
-//! `ExpectedInitializeRequest` for ANY non-Request message in the initialize slot, so DELIVERING one
-//! of these pre-handshake kills the server — precisely the failure this arm removes.
+//! It then **DROPS** the frame. Dropping is required rather than tidy, and since **D50** it rests on
+//! two reasons that outlive the fatality it once rested on. An answered frame must not ALSO take
+//! effect, because rmcp's serve loop converts every delivered notification with
+//! `TryInto<CancelledNotification>` before any handler runs (`rmcp-1.7.0/src/service.rs:981-996`).
+//! And pre-handshake a delivered frame meets the D50 gate above this layer and is dropped there with
+//! no reply and no recovered id, so answering-and-dropping here stays the only spelling that releases
+//! a waiting peer.
 //!
 //! The predicate is [`crate::envelope_id::scan`], a `DeserializeSeed` over the ROOT object collecting
 //! every top-level `id` member's value, guarded by an EXHAUSTIVE match on the `Notification` variant
@@ -239,6 +243,12 @@ where
     /// Both out-of-band arms (`-32700` and D47's `-32600`) go through here so they are identical
     /// **by construction** rather than by review, and both encode through rmcp's own
     /// [`JsonRpcMessageCodec`] — there is no hand-rolled byte path.
+    ///
+    /// Since **D50** this helper is no longer the only emitter. The gate in
+    /// [`crate::pre_handshake`] writes its own `-32600` through `self.inner.send(..)`, which is this
+    /// transport's `send`, so that reply is byte-atomic under the same write mutex. It cannot route
+    /// through here, because a decorator generic over `T: Transport` cannot reach this private
+    /// function.
     async fn answer_error(
         write: &Arc<Mutex<Option<W>>>,
         error: ErrorData,
@@ -996,8 +1006,13 @@ mod tests {
 
     /// **W-DROP** — an answered frame is never delivered, and exactly one reply is written per frame.
     ///
-    /// Mutant: `continue` replaced by `return Some(message)` (answer AND deliver) — the shape that
-    /// kills the server in rmcp's initialize slot.
+    /// Mutant: `continue` replaced by `return Some(message)` (answer AND deliver). Since D50 a frame
+    /// delivered BEFORE the handshake meets the gate above this transport and is dropped there a
+    /// second time. What this cell catches is the delivery ITSELF taking effect once the latch is
+    /// open. rmcp runs every delivered notification through `TryInto<CancelledNotification>`, and a
+    /// frame that converts cancels the in-flight request it names
+    /// (`rmcp-1.7.0/src/service.rs:981-995`). The count below catches the other half, since exactly
+    /// one reply per frame is written.
     #[tokio::test]
     async fn an_answered_frame_is_never_delivered() {
         let corpus = divergence_corpus();

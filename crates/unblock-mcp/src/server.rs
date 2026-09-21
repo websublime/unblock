@@ -31,6 +31,7 @@ use unblock_error::{ErrorCode, StructuredError};
 
 use crate::error::{McpServerError, RunLoopSnafu, TransportSnafu};
 use crate::options::{CONTRACT_VERSION, McpServerOptions, Quotas};
+use crate::pre_handshake::PreHandshakeGateTransport;
 use crate::resources::{self, ResourceUri, capabilities, schema_bundle};
 use crate::tools::args::{duplicate_key_error, indeterminate_frame_error, unscanned_frame_error};
 use crate::tools::{enforce_quota, err_json};
@@ -443,10 +444,13 @@ pub async fn run_mcp_server(
 /// — `receive()` hands a decorator an already-parsed message. So this function now OWNS the read
 /// framing, via [`DupScanningTransport`].
 ///
-/// The two wrappers compose **scan innermost, clamp outermost**: the CD-4 clamp only mutates
+/// The wrappers compose **scan innermost, gate above it, clamp outermost**, so the receive order is
+/// scan, gate, clamp and the send order is clamp, gate, scan. The CD-4 clamp only mutates
 /// `initialize` params and passes the message through, so the `Extensions` the scan stamped survive
-/// it. Inverting them would work too, but this order keeps the clamp reading exactly the message
-/// rmcp's serve loop will.
+/// it, and that order keeps the clamp reading exactly the message rmcp's serve loop will. The D50
+/// gate sits ABOVE the scan because a D47 frame's id lives only in the raw bytes, so a gate below
+/// that arm would see the frame as a plain premature notification and drop it with no reply — see
+/// [`PreHandshakeGateTransport`].
 ///
 /// [`run_mcp_server`]'s public 2-argument signature is UNCHANGED by this — the byte-level bound is
 /// confined to this private function and the two `test-util` duplex helpers.
@@ -461,7 +465,9 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let transport = VersionClampingTransport::new(DupScanningTransport::new(read, write));
+    let transport = VersionClampingTransport::new(PreHandshakeGateTransport::new(
+        DupScanningTransport::new(read, write),
+    ));
     server
         .serve_with_ct(transport, cancel)
         .await
@@ -601,7 +607,9 @@ where
 /// compensates for. NEVER route a shipped path through this: it deliberately reproduces the
 /// spec-non-conformant echo of an unsupported requested version — **and, since D43, it also installs
 /// NO duplicate-key scan**, so every request reaching a handler through it carries NO
-/// [`ParamsScan`] verdict at all.
+/// [`ParamsScan`] verdict at all. It installs **NO D50 pre-handshake gate** either, for the same
+/// reason it installs neither the clamp nor the scan, so a premature frame sent through it still
+/// reaches rmcp's initialize slot.
 ///
 /// That second property is deliberate and kept: this helper's whole purpose is to be the RAW rmcp
 /// serve path, and wrapping it would both destroy the CD-6 pin and remove the only honest in-tree
@@ -640,12 +648,106 @@ fn unknown_resource(uri: &str) -> StructuredError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ParamsScan, UnblockServer, frame_scan_gate};
+    use super::{ParamsScan, UnblockServer, frame_scan_gate, run_mcp_server_handler};
+    use crate::envelope_id_corpus::{divergence_corpus, expected_bytes};
     use crate::options::Quotas;
     use rmcp::model::Extensions;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
+    use unblock_engine::{Session, SessionConfig};
     use unblock_error::ErrorCode;
+    use unblock_storage::{LibsqlStorage, Storage};
 
     const fn assert_send_sync<T: Send + Sync + 'static>() {}
+
+    /// A `Session` over a fresh in-memory libsql backend, mirroring the integration harness.
+    async fn session() -> Arc<Session> {
+        let storage = LibsqlStorage::open_in_memory()
+            .await
+            .expect("open in-memory storage");
+        storage.migrate().await.expect("migrate");
+        let storage: Arc<dyn Storage> = Arc::new(storage);
+
+        let workspace_dir = std::path::PathBuf::from("/tmp/unblock-mcp-composition-cell");
+        let unblock_dir = workspace_dir.join(".unblock");
+        let config = ResolvedConfig::default();
+        let paths = ConfigPaths {
+            db_path: unblock_dir.join(&config.db_filename),
+            jsonl_path: unblock_dir.join(&config.jsonl_filename),
+            unblock_dir,
+        };
+        let ctx = WorkspaceContext {
+            storage,
+            workspace_dir,
+            actor: "tester".to_string(),
+            config,
+            paths,
+            source: WorkspaceSource::WalkUp,
+            schema_version_before_migrate: 0,
+        };
+        Arc::new(
+            Session::open(ctx, SessionConfig::default())
+                .await
+                .expect("open session"),
+        )
+    }
+
+    /// **The composed stack keeps D47's recovered-id answer reachable before the handshake.**
+    ///
+    /// The gate sits ABOVE the scanner, so a D47 un-decodable-`id` frame arriving before the
+    /// handshake is answered on its RECOVERED id by the scanner and never reaches the gate. A stack
+    /// with those two layers swapped would classify the frame as a plain premature notification,
+    /// drop it with no reply, and leave the peer waiting forever. The cell reads the bytes off a real
+    /// duplex through [`run_mcp_server_handler`], so it grades the INSTALLED stack rather than a
+    /// decorator built by hand.
+    #[tokio::test]
+    async fn a_d47_frame_before_the_handshake_still_gets_its_recovered_id_answer() {
+        let entry = divergence_corpus()
+            .into_iter()
+            .find(|frame| frame.id == "D01")
+            .expect("the D01 corpus entry exists");
+
+        let (mut client, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        client
+            .write_all(&entry.frame)
+            .await
+            .expect("write the class frame");
+        client.write_all(b"\n").await.expect("terminate the frame");
+        client
+            .shutdown()
+            .await
+            .expect("close the client's write half");
+
+        let server = UnblockServer::new(session().await, Quotas::default(), None);
+        let outcome = run_mcp_server_handler(
+            server,
+            server_read,
+            server_write,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "the handshake never completes, so the run reports the closed connection"
+        );
+
+        let mut written = Vec::new();
+        client
+            .read_to_end(&mut written)
+            .await
+            .expect("read what the server wrote");
+        assert_eq!(
+            written,
+            expected_bytes(&entry.expect),
+            "the pre-handshake D47 answer must still ride the recovered id"
+        );
+        assert!(
+            String::from_utf8_lossy(&written).contains(r#""id":90001"#),
+            "non-vacuity: the reply really carries the recovered id"
+        );
+    }
 
     /// **The `Indeterminate ⇒ reject` arm — its only executable coverage.**
     ///
