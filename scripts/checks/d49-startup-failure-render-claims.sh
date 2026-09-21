@@ -73,16 +73,16 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; e
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
 # The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
-# the day a D50 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# the day a D51 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
 # goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves: the
-# prose range `(D1..D49)` and the tokenizer's regex ALTERNATION `\bD(49|48|47|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D50 finding — the lint would stop tokenizing
+# prose range `(D1..D50)` and the tokenizer's regex ALTERNATION `\bD(50|49|48|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D51 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D49'
-RANGE_ALT_RE='D\(49\|48\|'
+RANGE_RE='D1\.\.D50'
+RANGE_ALT_RE='D\(50\|49\|'
 
 # The LIVE published contract version. D49 does NOT move it (see the header): this row is the
 # affirmative record of that, so a silent bump riding this decision goes red.
@@ -107,7 +107,8 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 #      so a failure says WHICH id vanished — a single row matching any of them would go green with two
 #      dangling. The third residual, `ub-kp7`, is already pinned by the D48 sibling's own `P9` row
 #      (`scripts/checks/d48-stdout-channel-claims.sh:131`), so the missing row here is coverage that
-#      exists elsewhere rather than an oversight. Satisfy these rows by updating the issue over the
+#      exists elsewhere rather than an oversight; D50 CLOSED that residual, and the row still
+#      pins the presence of the id. Satisfy these rows by updating the issue over the
 #      issue tool and re-exporting in the same PR — NEVER by hand-editing the generated file (D5 model B).
 # P4   is this gate actually RUNNING in the workflow. A script that exists but is unwired fails on its
 #      own rows rather than passing silently. The SPECIFIED landing is `Q21`.
@@ -144,8 +145,8 @@ P5@docs/PROCESS.md@d49-startup-failure-render-claims@the count-free LIST that IS
 #      the whole decision is undone in one edit. It is declared at column 0, so its anchor is `^fn`;
 #      the two cells sit inside `mod tests` and theirs is `^ +fn`.
 # Q2   is the REGRESSION PIN — the four-shape cell. It is what proves the grammar and the forbidden
-#      members, and clause (7) makes it the pin rather than an end-to-end cell, which goes vacuous
-#      the day `ub-kp7` lands.
+#      members, and clause (7) makes it the pin rather than an end-to-end cell, which went vacuous
+#      once D50 gated that class.
 # Q3   is the `Cancelled` BYTE-IDENTITY cell. D38's diagnostic routing was measured against the exact
 #      line `failed to start the MCP server: Cancelled`, so the wildcard must not quote or pad it.
 # Q1..Q3 anchor on an IDENTIFIER and never on a rendered message. The messages are asserted by the
@@ -192,7 +193,7 @@ P5@docs/PROCESS.md@d49-startup-failure-render-claims@the count-free LIST that IS
 # =================================================================================================
 REQUIRE_ROW="
 Q1@crates/unblock-mcp/src/error.rs@^fn describe_initialize@fn describe_initialize_error\(err: &rmcp::service::ServerInitializeError\) -> String@the ONE description function is still declared at column 0 with its rmcp signature — without it the Transport display falls back to rmcp's own blob and D49 is undone in a single edit. No doc comment can match the anchor, and both ways of losing the item fail — a rename keeping the describe_initialize prefix matches the anchor and fails the requirement, and any other rename or a deletion makes the anchor vanish
-Q2@crates/unblock-mcp/src/error.rs@^ +fn the_four_frame_shapes@fn the_four_frame_shapes_render_bounded_summaries\(\)@the four-shape regression pin is still declared under its own name — clause (7) makes this cell the pin, because an end-to-end cell goes vacuous the day ub-kp7 lands
+Q2@crates/unblock-mcp/src/error.rs@^ +fn the_four_frame_shapes@fn the_four_frame_shapes_render_bounded_summaries\(\)@the four-shape regression pin is still declared under its own name — clause (7) makes this cell the pin, because an end-to-end cell went vacuous once D50 gated that class
 Q3@crates/unblock-mcp/src/error.rs@^ +fn cancelled_renders@fn cancelled_renders_byte_identical_to_the_measured_line\(\)@the Cancelled byte-identity cell is still declared under its own name — D38's diagnostic routing was measured against that exact line, and the wildcard must neither quote nor pad it
 Q4@crates/unblock-mcp/src/error.rs@^ +let clipped@= clip\(@every binding this render names clipped… takes its value from unblock_error::clip, the client member and the transport members alike. A binding renamed out of that class leaves this row green, so the pin against a DROPPED call is Q2's four-shape cell. Anchored on the production lines, so this file's own doc comments about clip cannot satisfy it
 Q5@crates/unblock-mcp/src/tools/bulk_markdown.rs@^ +format!\(\"\{kept\}@TRUNCATION_MARKER@clip_header appends the CONSTANT and not a second hand-written copy of the literal. The two are equal bytes, so no cell can catch a revert — this row is the only thing that can
