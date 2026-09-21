@@ -31,14 +31,20 @@
 //!     (`a_signal_during_the_workspace_open_exits_128_plus_signo_cleanly`) — FR-17 "unwinds
 //!     cleanly": no hard kill mid-`migrate()`;
 //!   - an **unsignalled** genuine run-loop `Err` still exits `1` and never hangs
-//!     (`a_no_signal_run_loop_error_exits_1_and_never_hangs`) — the OTHER half of the precedence:
-//!     the fix must not swallow unsignalled failures. It passes pre-fix (see its docs for the
-//!     measured reason); it guards against over-reach, and does not carry the no-hang proof.
+//!     (`a_no_signal_run_loop_error_exits_1_and_never_hangs`) — the OTHER half of the precedence,
+//!     so the fix must not swallow unsignalled failures. Since D50 it provokes that `Err` with a
+//!     broken pipe on the pre-handshake `ping` reply, the one unsignalled run-loop `Err` still
+//!     reachable from the wire; it guards against over-reach and does not carry the no-hang proof.
 //! - **T3.2.1 follow-up (b) / D40 — the unsignalled pre-`initialize` client disconnect exits 0** (NOT
 //!   the pre-fix exit 1): a bare pre-`initialize` stdin close yields exit 0 via the same barrier
 //!   (`a_pre_handshake_client_disconnect_exits_0`, RED against the pre-fix binary — no `error[CODE]`
 //!   line at the default level), and its `-vv` peer proves the demoted `ConnectionClosed` disconnect
 //!   is still RECORDED at debug (`a_pre_handshake_client_disconnect_records_the_disconnect_at_debug_level`).
+//! - **v1.0.1/D50 — the PRE-HANDSHAKE FRAME GATE**: a first frame that is neither `initialize` nor
+//!   `ping` no longer kills the server. A premature Request is answered `-32600` on its own id and
+//!   dropped, a premature Notification, Response or Error frame is dropped with no reply, and the
+//!   handshake still completes in every case (the `D50-E1`..`D50-E6` cells below). The gate opens on
+//!   the server's own `InitializeResult` and never waits for `notifications/initialized`.
 //!
 //! The `mcp` stdio harness (`McpClient`/`send_signal`/`wait_for`) lives in `tests/common/mod.rs`
 //! (promoted there at T3.2 so the failure-injection suite can reuse it without duplication). Cases
@@ -379,51 +385,49 @@ fn a_signal_during_the_workspace_open_exits_128_plus_signo_cleanly() {
     );
 }
 
-/// **T3.2.1/D38 AC(3)** — a genuine, NO-signal `Err` from the run loop still exits `1` and still
-/// TERMINATES. Its load-bearing role is the OTHER half of the D38 precedence: with no signal
-/// recorded, a genuine error must keep its spine §2.3 0–8 code — the fix must not over-reach and
-/// swallow unsignalled failures into a signal exit (or into exit 0). It is also a standing no-hang
-/// guard on the `Err` path.
+/// **T3.2.1/D38 AC(3), repointed by D50** — a genuine, NO-signal `Err` from the run loop still
+/// exits `1` and still TERMINATES. It carries the OTHER half of the D38 precedence. With no signal
+/// recorded a genuine error must keep its spine §2.3 0–8 code, so the signal fix must not over-reach
+/// and swallow an unsignalled failure into a signal exit or into exit 0. It is also a standing
+/// no-hang guard on the `Err` path.
 ///
-/// The `Err` is provoked in-protocol, with NO fault injection: rmcp's handshake loop rejects a
-/// NOTIFICATION arriving where the `initialize` REQUEST is expected with
-/// `Err(ServerInitializeError::ExpectedInitializeRequest)` (`rmcp-1.7.0/src/service/server.rs`) →
-/// `McpServerError::Transport` → `CliError::Mcp` → `ErrorCode::InternalError` → exit 1 (D27/AF-4).
+/// **The provocation is a BROKEN PIPE on the pre-handshake `ping` reply.** The cell closes its own
+/// read end of the child's stdout, then sends a `ping` before any `initialize`. rmcp answers that
+/// `ping` itself (`rmcp-1.7.0/src/service/server.rs:175-189`), the reply write hits the closed pipe,
+/// and rmcp wraps the `BrokenPipe` as `ServerInitializeError::TransportError` with the context
+/// `sending pre-init ping response`, which reaches `McpServerError::Transport` →
+/// `ErrorCode::InternalError` → exit 1 (D27/AF-4). Stdin stays OPEN throughout, so EOF is never the
+/// reason the child exits and the D40 disconnect carve-out (exit 0) is never entered.
 ///
-/// **Measured scope — this case does NOT hang pre-fix, and that is stated rather than assumed.**
-/// Verified against both the pre-fix binary and a "restore the blocking runtime drop" mutation: it
-/// PASSES under both. Unlike the `Cancelled` window, rmcp reaches this `Err` after having consumed a
-/// COMPLETE message and returns without issuing another `receive()`, so no `tokio::io::stdin()`
-/// blocking-pool read is left parked and `Runtime::drop` has nothing to block on. The no-hang
-/// non-vacuity of D38 clause (2) is therefore carried by
-/// `a_signal_before_any_handshake_exits_128_plus_signo_and_never_hangs` (which HANGS under that same
-/// mutation), not by this case. Recording the measurement instead of inheriting the plausible-but-
-/// unverified "every Err path parks a read" story is the D38 discipline: the defect shipped behind a
-/// comment whose causal claim nobody had measured.
+/// **That transport failure is the ONE unsignalled run-loop `Err` still reachable from the wire**
+/// (D50 clause 11). The gate D50 installs makes `ExpectedInitializeRequest` unreachable from the
+/// wire; `ExpectedInitializedNotification` is never constructed; `UnexpectedInitializeResponse` and
+/// `InitializeFailed` both need an `initialize` override `UnblockServer` does not declare;
+/// `UnsupportedProtocolVersion` needs a `partial_cmp` that returns `None`, and `ProtocolVersion`'s
+/// is total; `ConnectionClosed` is D40-delegated to exit 0; and `Cancelled` is the signal path. The
+/// gate's own failed reply write cannot carry this witness either, because it returns `None` from
+/// `receive()` and lands on that same D40 exit 0.
 ///
-/// This is ALSO the **D48 anchor**: the unsignalled `Err` path is the ONE `mcp` path that renders a
-/// `StructuredError` at all, and D48 moves that render OFF the JSON-RPC framing channel. Pre-D48
-/// this cell asserted the payload ON STDOUT and so pinned the ub-og3 defect as correct. FR-11
-/// always-valid-JSON-on-error is preserved in CONTENT and moved in CHANNEL: stdout must be
-/// FRAME-FREE (here EMPTY — rmcp answers a notification with nothing), and the FULL payload —
-/// `code`, `message`, `retryable`, any `hint` — lands on STDERR, still machine-readable for an MCP
-/// host that captures the child stderr. The exit code does NOT move: D48 moves the channel only, so
-/// the `Some(1)` above is unchanged and still carries the D38 half of this cell.
+/// **The frame-free-stdout half is gone BY CONSTRUCTION.** The provocation closes the very stream
+/// that assertion would read, so no read of it could mean anything here. D48's channel claim keeps
+/// its pins on the pre-run-loop routes in `crates/unblock-cli/tests/mcp_stdout_channel.rs`. The
+/// exit-1 half and the stderr-payload half are unchanged and are what this cell asserts.
 ///
-/// The fatality's CLASS, for the reader arriving from D48: any first frame that is neither
-/// `initialize` NOR `ping` kills the server, Request or Notification alike — `ping` is the one
-/// pre-handshake exception, answered by rmcp with the loop continuing.
+/// The no-hang non-vacuity of D38 clause (2) is carried by
+/// `a_signal_before_any_handshake_exits_128_plus_signo_and_never_hangs`, which HANGS under the
+/// restored-blocking-runtime-drop mutation, and never by this cell.
 #[test]
 fn a_no_signal_run_loop_error_exits_1_and_never_hangs() {
     let ws = Workspace::init();
     let mut client = McpClient::spawn(ws.root());
 
-    // A notification where rmcp expects the `initialize` request → a genuine handshake Err.
-    client.notify("notifications/initialized", &json!({}));
-    // Retain stdout so the D48 frame-free NEGATIVE is read from a COMPLETE buffer (and so no unread
-    // pipe can stall the child). `wait_for` below joins the drain before either snapshot is read.
-    client.capture_stdout();
+    // Close the read end FIRST, so the child's ping reply already has nowhere to go when rmcp
+    // writes it. `write_raw_line` is the one send path that touches stdin alone — every other one
+    // either reads the response or moves the stdout handle this cell has just dropped.
+    client.close_stdout();
+    client.write_raw_line(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#);
 
+    // Stdin stays open, because EOF would route through D40 to exit 0 and hide the transport error.
     let status = client.wait_for(Duration::from_secs(20));
     assert_eq!(
         status.code(),
@@ -434,17 +438,8 @@ fn a_no_signal_run_loop_error_exits_1_and_never_hangs() {
         client.stderr_snapshot()
     );
 
-    // D48: stdout is the JSON-RPC framing channel for the whole process lifetime. Here the server
-    // never framed anything, so it must be EMPTY — and the FULL payload must be on stderr instead.
-    let stdout = client.stdout_snapshot();
-    common::assert_stdout_is_frame_only(&stdout, "unsignalled run-loop Err");
-    assert!(
-        stdout.trim().is_empty(),
-        "D48: the structured error must NOT reach the JSON-RPC framing channel — an MCP client \
-         parsing this as a frame gets a protocol violation. stdout was: `{stdout}`"
-    );
     // The POSITIVE half. Without it this cell stays GREEN under a mutation that deletes the
-    // diagnostic entirely, because stdout is legitimately empty on this path either way.
+    // diagnostic entirely, because an exit code alone says nothing about what was reported.
     let stderr = client.stderr_snapshot();
     let payload = common::structured_error_on_stderr(&stderr).unwrap_or_else(|| {
         panic!(
@@ -460,6 +455,15 @@ fn a_no_signal_run_loop_error_exits_1_and_never_hangs() {
         payload.get("retryable").is_some(),
         "the FULL structured payload moves (D48), not a degraded `error[CODE]` line: {payload}"
     );
+    // ANTI-VACUITY: exit 1 plus INTERNAL_ERROR alone would also fit several other initialize-time
+    // variants. D49's dedicated `TransportError` arm is the only one that renders this prefix
+    // (`crates/unblock-mcp/src/error.rs`), so reading it pins WHICH failure ran the cell.
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("a transport error while"),
+        "the exit-1 must come from the pre-handshake ping reply failing to write, and no other \
+         initialize-time variant renders through that arm: {payload}"
+    );
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -473,11 +477,11 @@ fn a_no_signal_run_loop_error_exits_1_and_never_hangs() {
 //
 // OBSERVATION CHANNEL: `client.seen_lines`, NOT `stdout_snapshot()`. `capture_stdout()` CONSUMES
 // the stdout reader and `read_response` panics once it is gone, so it cannot be called before the
-// `ping_barrier()`/`initialize()` these cells must perform. Written like the sibling D38 cell
-// above — which calls `capture_stdout()` immediately and reads nothing — every line of interest
-// would instead be consumed into `seen_lines` while `stdout_snapshot()` came back EMPTY, and the
-// two negatives below would then pass over an empty collection while proving nothing. Hence the
-// non-emptiness guard that opens each of them.
+// `ping_barrier()`/`initialize()` these cells must perform. A cell written the other way — calling
+// `capture_stdout()` up front and reading nothing — would push every line of interest into
+// `seen_lines` while `stdout_snapshot()` came back EMPTY, and the two negatives below would then
+// pass over an empty collection while proving nothing. Hence the non-emptiness guard that opens
+// each of them.
 // ------------------------------------------------------------------------------------------------
 
 /// **L-P1** — a class frame before `initialize` no longer kills the server, and stdout stays clean.
@@ -590,62 +594,403 @@ fn a_clean_pre_initialize_request_still_works() {
     );
 }
 
-/// **L-N2** — an id-LESS notification before `initialize` STILL exits 1.
+/// **L-N2, inverted by D50** — an id-LESS notification before `initialize` is DROPPED, and the
+/// handshake still completes.
 ///
-/// **This pins a KNOWN DEFECT that D47 deliberately does NOT fix.** D47's class requires the raw
-/// bytes to carry a top-level `id`; a frame with no `id` member is a genuine JSON-RPC Notification
-/// and is excluded BY DECISION, so this fatality survives and needs its own issue. It is upstream
-/// rmcp behaviour (`expect_next_message`'s `other =>` arm).
+/// The frame is a genuine JSON-RPC Notification, so D47's class excludes it by decision and D47
+/// leaves it untouched. The D50 gate covers all four frame shapes, so this one is dropped with NO
+/// reply before rmcp ever sees it, and the connection goes on to a normal handshake and a clean EOF
+/// exit 0. JSON-RPC 2.0 section 4.1 is why the drop is silent — a Notification gets no reply.
 ///
-/// It is PARTLY REDUNDANT with `a_no_signal_run_loop_error_exits_1_and_never_hangs` above, and that
-/// is exactly the point: that D38-era cell provokes its `Err` with THIS VERY FRAME. Under a mutant
-/// that swallowed no-id frames, that cell would stop receiving its `Err`, the child would never
-/// exit, and it would fail on its 20-second wait for a reason having nothing to do with D38 —
-/// whereupon the natural "fix" is to weaken it. This cell makes the coupling explicit instead of
-/// latent.
+/// It stays PARTLY REDUNDANT with `a_no_signal_run_loop_error_exits_1_and_never_hangs`, which is
+/// the point. That cell no longer provokes its `Err` with this frame, because this frame is no
+/// longer fatal, and reading the two together shows the same class from both sides.
 ///
-/// Mutant: deleting the `Absent => {}` arm.
-///
-/// **D48 note.** The `INTERNAL_ERROR` this cell reads now arrives on STDERR, not stdout: the
-/// fatality itself is unchanged (that is what this cell pins), only the channel of its report
-/// moved. The stdout-side assertion is therefore a frame-free NEGATIVE, and the identification of
-/// the failure is carried by the stderr payload.
-///
-/// The fatality's CLASS, for the reader who arrives here from D48: any first frame that is neither
-/// `initialize` NOR `ping` kills the server, Request or Notification alike. `ping` is the one
-/// pre-handshake exception — rmcp answers it and the loop continues, which is exactly why
-/// `ping_barrier` works as a readiness barrier without completing the handshake. The id-less
-/// notification this cell sends is one INSTANCE of the class, not its definition.
+/// Mutant: answering the Notification arm instead of dropping it, which the no-reply assertion
+/// below turns red.
 #[test]
-fn an_id_less_notification_before_initialize_still_exits_1() {
+fn an_id_less_notification_before_initialize_is_dropped_and_the_handshake_still_completes() {
     let ws = Workspace::init();
     let mut client = McpClient::spawn(ws.root());
 
     client.notify("notifications/initialized", &json!({}));
-    client.capture_stdout();
+    // The barrier reads past the dropped frame, so `seen_lines` below holds a COMPLETE record of
+    // what the server wrote rather than racing it.
+    client.ping_barrier();
+    let result = client.initialize();
+    client.close_stdin();
 
     let status = client.wait_for(Duration::from_secs(20));
     assert_eq!(
         status.code(),
-        Some(1),
-        "an id-LESS notification before `initialize` is OUT of the D47 class by decision, so this \
-         fatality is unchanged. Child stderr:\n{}",
+        Some(0),
+        "the gate drops the frame, so EOF is the only event left and D40 delegates it to a clean \
+         teardown. Child stderr:\n{}",
         client.stderr_snapshot()
     );
-    let stdout = client.stdout_snapshot();
-    common::assert_stdout_is_frame_only(&stdout, "id-less notification before initialize");
+
+    // The POSITIVE landing: the handshake the dropped frame used to prevent actually completed.
     assert!(
-        stdout.trim().is_empty(),
-        "D48: nothing but framing on stdout, got: `{stdout}`"
+        result.get("serverInfo").is_some() && result.get("protocolVersion").is_some(),
+        "the handshake must complete after the drop, not merely fail to kill the server: {result}"
+    );
+
+    // NON-EMPTINESS FIRST: a negative quantified over an empty collection proves nothing.
+    assert!(
+        !client.seen_lines.is_empty(),
+        "nothing was observed on stdout at all — the negative below would be vacuous"
+    );
+    assert!(
+        !client.seen_lines.iter().any(|l| l.contains("-32600")),
+        "a Notification gets NO reply (JSON-RPC 2.0 section 4.1), so nothing may answer it: {:?}",
+        client.seen_lines
     );
     let stderr = client.stderr_snapshot();
-    let payload = common::structured_error_on_stderr(&stderr).unwrap_or_else(|| {
-        panic!("D48: it must still SURFACE, on stderr. Child stderr:\n{stderr}")
-    });
+    assert!(
+        common::structured_error_on_stderr(&stderr).is_none(),
+        "and no failure is reported at all, since none occurred. Child stderr:\n{stderr}"
+    );
+}
+
+// ------------------------------------------------------------------------------------------------
+// [v1.0.1/D50] — the PRE-HANDSHAKE FRAME GATE, end to end over the real binary.
+//
+// Before the server has answered `initialize`, the transport stack passes only `initialize` and
+// `ping` upward. A premature Request is answered `-32600` on its OWN id and dropped; a premature
+// Notification, Response or Error frame is dropped with no reply. Every cell here asserts the
+// POSITIVE outcome — the answer riding the expected id, or the handshake the frame used to prevent
+// actually completing — because "the child did not die" is satisfied by a server that hangs.
+//
+// The cells that SEARCH stdout read `client.seen_lines` after a sentinel request has round-tripped,
+// and no cell here reads `stdout_snapshot()`. `capture_stdout()` consumes the stdout reader, and
+// these cells must keep reading responses.
+//
+// The gate's own unit surface lives in `crates/unblock-mcp/src/pre_handshake.rs`; these cells prove
+// the gate is COMPOSED INTO the shipped stdio stack, which no in-module cell can see.
+// ------------------------------------------------------------------------------------------------
+
+/// The compile-time `-32600` message, byte-identical to `PRE_HANDSHAKE_REJECTION_MESSAGE`
+/// (`crates/unblock-mcp/src/pre_handshake.rs`). A reply that merely carries the CODE would stay
+/// green under a mutation that rewrote the text, so the cells read both.
+const PRE_HANDSHAKE_REJECTION: &str = "the server has not completed the initialize handshake and accepts only initialize and ping until it has";
+
+/// Find the gate's `-32600` among the lines the server wrote, then assert it whole.
+///
+/// The caller round-trips a SENTINEL request first, so `seen_lines` already holds every line the
+/// server produced and this read is deterministic and timeout-free. Blocking on the answer's own id
+/// instead would HANG under the mutation that drops that id, because `read_response` checks its
+/// deadline only between lines that actually arrive, and after an id-less reply none does.
+fn assert_gate_rejected(client: &McpClient, id: i64) {
+    assert!(
+        !client.seen_lines.is_empty(),
+        "nothing was observed on stdout at all — the search below would be vacuous"
+    );
+    let answer = client
+        .seen_lines
+        .iter()
+        .find(|line| line.contains("-32600"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the premature frame must be ANSWERED, and nothing answered it: {:?}",
+                client.seen_lines
+            )
+        });
+    let reply: Value = serde_json::from_str(answer).expect("the answer is JSON");
+    assert_gate_rejection(&reply, id);
+}
+
+/// Assert one gate reply — the `-32600`, the message, the id it rides, and the absent `data`.
+fn assert_gate_rejection(reply: &Value, id: i64) {
     assert_eq!(
-        payload["code"], "INTERNAL_ERROR",
-        "and it still surfaces as INTERNAL_ERROR (channel moved by D48, fatality unchanged): \
-         {payload}"
+        reply["error"]["code"], -32600,
+        "a premature request is answered Invalid Request: {reply}"
+    );
+    assert_eq!(
+        reply["error"]["message"], PRE_HANDSHAKE_REJECTION,
+        "and it carries the compile-time constant: {reply}"
+    );
+    assert_eq!(
+        reply["id"], id,
+        "riding the frame's OWN id — an id-less error is DROPPED by an rmcp client, so only this \
+         spelling releases a waiting peer: {reply}"
+    );
+    assert!(
+        reply["error"].get("data").is_none(),
+        "`data` is absent (D50 clause 2), so nothing of the frame is echoed back but the id asserted \
+         above: {reply}"
+    );
+}
+
+/// Complete the handshake WITHOUT sending `notifications/initialized`, returning the result.
+///
+/// [`McpClient::initialize`] sends that notification for us, which is right for every other cell and
+/// wrong for the one that asks what happens in the window before it.
+fn initialize_without_the_notification(client: &mut McpClient) -> Value {
+    let response = client.request(
+        "initialize",
+        &json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "unblock-cli-test", "version": "0.0.0"}
+        }),
+    );
+    assert!(
+        response.get("error").is_none(),
+        "initialize failed: {response}"
+    );
+    response["result"].clone()
+}
+
+/// **D50-E1** — a premature `tools/list` is answered `-32600` on its own id, and the handshake then
+/// completes.
+///
+/// This is the one shape that writes bytes. Answering it is forced by rmcp's client rather than
+/// chosen — that client awaits untimed, so a server that dropped silently would turn the old fast
+/// death into an unbounded hang.
+///
+/// This cell goes red on a mutant that passes `None` as the reply id, and on one that drops the
+/// gate from the composed stack at `crates/unblock-mcp/src/server.rs`, which leaves nothing to
+/// answer at all.
+#[test]
+fn a_premature_request_before_initialize_is_answered_on_its_own_id() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    client.write_raw_line(r#"{"jsonrpc":"2.0","id":90101,"method":"tools/list","params":{}}"#);
+    // The barrier reads past the answer, so `seen_lines` holds it before anything is asserted.
+    client.ping_barrier();
+    assert_gate_rejected(&client, 90101);
+
+    // The POSITIVE landing: the server is still there and still handshakes.
+    let result = client.initialize();
+    assert!(
+        result.get("serverInfo").is_some(),
+        "the handshake must complete after the rejection: {result}"
+    );
+    client.close_stdin();
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "EOF after a completed handshake exits 0. Child stderr:\n{}",
+        client.stderr_snapshot()
+    );
+}
+
+/// **D50-E2** — a premature RESPONSE frame is dropped with no reply, and the handshake still
+/// completes.
+///
+/// A reply to a reply is meaningless, so the gate writes nothing. `saw_response_for` is the
+/// timeout-free probe for that — the barrier and the handshake read every line the server wrote, so
+/// asking afterwards reads a COMPLETE record rather than racing one.
+///
+/// This cell goes red on a mutant that answers the `Response` arm instead of dropping it, on the
+/// frame's own id or with no id at all.
+#[test]
+fn a_premature_response_frame_before_initialize_is_dropped_with_no_reply() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    client.write_raw_line(r#"{"jsonrpc":"2.0","id":90102,"result":{}}"#);
+    client.ping_barrier();
+    let result = client.initialize();
+    client.close_stdin();
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a premature Response frame must not kill the server. Child stderr:\n{}",
+        client.stderr_snapshot()
+    );
+    assert!(
+        result.get("serverInfo").is_some(),
+        "and the handshake completes: {result}"
+    );
+
+    assert!(
+        !client.seen_lines.is_empty(),
+        "nothing was observed on stdout at all — the negative below would be vacuous"
+    );
+    assert!(
+        !client.saw_response_for(90102),
+        "a Response frame gets NO reply: {:?}",
+        client.seen_lines
+    );
+    // `saw_response_for` looks for a line carrying the id, so an answer sent with no id at all
+    // passes it, and this id-less negative is what refuses that reply too.
+    assert!(
+        !client.seen_lines.iter().any(|l| l.contains("-32600")),
+        "and nothing answers it id-lessly either: {:?}",
+        client.seen_lines
+    );
+}
+
+/// **D50-E3** — a premature ERROR frame is dropped with no reply, and the handshake still completes.
+///
+/// The Error shape is its own cell because the classifier names it in its own match arm, so a
+/// mutation that answered only this arm would survive every other cell here.
+///
+/// This cell goes red on a mutant that answers the `Error` arm instead of dropping it, on the
+/// frame's own id or with no id at all.
+#[test]
+fn a_premature_error_frame_before_initialize_is_dropped_with_no_reply() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    client.write_raw_line(r#"{"jsonrpc":"2.0","id":90103,"error":{"code":-1,"message":"nope"}}"#);
+    client.ping_barrier();
+    let result = client.initialize();
+    client.close_stdin();
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a premature Error frame must not kill the server. Child stderr:\n{}",
+        client.stderr_snapshot()
+    );
+    assert!(
+        result.get("serverInfo").is_some(),
+        "and the handshake completes: {result}"
+    );
+
+    assert!(
+        !client.seen_lines.is_empty(),
+        "nothing was observed on stdout at all — the negative below would be vacuous"
+    );
+    assert!(
+        !client.saw_response_for(90103),
+        "an Error frame gets NO reply: {:?}",
+        client.seen_lines
+    );
+    // This id-less negative is here for the same reason the Response cell carries one, because an
+    // answer with no id survives an id-keyed probe.
+    assert!(
+        !client.seen_lines.iter().any(|l| l.contains("-32600")),
+        "and nothing answers it id-lessly either: {:?}",
+        client.seen_lines
+    );
+}
+
+/// **D50-E4** — a `ping` before `initialize` leaves the gate SHUT, and the handshake still completes.
+///
+/// rmcp answers a pre-handshake `ping` with `EmptyResult`, which must not open the latch. The second
+/// premature frame is what proves it stayed shut — a latch keyed on any Response rather than on the
+/// `InitializeResult` variant would pass that frame upward into rmcp's initialize slot and kill the
+/// server.
+///
+/// Mutant: opening the latch on the `ping` reply.
+#[test]
+fn a_ping_before_initialize_leaves_the_gate_shut_and_the_handshake_still_completes() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    client.ping_barrier();
+
+    // STILL pre-handshake, so this frame must STILL be rejected. The handshake below is the
+    // sentinel that reads past the answer.
+    client.write_raw_line(r#"{"jsonrpc":"2.0","id":90104,"method":"tools/list","params":{}}"#);
+
+    let result = client.initialize();
+    assert_gate_rejected(&client, 90104);
+    assert!(
+        result.get("serverInfo").is_some(),
+        "`ping` then `initialize` still completes a handshake: {result}"
+    );
+    client.close_stdin();
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "and EOF then exits 0. Child stderr:\n{}",
+        client.stderr_snapshot()
+    );
+}
+
+/// **D50-E5** — a `tools/list` sent AFTER the initialize response but BEFORE
+/// `notifications/initialized` is served normally.
+///
+/// The latch opens on the server's own `InitializeResult` and never waits for the client's
+/// `notifications/initialized`. rmcp does not wait for it either, and this transport must not be
+/// stricter than the server it decorates.
+///
+/// Mutant: opening the latch on `notifications/initialized`, which leaves this `tools/list`
+/// rejected `-32600` instead of served.
+#[test]
+fn a_request_before_the_initialized_notification_is_served_normally() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    let result = initialize_without_the_notification(&mut client);
+    assert!(
+        result.get("serverInfo").is_some(),
+        "the handshake response arrives first: {result}"
+    );
+
+    // The window under test: the response has landed, the notification has NOT been sent.
+    let listed = client.request("tools/list", &json!({}));
+    assert!(
+        listed.get("error").is_none(),
+        "a request in the post-response, pre-initialized window is SERVED, never rejected: {listed}"
+    );
+    let tools = listed["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list returns a tool array: {listed}"));
+    assert!(
+        !tools.is_empty(),
+        "and it really served the request: {listed}"
+    );
+
+    client.notify("notifications/initialized", &json!({}));
+    client.close_stdin();
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "EOF after a completed handshake exits 0. Child stderr:\n{}",
+        client.stderr_snapshot()
+    );
+}
+
+/// **D50-E6** — a frame spelled `"method":"initialize"` whose `params` do not type is answered
+/// `-32600` and dropped.
+///
+/// `ClientRequest` is `#[serde(untagged)]` and ends in `CustomRequest`, so this frame decodes as
+/// `CustomRequest` rather than `InitializeRequest`. A gate keyed on `ClientRequest::method()` would
+/// read the string `initialize` and pass it upward into the very death the gate exists to remove.
+/// This cell is what tells a VARIANT-matched classifier from a method-string one.
+///
+/// Mutant: keying the pass arm on `ClientRequest::method()`.
+#[test]
+fn a_method_initialize_frame_with_untypeable_params_is_rejected_over_stdio() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    // `capabilities` and `clientInfo` are missing, so the typed variant fails and the untagged
+    // union falls through to `CustomRequest`. The barrier reads past the answer.
+    client.write_raw_line(
+        r#"{"jsonrpc":"2.0","id":90105,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+    );
+    client.ping_barrier();
+    assert_gate_rejected(&client, 90105);
+
+    // The POSITIVE landing: a well-formed `initialize` still gets through.
+    let result = client.initialize();
+    assert!(
+        result.get("serverInfo").is_some(),
+        "a real initialize still completes the handshake: {result}"
+    );
+    client.close_stdin();
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "and EOF then exits 0. Child stderr:\n{}",
+        client.stderr_snapshot()
     );
 }
 

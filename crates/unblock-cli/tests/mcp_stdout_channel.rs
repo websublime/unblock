@@ -548,11 +548,10 @@ fn the_stderr_oracle_finds_the_payload_by_shape_not_by_position() {
 /// can put them there — at the moment such a `wait_for` returns, those bytes have not been written
 /// yet. The same fact is read twice, as content and as elapsed time.
 ///
-/// **The child exits 1 on purpose.** Both cells this join protects
-/// (`mcp_lifecycle.rs`'s `a_no_signal_run_loop_error_exits_1_and_never_hangs` and
-/// `an_id_less_notification_before_initialize_still_exits_1`) drive a child that exits 1, so a join
-/// gated on `status.success()` would be skipped on precisely the path that matters. An exit-0
-/// fixture — which is what this cell used — cannot see that mutation at all.
+/// **The child exits 1 on purpose.** `mcp_lifecycle.rs`'s
+/// `a_no_signal_run_loop_error_exits_1_and_never_hangs` drives a child that exits 1 and then reads
+/// its drained stderr, so a join gated on `status.success()` would be skipped on precisely the path
+/// that matters. An exit-0 fixture — which is what this cell used — cannot see that mutation at all.
 ///
 /// `pending_drain_count()` is still read twice, but only as an anti-vacuity CONTROL: 2 before proves
 /// there were drains to join at all, 0 after proves the call ran. Neither reading can tell a join
