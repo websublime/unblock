@@ -337,26 +337,51 @@ jobs:
       # by design. Specified in ci-cd-and-distribution.md §2.1 (the D48 sub-check).
       - run: scripts/checks/d48-stdout-channel-claims.sh
       # D49 (`ub-b1a`) required landings: the `unblock mcp` startup-failure message DESCRIBES the
-      # refused first frame — its kind, its method, its envelope id, each clipped — instead of echoing
-      # rmcp's `Debug` blob. Its teeth are executable (the cells behind the `test-util` seam render
-      # every arm the decision makes normative), but three of its obligations are unreachable
+      # refused first frame — its kind, its method, its envelope id, each clipped — instead of
+      # echoing rmcp's `Debug` blob. Its teeth are executable (the cells behind the `test-util` seam
+      # render every arm the decision makes normative), but three of its obligations are unreachable
       # from any test: the MARKER FOLD in `bulk_markdown.rs`, where the constant and the hard-coded
-      # literal are equal bytes, so reverting it leaves every cell green; the residual ids the PRD row
-      # names, three of them, of which this step rows two while `ub-kp7` rides the `d48` step's `P9` row;
-      # and `docs/roadmap.html`, which sits outside every lint corpus here. This step asserts
-      # the positive: the ONE description function, the four-shape regression pin and the `Cancelled`
-      # byte-identity cell, all three anchored on their own `fn` declarations so a comment left behind
-      # by a deletion fails the row instead of satisfying it; the clip on its own production lines and
-      # the folded marker on its own; `ub-b1a` plus the two residual ids it rows in the tracker export;
-      # rendered roadmap's v1.0.1 card, anchored on the card's own D49 bullet; this gate's own wiring;
-      # and the live D-range at the prose statements and every SIBLING script's knob that the count-free
-      # `docs/PROCESS.md` §3 enumeration names — three prose statements over four rows, and every sibling
-      # knob including `d48`'s two, which nothing pinned until this script landed, while this script's own
-      # knob stays deliberately un-rowed because a self-row cannot fail — plus the contract
-      # version standing UNMOVED, since D49 bounds the CONTENT of a message that appears in neither
-      # `capabilities()` nor `schema_bundle()`. Positive-only by design. Specified in
-      # ci-cd-and-distribution.md §2.1 (the D49 sub-check).
+      # literal are equal bytes, so reverting it leaves every cell green; the residual ids the PRD
+      # row names, three of them, of which this step rows two while `ub-kp7`, closed by D50, rides
+      # the `d48` step's `P9` row; and `docs/roadmap.html`, which sits outside every lint corpus
+      # here. This step asserts the positive: the ONE description function, the four-shape
+      # regression pin and the `Cancelled` byte-identity cell, all three anchored on their own `fn`
+      # declarations so a comment left behind by a deletion fails the row instead of satisfying it;
+      # the clip on its own production lines and the folded marker on its own; `ub-b1a` plus the two
+      # residual ids it rows in the tracker export; rendered roadmap's v1.0.1 card, anchored on the
+      # card's own D49 bullet; this gate's own wiring; and the live D-range at the prose statements
+      # and every SIBLING script's knob that the count-free `docs/PROCESS.md` §3 enumeration names —
+      # three prose statements over four rows, and every sibling knob including `d48`'s two, which
+      # nothing pinned until this script landed, while this script's own knob stays deliberately
+      # un-rowed because a self-row cannot fail — plus the contract version standing UNMOVED, since
+      # D49 bounds the CONTENT of a message that appears in neither `capabilities()` nor
+      # `schema_bundle()`. Positive-only by design. Specified in ci-cd-and-distribution.md §2.1 (the
+      # D49 sub-check).
       - run: scripts/checks/d49-startup-failure-render-claims.sh
+      # D50 (`ub-kp7`) required landings: a first frame that is neither `initialize` nor `ping` no
+      # longer kills the server. A transport decorator between the version clamp and the duplicate-key
+      # scan answers a premature request `-32600` on its own id, drops a premature notification,
+      # response or error frame, and opens on the server's own `InitializeResult`. Its teeth are
+      # executable (the gate's own in-module cells, plus the repointed and inverted lifecycle cells).
+      # The residual ids the PRD row names, each one beside the work's own id, and `docs/roadmap.html`
+      # are unreachable from any test at all, and no in-module cell of the gate reads the COMPOSITION
+      # LINE — deleting the layer leaves those cells green, while the stdio lifecycle suite goes red
+      # and workspace clippy fails on the unreached layer under `-D warnings`, so this row is the
+      # seconds-fast catch beside that suite and still catches the deletion when the type stays
+      # constructed elsewhere and clippy falls silent. This step asserts the positive: the gate still
+      # installed in the composed transport, its type, its `Transport` impl, the classifier and the
+      # latch predicate on their own declarations, the exhaustive four-variant match (a `_` wildcard
+      # would compile, pass every cell and silently reopen the hole), the latch's `InitializeResult`
+      # key, the reply constant by its text, every cell on its own `fn` declaration, the
+      # stdout-closing harness method the repointed cell needs, `ub-kp7` plus all six residual ids in
+      # the tracker export, the rendered roadmap's v1.0.1 card anchored on the card's own D50 bullet,
+      # this gate's own wiring, and the live D-range at the prose statements and every SIBLING
+      # script's knob that the count-free `docs/PROCESS.md` §3 enumeration names — including `d49`'s
+      # two, which nothing pinned until this script landed, while this script's own knob stays
+      # deliberately un-rowed because a self-row cannot fail — plus the contract version standing
+      # UNMOVED, since `-32600` is rmcp's own transport-level code and not our taxonomy. Positive-only
+      # by design. Specified in ci-cd-and-distribution.md §2.1 (the D50 sub-check).
+      - run: scripts/checks/d50-pre-handshake-gate-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
