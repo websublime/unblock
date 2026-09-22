@@ -4,7 +4,7 @@ description: Resolving where a shared primary lives and which mechanism carries 
 type: run
 date: 2026-09-22
 branch: ub-w3a-shared-state-research
-pr: -
+pr: '445'
 issues: [ub-w3a]
 ---
 
