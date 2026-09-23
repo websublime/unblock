@@ -317,7 +317,7 @@
         <div class="stn future">
           <span class="node"></span>
           <div class="ver">v2+</div>
-          <div class="thm">Turso Sync · ACL · PRO web · streamable-HTTP</div>
+          <div class="thm">Backend evolution · ACL · PRO web · streamable-HTTP</div>
           <span class="tag">Direction</span>
         </div>
       </div>
@@ -449,13 +449,13 @@
 
       <div class="card">
         <div class="ch"><span class="cv">v1.3</span><span class="status st-prop">Proposed</span></div>
-        <div class="thm">Shared state — one primary, many machines</div>
-        <p class="desc">Where unblock becomes a <i>team</i> product (D28) — the release right after planning, <b>guardrail-pinned</b>. Sync backend chosen at lock with a fresh maturity check.</p>
+        <div class="thm">Shared state — remote mode, one shared database</div>
+        <p class="desc">Where unblock becomes a <i>team</i> product (D28) — the release right after planning, <b>guardrail-pinned</b>. The product gains a second mode (D51) — local is one SQLite file on one machine, remote is one shared database every developer connects to.</p>
         <ul>
-          <li><b>Research FIRST</b>: self-host libsql/sqld (docker) vs Turso Cloud · sync: replicas vs Turso Sync</li>
-          <li>Reads local, writes serialize at the primary · join-workspace onboarding</li>
-          <li>Credentials via env / OS keychain only · self-hosted sqld path</li>
-          <li>No multi-master — integrity first</li>
+          <li><b>Remote mode</b> speaks SQL over HTTP — no embedded replica, no sync engine</li>
+          <li>Two peer servers — a private sqld (dated status note) or Turso Cloud; only URL and token differ</li>
+          <li>Every read and write crosses the network · <b>no offline</b> · the server serializes writes</li>
+          <li>Credentials via env / OS keychain only · join-workspace onboarding</li>
         </ul>
         <div class="crates"><b>heart</b> storage — + config · health · engine · mcp · cli</div>
       </div>
@@ -463,7 +463,7 @@
       <div class="card">
         <div class="ch"><span class="cv">v1.4</span><span class="status st-prop">Proposed</span></div>
         <div class="thm">Human surface — local TUI</div>
-        <p class="desc">An offline, terminal-native window for developers — a ratatui app that is itself an MCP client over stdio (no new transport, FR-9 preserved). <b>Pulled forward from v1.5.</b></p>
+        <p class="desc">A local, terminal-native window for developers, offline in local mode — a ratatui app that is itself an MCP client over stdio (no new transport, FR-9 preserved). <b>Pulled forward from v1.5.</b></p>
         <ul>
           <li>Phase 1 read-only: ready queue, board, detail, swarm observability</li>
           <li>Phase 2: claim/close/create via the same MCP tools, human as actor</li>

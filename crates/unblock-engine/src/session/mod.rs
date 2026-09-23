@@ -41,7 +41,9 @@ pub struct SessionConfig {
     /// Run the import seam during `open()` if set (FR-8). *(v1: delegates to the sync seam, T2.4 —
     /// `open(import_on_open=true)` returns `FeatureNotWired{"sync"}` until then.)*
     pub import_on_open: bool,
-    /// Enable the non-default remote storage path (D15; off in v1).
+    /// Always false in v1 (D15). Under D51 the mode selects the storage LIBRARY, and config builds
+    /// the `Arc<dyn Storage>` before this struct exists (CF-D), so this knob cannot choose it.
+    /// Where the mode IS chosen is decided at the v1.3 lock.
     pub remote: bool,
 }
 

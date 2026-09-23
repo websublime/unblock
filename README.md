@@ -2,9 +2,9 @@
 
 # unblock
 
-**Agent-first issue tracker — MCP-first.** A local-first, offline-capable, dependency-aware issue
-store built for agent swarms. Every domain feature is a Model Context Protocol (MCP) tool, resource,
-or prompt over stdio; the `unblock` command-line binary is lifecycle/ops only.
+**Agent-first issue tracker — MCP-first.** A local-first, dependency-aware issue store built for
+agent swarms, offline-capable in local mode. Every domain feature is a Model Context Protocol (MCP)
+tool, resource, or prompt over stdio; the `unblock` command-line binary is lifecycle/ops only.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
@@ -14,18 +14,24 @@ or prompt over stdio; the `unblock` command-line binary is lifecycle/ops only.
 
 ## What is unblock
 
-unblock is the issue store an agent swarm can coordinate through without a server, an account, or the
-internet. Issues, dependencies, and atomic multi-agent claims live in a local database; agents drive
-everything over MCP.
+unblock is the issue store an agent swarm coordinates through. Issues, dependencies, and atomic
+multi-agent claims live in one database; agents drive everything over MCP. **unblock has two modes.**
+In **local mode** the database is one SQLite file on one machine, with no server, no account and no
+internet — this is the default build and the only mode any shipped binary has today. In **remote
+mode** the database is one shared instance every developer on a team connects to, over a private
+server the team runs or over Turso Cloud.
 
-> unblock is the only local, offline-capable, dependency-aware issue store with atomic multi-agent
-> claim, a versioned dependency-aware scheduler, and contention-safe swarm coordination at 250k+
-> issues — no accounts, no internet, with a credible shared-state path via libsql sync.
+> unblock is the only dependency-aware issue store that runs entirely on one local file — no account,
+> no server, no internet — with atomic multi-agent claim, a versioned dependency-aware scheduler, and
+> contention-safe swarm coordination at 250k+ issues, and a team can move that same workspace onto one
+> shared database without changing a single tool call (D51 remote mode, which is online-only).
 
-Persistence is a [libsql](https://github.com/tursodatabase/libsql) (Turso's SQLite fork) database —
-the source of truth, behind a `Storage` trait, local-file by default with a native path to
-remote/replicated sync later. A line-oriented **JSONL** export/import is an optional, git-diffable
-portability/audit feature, not a sync mechanism.
+Persistence sits behind a `Storage` trait with one implementation per mode. Local mode is a
+[libsql](https://github.com/tursodatabase/libsql) (Turso's SQLite fork) database file, embedded and
+network-free. Remote mode speaks SQL over HTTP to the shared database and keeps no local copy at all,
+so reads and writes both cross the network and there is no offline fallback — when the network is
+down, remote mode does not work. A line-oriented **JSONL** export/import is an optional, git-diffable
+portability/audit feature in both modes, not a sync mechanism.
 
 ## Why unblock
 
@@ -34,14 +40,17 @@ portability/audit feature, not a sync mechanism.
   [ci-cd-and-distribution.md](docs/plans/ci-cd-and-distribution.md) §5).
 - **Atomic multi-agent claim.** The `claim` tool assigns an issue and flips it to `in_progress` in one
   atomic step, so two agents never grab the same work.
-- **Offline-first.** No git operations, no git library linked, and no network on any normal command
-  path — the only network access is the explicit `unblock update`.
+- **Offline by default.** Local mode runs no git operations, links no git library, and touches no
+  network on any normal command path — the only network access in a default build is the explicit
+  `unblock update`. Remote mode is an explicit opt-in and needs the network for every operation.
 - **Dependency-aware scheduler.** A real dependency graph (`petgraph`) drives ready/blocked ordering,
   cycle detection, and a versioned scheduler, so agents pick genuinely unblocked work.
 
-Compared to alternatives: a GitHub MCP server needs internet + an account and has no dependency graph
-or atomic claim; `saga-mcp` has no atomic claim and is single-agent; a raw SQLite MCP has no domain
-model and no exit-code contract.
+Compared to alternatives: a GitHub MCP server needs internet and an account even for one developer,
+and has no dependency graph or atomic claim; `saga-mcp` has no atomic claim and is single-agent; a
+raw SQLite MCP has no domain model and no exit-code contract. unblock's remote mode also needs a
+server and a token, so the honest claim is narrower than "no internet" — unblock is the one that
+does not FORCE it.
 
 ## Install
 

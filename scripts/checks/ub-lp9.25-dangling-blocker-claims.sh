@@ -106,11 +106,11 @@ CONTRACT_FAMILY_RE='unblock\\?\.mcp\\?\.v1\\?\.[0-9]+'
 # everywhere instead of only where it was observed.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves: the
-# prose range `(D1..D50)` and the tokenizer's regex ALTERNATION `\bD(50|49|48|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D51 finding — the lint would stop tokenizing the
+# prose range `(D1..D51)` and the tokenizer's regex ALTERNATION `\bD(51|50|49|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D52 finding — the lint would stop tokenizing the
 # id it is being told exists. Both halves are therefore separate Q rows on the same anchor.
-RANGE_RE='D1\.\.D50'
-RANGE_ALT_RE='D\(50\|49\|'
+RANGE_RE='D1\.\.D51'
+RANGE_ALT_RE='D\(51\|50\|'
 
 # =================================================================================================
 # FORBIDDEN FRAMING — `code@mode@regex@second`
@@ -275,7 +275,7 @@ Q3@docs/plans/00-roadmap.md@ub-lp9\.25@D45@every roadmap citation of the tracker
 Q4@CLAUDE.md@^\| .docs/PRD\.md. \| Product truth@$RANGE_RE@D-range bump site 1 of 3, LOCATED on the document-map row that states the range
 Q5@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@$RANGE_RE@D-range bump site 2 of 3, LOCATED on the class-(a) statement — the ONE place in that file allowed to quote the live range, so no explanatory prose can satisfy this pin
 Q6@xtask/src/doc_lint.rs@Spec tokenizes@$RANGE_RE@D-range bump site 3 of 3, half 1 of 2: the PROSE range on the tokenizer comment line
-Q7@xtask/src/doc_lint.rs@Spec tokenizes@$RANGE_ALT_RE@site 3 of 3, half 2 of 2: the TOKENIZER ALTERNATION on that same line. Pinning only the prose is how this site rots into an undefined-D51 finding — the lint would stop tokenizing the id it is being told exists
+Q7@xtask/src/doc_lint.rs@Spec tokenizes@$RANGE_ALT_RE@site 3 of 3, half 2 of 2: the TOKENIZER ALTERNATION on that same line. Pinning only the prose is how this site rots into an undefined-D52 finding — the lint would stop tokenizing the id it is being told exists
 "
 
 # =================================================================================================

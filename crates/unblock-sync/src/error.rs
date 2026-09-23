@@ -121,8 +121,8 @@ pub enum SyncError {
         found: String,
     },
 
-    /// A semantic sync conflict (defined now; used at v1.3 for sync-conflict
-    /// diagnostics — no reconciliation, roadmap §4).
+    /// A semantic sync conflict on the JSONL import path (D5). Nothing syncs in remote
+    /// mode, so this carries no remote-mode meaning (D51).
     #[snafu(display("sync conflict: {detail}"))]
     SyncConflict {
         /// The conflict detail.

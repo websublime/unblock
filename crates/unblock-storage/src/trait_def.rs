@@ -27,16 +27,17 @@ use crate::filters::{DeletePlan, IssuePatch};
 /// The backend-agnostic storage contract (spine §3.2).
 ///
 /// Async throughout (`#[async_trait]`); `Send + Sync` so it can be shared as `Arc<dyn Storage>`
-/// across tokio tasks. The only backend-aware implementation is libsql (T0.6); a future backend
-/// reuses the T0.7 contract suite. **No backend type appears in any signature** — failures surface
-/// as [`StorageError`] (spine §6 rule 2).
+/// across tokio tasks. The backend-aware implementations are one per product mode (D51) — libsql for
+/// LOCAL mode (T0.6), SQL-over-HTTP for REMOTE mode at v1.3; both reuse the T0.7 contract suite. **No
+/// backend type appears in any signature** — failures surface as [`StorageError`] (spine §6 rule 2).
 ///
 /// # General invariants (honoured by the T0.6 impl, verified by the T0.7 suite)
 ///
 /// - **Transactional audit (FR-9):** every mutation writes its [`Event`](unblock_model::Event)(s)
 ///   in the **same transaction** as the row change — rows and audit commit together or not at all.
-/// - **No git, no network (NFR-6):** no method shells to git or links a git library; reads are
-///   plain WAL reads. The `remote` path (T0.6+, non-default) is the only network surface.
+/// - **No git, and no network in LOCAL mode (NFR-6 git; NFR-17 network):** no method shells to git or
+///   links a git library, and local reads are plain WAL reads. The `remote` feature selects REMOTE mode,
+///   this crate's only network surface (D51).
 /// - **Reads never serialize:** the write-serialization permit lives in `unblock-engine` (D14);
 ///   storage reads run concurrently against WAL readers (FR-10).
 /// - **Storage never imports policy (CF-11):** ready/blocked ordering is deterministic for stable

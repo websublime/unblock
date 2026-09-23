@@ -14,7 +14,7 @@ codes are stable, a breaking change → 2.0.0. (Original source for reference on
 
 | Doc | Role |
 |---|---|
-| `docs/PRD.md` | Product truth — decisions (§4 D1..D50), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
+| `docs/PRD.md` | Product truth — decisions (§4 D1..D51), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
 | **unblock (MCP)** — tracker | **System of record for tasks** (dogfooded) — next-ready/status/deps live here, not in a doc. Git record: `.unblock/issues.jsonl`; wiring + tool surface: `.mcp.json` / `AGENTS.md` / `unblock://capabilities`. |
@@ -71,9 +71,12 @@ session** by default (template: `docs/plans/templates/drift-gap-report.md`).
 - Config is **TOML**. Output: **structured to stdout, diagnostics to stderr** (NFR-14) — **D48 carve-out: a
   command whose stdout is a protocol channel (`unblock mcp`, once the server starts) reports on stderr instead,
   full payload, same exit code (PRD §4 D48)**; output shapes are snapshot-pinned (`insta`).
-- **No git operations, no git library linked, no network on any normal command path** (D13/NFR-6). Network only
-  on explicit `unblock update` (axoupdater runs the dist installer; SHA256-checksum-verified before swap). libsql `remote` feature is **off by default**.
-- libsql is the source of truth; JSONL is an **optional** export/import (no 3-way merge, no locks) — model B (D5).
+- **No git operations, no git library linked** (D13/NFR-6). **No network on any normal command path in LOCAL
+  mode — the default build** (D13/NFR-17). Two opt-in exceptions remain — `unblock update` (axoupdater runs
+  the dist installer, SHA256-verified before swap) and **remote mode** behind the non-default `remote`
+  feature (D51). libsql stays `features = ["core"]` in every build.
+- **The database** is the source of truth; JSONL is an **optional** export/import (no 3-way merge, no
+  locks) — model B (D5).
 
 ## Testing (`cargo test`; no Go/Encore tooling here)
 

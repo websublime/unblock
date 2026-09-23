@@ -85,16 +85,16 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; e
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
 # The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
-# the day a D51 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# the day a D52 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
 # goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves, the
-# prose range `(D1..D50)` and the tokenizer's regex ALTERNATION `\bD(50|49|48|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D51 finding — the lint would stop tokenizing
+# prose range `(D1..D51)` and the tokenizer's regex ALTERNATION `\bD(51|50|49|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D52 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D50'
-RANGE_ALT_RE='D\(50\|49\|'
+RANGE_RE='D1\.\.D51'
+RANGE_ALT_RE='D\(51\|50\|'
 
 # The LIVE published contract version. D50 does NOT move it (see the header), so this row is the
 # affirmative record of that and a silent bump riding this decision goes red.
@@ -214,7 +214,7 @@ P7@.unblock/issues.jsonl@ub-wx3@sibling residual, unmoved by D50 — rmcp's post
 #      this filename with `RANGE_RE`, and requires the `RANGE_ALT_RE` half beside it. A bare token is
 #      satisfied by §3's other mention of this script, so dropping the entry leaves it green —
 #      MEASURED. Anchoring on the entry rather than on the list's last line keeps the row correct the
-#      day a D51 entry is appended after it.
+#      day a D52 entry is appended after it.
 # Q44  is the `d48` HALF of the SIBLING ROW TEXT clause (14) corrects, and it is the only executable
 #      pin that clause has. `d48`'s `P9` reason string said the premature frame still kills the
 #      server, which this decision makes false; nothing else in the tree would notice a later edit

@@ -450,9 +450,11 @@ labels/comments, scheduler, coordination, gates, saved-queries (plan §6).
 shared state. **(a) Felt dogfood demand** — the team already **hand-builds epics, milestones and priorities**
 to run unblock's own roadmap today; a first-class planning layer is the capability most missed in daily use, so
 it earns the next committed slot. **(b) Schema-before-distribution** — the planning layer is an **additive
-schema change** (`Issue.milestone_id` + the Milestone and Goal entities); settling it on **one cheap local file
-BEFORE replication** is far cheaper than migrating a schema across a primary + version-skewed embedded replicas
-once shared state (v1.3) is live. Land the schema while there is exactly one writer, then distribute it.
+schema change** (`Issue.milestone_id` + the Milestone and Goal entities); settling it while **one binary owns
+one local file** is far cheaper than migrating it inside the one shared database that a version-skewed fleet
+of binaries is connected to, once remote mode (v1.3) is live. D51 makes that hazard HARDER rather than softer,
+so it strengthens this argument instead of retiring it. Land the schema while there is exactly one writer, then
+distribute it.
 Sequencing still holds downstream: the v1.5 scheduler v2 consumes milestone due dates / critical path — the
 planning layer lands first precisely so those ranking signals exist (roadmap §6).
 
@@ -487,52 +489,90 @@ table roadmap §9 updated accordingly.)
 
 ---
 
-## 4. v1.3 — Shared state: one primary, many machines (mixed human+agent teams)  **[PROPOSED]**
+## 4. v1.3 — Shared state: remote mode, one shared database (mixed human+agent teams)  **[PROPOSED]**
 
-**Theme:** Shared state for **mixed human+agent teams** (PRD §4 D28): ONE logical issue store shared with many
-machines — dev laptops, CI runners, cloud agents — via libsql **embedded replicas**. Not merely "turn on the
-libsql feature": v1.3 is the release where unblock becomes a team product over shared state. The local-only
-single-workspace deployment is the initial test phase, not the product's end state.
+**Theme:** unblock has two modes and v1.3 is the release that adds the second (PRD §4 D51). In **local mode**
+the workspace is one SQLite file on one machine — no network, no server, no account — which is what every
+shipped binary does today. In **remote mode** the workspace is one database on a server and every developer
+connects to it, so they all see the same data. Local versus remote is the ARCHITECTURE axis, because the two
+modes need two different client libraries with no overlap; which server holds the database is a DEPLOYMENT
+choice below that axis. Shared state is the product's committed direction (PRD §4 D28), not an optional
+add-on — the local-only single-workspace deployment is the initial test phase, not the end state.
 
-**Why now:** D15 deliberately ships the remote/replica feature **off by default** in v1 (deferred as later
-"shared-state territory" per the project brief). The seam exists; v1.3 lights it up — and D28 makes shared state
-the product's committed direction, not an optional add-on. This is the single largest deferred capability, taken
-up **once the local core is hardened AND the planning schema (v1.2) is settled** — schema-before-distribution
-(PRD §4 D41): the additive planning tables are far cheaper to land on one local primary than to migrate across
-version-skewed replicas afterward. **A mandatory "Turso Sync vs embedded replicas — fresh Rust-SDK/engine
-maturity check" gate is folded into the v1.3 lock** (embedded replicas are now the vendor-*legacy* path; Turso
-Sync is the vendor-recommended-but-*beta* path — the lock re-runs this call with fresh research). **A SECOND
-axis — research this FIRST (Miguel, 2026-07-20; tracked as issue `ub-w3a`):** WHERE the primary lives —
-**self-hosted libsql/sqld** (run the libsql server yourself per its USER_GUIDE —
-`github.com/tursodatabase/libsql/blob/main/docs/USER_GUIDE.md` — Docker-local to experiment NOW, self-deploy
-later; company data stays self-governed) **vs the managed Turso Cloud**. Miguel's steer: prefer self-hosted
-(kick off a Docker-local spike early to de-risk the largest lift); Turso Cloud is the fallback if self-hosting
-isn't viable.
+**Why now:** D15 ships the `remote` cargo feature OFF by default in v1, and D51 keeps that name, because
+"remote mode" is now the product's own word for what the feature turns on. The seam exists; v1.3 lights it up.
+This is the single largest deferred capability, taken up **once the local core is hardened AND the planning
+schema (v1.2) is settled** — schema-before-distribution (PRD §4 D41). D51 makes that hazard HARDER rather than
+softer, because migrating a schema inside the one shared database that a version-skewed fleet of binaries is
+connected to is worse than migrating one local file (roadmap §3). D41's guardrail pins this release to the
+slot immediately after planning.
 
-**Tech default (decided 2026-07-07; re-confirmed at v1.3 lock):** build v1.3 on **libsql embedded replicas** —
-production-supported today, and the vendor's own "battle-tested foundation" recommendation for mission-critical
-use. Honest dated note (as of 2026-07): the vendor now recommends the newer **Turso Sync** (built on the beta
-Turso Database engine) for NEW sync projects — i.e. embedded replicas are the vendor-legacy path. The **Turso
-Sync migration is an explicit v2+ candidate** (roadmap §7), kept cheap behind the `Storage` trait + the NFR-16
-contract suite. The embedded-replicas choice is **re-confirmed at v1.3 lock with fresh research** (libsql crate
-status, Turso Sync maturity). Sources (as of 2026-07): docs.turso.tech/libsql, github.com/tursodatabase/turso,
-github.com/tursodatabase/libsql, turso.tech blog (sync-benchmark, offline-writes beta, local-first).
+**Mechanism (decided 2026-09-22; PRD §4 D51):** remote mode speaks **SQL over HTTP** through the
+`turso_serverless` crate (0.1.3). That crate carries no SQL engine, depends on `reqwest`, `serde`, `tokio`,
+`base64`, `bytes`, `futures` and `thiserror`, and its only constructor opens a remote connection, so it cannot
+open a local file even in principle. It audits clean — zero advisories and zero warnings across 183 transitive
+crates, measured 2026-09-22. It speaks SQL-over-HTTP protocol **version 3** and hardcodes that path with no
+configuration knob, which is why it addresses sqld and Turso Cloud but returns 404 against
+`tursodb --sync-server`, the vendor's 0.0.1 reference implementation, which serves only the version-2
+endpoint. Local mode keeps the libsql crate at `features = ["core"]`, an embedded engine with no network,
+unchanged.
+
+**Embedded replicas are EXCLUDED, and the reason is recorded rather than asserted.** Their only Rust client is
+the libsql crate behind its `replication` feature, and that crate fails this repository's own required
+advisory job with five vulnerabilities that cannot be bumped past, because libsql 0.9.30 pins the older majors
+of `hyper`, `hyper-rustls` and `tonic`. Four of the five sit in the `rustls-webpki 0.102.x` family, which this
+repository's tree does not carry — its committed `Cargo.lock` pins `rustls-webpki 0.103.15` — so adopting that
+route would reintroduce an advisory class this repository is free of. The libsql crate's own `remote` feature
+reports the same five, so the pure-remote libsql route is closed for the same reason. **Turso Sync is not
+adopted either.** Nothing is rescheduled by this decision — both mechanisms are out, and the v2+
+backend-evolution row (roadmap §7) holds no deferred work from here.
+
+**Servers — a deployment choice with two peers.** The team either runs a **private sqld** itself or uses
+**Turso Cloud**. The application code does not distinguish them, because only the URL and the token differ, so
+both are supported and both are documented and tested. **The private sqld option carries a dated status note,
+as of 2026-09-22, and each fact carries its own source so a later reader can retire it.** The vendor has put
+that server in deep maintenance and no longer runs it in production (*libsql repository issue 2254,
+2026-07-12*). Its client-facing port carries no transport encryption, because every encryption flag the server
+exposes is for inter-node traffic only, so a proxy must terminate TLS in front of it (*the server's own
+configuration surface, read 2026-09-22*). Its authentication fails OPEN when it is not configured, and the
+vendor's official container entrypoint passes no authentication arguments, so it must be configured explicitly
+(*the server default and that entrypoint, read 2026-09-22*).
 
 **Goal:** multiple humans and agents across machines share one logical issue store with equal stakeholder
-footing (PRD §4 D28): reads stay local (embedded replica), writes serialize at the primary, credentials are
-handled safely — and the non-spin guarantee extends to the remote path (NFR-3's secondary jittered-backoff
-fallback finally exercised in anger).
+footing (PRD §4 D28), and credentials are handled safely. The non-spin guarantee extends to remote mode, where
+none of local mode's mechanisms exists — no WAL, no `busy_timeout`, no local write lock. NFR-3's
+jittered-backoff arm carries it there instead, primary in remote mode rather than the secondary arm it is
+locally.
 
-**Offline stance (decided 2026-07-07):** in a remote workspace, **writes require network** — a failed remote
-write is a clean structured error (`retryable=true`), never a silent queue; **reads stay local** via the
-embedded replica, so **offline = read-only**. **NO queue-and-reconcile in v1.3** (integrity-first: correctness
-over convenience). Offline write reconciliation is revisited only if/when Turso Sync is adopted (roadmap §7 —
-it designs for that natively).
+**No offline (decided 2026-09-22; PRD §4 D51 — this SUPERSEDES the 2026-07-07 offline stance outright).** There
+is local mode or online mode and nothing in between. In remote mode the tool needs the network for every
+operation, **reads included**. No cache is built, no mirror is maintained, and no read falls back to a stale
+copy. All three cache options that were on the table are closed — the `turso` crate's pull-only sync, the
+libsql embedded replica, and a mirror of our own fed by the append-only events table. **The accepted
+consequence is stated once here rather than discovered later.** A developer with no signal cannot read their
+own issue tracker in remote mode, and for an agent-first tool an agent loop stops rather than degrades. What
+it buys is equally real — one source of truth, no reconciliation, no staleness semantics, and no second engine
+in the binary. A failed write stays what it always was, a clean structured error (`retryable=true`), never a
+silent queue. There is no queue-and-reconcile at v1.3 and none is deferred to a later mechanism, because with
+no local copy there is never anything to reconcile.
 
-**Concurrency (D14 extension, decided 2026-07-07; the D14 amendment lands at v1.3 lock):** per-replica single-writer stays; **global serialization
-at the primary** — the atomic claim (FR-2) resolves cross-machine at the primary. Explicit performance
-contract, stated so nobody expects otherwise: **all writes serialize at the primary, reads scale via replicas,
-no multi-master semantics.**
+**Concurrency (the D14/D31 extension decided 2026-07-07, now satisfied by construction under D51):** every
+write in a remote workspace goes to the shared database and the server serializes it. The performance contract
+is unchanged and now holds by construction rather than by discipline — **all writes serialize at the shared
+database, which is both the primary and the only copy, and there are no multi-master semantics**.
+`BEGIN IMMEDIATE` held at the server does across machines what the D31 `.unblock/.write.lock` advisory lock
+does within one machine. What was measured is that concurrent clients are serialized by the server. The server
+cannot tell where a connection originates, so the cross-machine step follows; resolving the atomic claim
+(FR-2) cross-machine is a v1.3 obligation rather than a measured result.
+
+**Evidence (measured 2026-09-22; tracker `ub-w3a`):** one client crate ran against a local libsql-server in
+Docker and against a real Turso Cloud database, and passed the same three probes on each, differing only in
+URL and token. A remote write was read back by an independently built client, with no local database file
+anywhere. Identifier allocation under eight concurrent writers doing twelve allocations each committed 96
+rows, 96 distinct, exactly 1 to 96, with no gap and no conflict — and a `BEGIN DEFERRED` control run produced
+12 commits and 84 conflicts, so the harness is known to detect the race it claims to rule out. An issue row
+and its audit event committed together or rolled back together, with the failure path proven by a NOT NULL
+violation rolling the row back.
 
 **Distribution pattern:** remote stays a **non-default Cargo feature**; the **`dist` release artifacts enable
 it** (dev `cargo build` stays slim — NFR-10 —; shipped binaries are full). Final call at v1.3 lock. (The v1.4
@@ -541,41 +581,99 @@ local TUI does **not** reuse this pattern — it is 100% Rust with no Cargo feat
 ### Lands (features)
 | Item | Capability | Trace |
 |---|---|---|
-| `[NEW]` Remote/replica feature GA (embedded replicas) | Promote the non-default libsql remote/embedded-replica feature to a supported, documented build; embedded-replica local-read + remote-write-at-primary | D1/D15/D28, NFR-10 |
+| `[NEW]` Remote mode GA | Promote the non-default `remote` feature to a supported, documented build — a SECOND `Storage` implementation beside the libsql one, `SqlOverHttpStorage` in `src/sql_over_http/`, reaching one shared database over SQL-over-HTTP. Every read and every write crosses the network | D15/D28/D51, NFR-10 |
 | `[NEW]` Join-existing-workspace onboarding | A teammate clones the repo and connects to the existing shared store (e.g. an `init --remote` flow / committed-config detection) | D28, FR-14 |
-| `[NEW]` Config split | Committed/shareable project config (remote URL, sync interval — FR-13 startup-only keys) **vs** per-user secrets (auth token ONLY via `UNBLOCK_*` env or OS keychain, NFR-18 — never `config.toml`) **vs** local non-committed state (`unblock.db`) | FR-13, NFR-18 |
-| `[NEW]` Credential handling | libsql auth tokens via `UNBLOCK_*` env **or** OS keychain only — never `config.toml` (NFR-18 already mandates this; v1.3 implements the keychain path) | NFR-18 |
-| `[NEW]` Self-hosted sqld path | Self-hosted sqld **documented AND tested** as the data-governance path (company data need not go to Turso Cloud); the remote contract suite (`wiremock`) covers it — same protocol | D28, NFR-16 |
+| `[NEW]` Config split | Committed/shareable project config (the remote database URL — FR-13 startup-only keys) **vs** per-user secrets (auth token ONLY via `UNBLOCK_*` env or OS keychain, NFR-18 — never `config.toml`) **vs** local non-committed state (`unblock.db`, which exists in local mode only) | FR-13, NFR-18 |
+| `[NEW]` Credential handling | The server's auth token via `UNBLOCK_*` env **or** OS keychain only — never `config.toml` (NFR-18 already mandates this; v1.3 implements the keychain path). One credential path serves both server options, since the client carries whatever token the chosen server issues | NFR-18, D51 |
+| `[NEW]` Private sqld server | **Documented AND tested** as the self-governed path (company data need not leave the team's own infrastructure); the remote contract suite (`wiremock`) covers it. It ships with the dated status note above, restated here because a reader choosing a server meets this table first — as of 2026-09-22 the vendor has put that server in deep maintenance and no longer runs it in production (*libsql repository issue 2254, 2026-07-12*), its client-facing port carries no transport encryption because every encryption flag it exposes is for inter-node traffic only (*the server's own configuration surface, read 2026-09-22*), and its authentication fails open when unconfigured while the vendor's official container entrypoint passes no authentication arguments (*the server default and that entrypoint, read 2026-09-22*) | D28/D51, NFR-16 |
+| `[NEW]` Turso Cloud | **Documented AND tested** as the managed path, a PEER of the private sqld option rather than a fallback — same client, same protocol, and only the URL and the token differ | D28/D51, NFR-16 |
 | `[NEW]` Actor-attribution conventions | Distinguish humans from agents in `UNBLOCK_ACTOR` values; feeds FR-22 audit and FR-18 coordination status ("is this claim held by a person or a dead agent?") | FR-22, FR-18, D28 |
 | `[NEW]` Documented no-ACL limitation | Whoever holds the token has full write within the team trust domain; fine-grained auth/ACL is **explicitly v2+** (roadmap §7) — do not promise it | NFR-18 |
-| FR-13 sync layers | Config precedence extended for remote endpoints / sync intervals (startup-only keys) | FR-13 |
-| `[NEW]` Sync-mode health | `doctor` + health taxonomy extended: replica lag, sync conflicts, WAL-on-remote integrity; "Drifted" gains a remote meaning | FR-16 (full) |
-| `[NEW]` Multi-workspace discovery | Limited multi-workspace handling for the shared case (one operator, several synced workspaces) — **explicitly NOT** the dropped town/mayor routing (FR-24/D11); scoped to remote-sync addressing only | distinct from D11 |
-| `[NEW]` Resilience GA | The remote-only jittered backoff (`backon`/`tokio-retry`, never archived `backoff 0.4`) + `failsafe` circuit-breaker validated under a remote contention lab; `wiremock` coverage promoted to a remote contract suite | NFR-3, NFR-16 |
-| `[NEW]` Concurrency contract (D14 extension) | Per-replica single-writer; global serialization at the primary; the atomic claim (FR-2) resolves cross-machine at the primary; **no multi-master semantics** | D14, FR-2 |
-| `[NEW]` Mixed-actor remote contention lab | Extend the NFR-3 lab: agent swarms + sporadic human writes against one primary | NFR-3, D28 |
+| FR-13 remote keys | Config precedence extended for the remote database URL (startup-only keys). There is no sync-interval key, because nothing syncs | FR-13 |
+| `[NEW]` Remote-mode health | `doctor` + the health taxonomy answer the questions a remote workspace actually raises — is the database reachable, is the token valid, did the endpoint or the protocol reject the request, and does this binary's schema match the shared one. Replica lag, sync conflicts and WAL-on-remote integrity are gone with the replica. The shape is decided at lock (open question 6 below) | FR-16 (full) |
+| `[NEW]` Multi-workspace discovery | Limited multi-workspace handling for the shared case (one operator, several remote workspaces) — **explicitly NOT** the dropped town/mayor routing (FR-24/D11); scoped to remote-workspace addressing only | distinct from D11 |
+| `[NEW]` Resilience GA | The remote-only jittered backoff (`backon`/`tokio-retry`, never archived `backoff 0.4`) + `failsafe` circuit-breaker validated under a remote contention lab; `wiremock` coverage promoted to a remote contract suite — a plain HTTP client fits `wiremock` better than a replica ever did | NFR-3, NFR-16 |
+| `[NEW]` Concurrency contract (D14/D31 extension) | One write path per workspace — the server serializes every write, the atomic claim (FR-2) resolves cross-machine there, and **no multi-master semantics** holds by construction, because no machine keeps a copy | D14, D31, FR-2, D51 |
+| `[NEW]` Mixed-actor remote contention lab | Extend the NFR-3 lab: agent swarms + sporadic human writes against one shared database | NFR-3, D28 |
 
 ### Crates touched
-`unblock-storage` (embedded-replica impl + sync semantics — the heart of this release), `unblock-sync`
-(reconciliation seams if any), `unblock-health` (sync diagnostics), `unblock-config` (remote endpoints,
-config split + keychain credential resolution), `unblock-engine` (write topology at the primary),
-`unblock-mcp` (sync-status resources), `unblock-cli` (join-existing-workspace onboarding flow).
-`unblock-model`/`unblock-error` only if a sync-state type or error variant is needed.
+`unblock-storage` is the heart of this release — a SECOND `Storage` implementation beside the libsql one, with
+the shipped `LibsqlStorage` type unrenamed. `unblock-config` resolves the remote database URL, the
+committed-versus-per-user config split and the keychain credential path, and it holds the reserved `backend`
+startup key that is one candidate home for selecting the mode — which of the two candidates wins is open
+question 2 below. `unblock-engine` keeps its write path unchanged in shape, because the server rather than the
+engine is what serializes across machines. `unblock-cli` gains the join-existing-workspace onboarding flow.
+`unblock-health` extends the taxonomy over remote-mode findings, whose shape is open question 6; the probing
+itself cannot live there, because D29 keeps `run_doctor` pure, non-async and storage-free. `unblock-mcp`
+surfaces remote-mode status only if the lock decides it should — also open question 6.
+`unblock-model`/`unblock-error` only if a connection-state type or an error variant is needed.
 
-### Risks / open questions for review *(updated 2026-07-07)*
+**`unblock-sync` takes NO v1.3 work.** The entry that used to reserve "reconciliation seams if any" is gone.
+Under D51 no copy of the database exists anywhere, so nothing is ever reconciled and those seams will never be
+built. The crate keeps exactly its v1 job — the optional D5 JSONL export/import plus the NFR-13 reliability
+emitters — and the mode does not change it.
+
+### Risks / open questions for review *(updated 2026-09-22)*
 - Keychain portability across Linux/macOS/Windows (NFR-11) — may need per-OS backends.
-- TLS/HTTP transitive surface only enters builds that opt into remote (NFR-10 must stay green on default build).
-- Lock-time confirmations: the embedded-replicas-vs-Turso-Sync default (fresh research at v1.3 lock) and the
-  "dist artifacts enable `remote`" distribution call.
-- The D14 **"single-MCP-server per workspace"** wording: the **local** (single-machine) half is **RESOLVED by D31**
-  (2026-07-09) — child-per-client is the supported topology, cross-process serialization restored via the
-  `.unblock/.write.lock` advisory lock — so the v1.3 topology review now covers only the **cross-machine
-  primary-serialization** half; the **local two-writer / co-tenancy** case surfaced at v1.4 (a TUI and an agent
-  run on one machine — roadmap §5) is likewise covered by D31, not deferred.
-- *Answered 2026-07-07 (dropped):* the offline-first question — decided above (remote writes require network;
-  reads stay local; no queue-and-reconcile in v1.3).
-- *Deferred 2026-07-07 (dropped as a v1.3 question):* multi-writer reconciliation (LWW-vs-oplog) — moot under
-  the primary-serialized write contract; deferred with the Turso Sync v2+ candidate (roadmap §7).
+- TLS/HTTP transitive surface only enters builds that opt into remote (NFR-10 must stay green on the default
+  build). Under D51 the HTTP client is a DIRECT dependency of that feature rather than a transitive one, which
+  makes the confinement easier to check and more important to keep.
+- Lock-time confirmation: the "dist artifacts enable `remote`" distribution call. *(The
+  embedded-replicas-versus-Turso-Sync default that stood beside it is CLOSED by D51 — both mechanisms are
+  excluded, for the reasons stated above.)*
+- *Answered 2026-07-09 and still standing:* the D14 **"single-MCP-server per workspace"** wording. The
+  **local** (single-machine) half is **RESOLVED by D31** — child-per-client is the supported topology, and
+  cross-process serialization is restored via the `.unblock/.write.lock` advisory lock — and the **local
+  two-writer / co-tenancy** case surfaced at v1.4 (a TUI and an agent on one machine — roadmap §5) is covered
+  by that same decision. *Superseded 2026-09-22 (D51):* the **cross-machine** half is no longer a review item.
+  A remote workspace has no local database file for two processes to contend over, and the server serializes
+  writes across machines, so the topology review this list used to promise is closed on both halves.
+- *Answered 2026-07-07, then SUPERSEDED 2026-09-22 (PRD §4 D51):* the offline-first question. The 2026-07-07
+  answer was that reads stay local via the embedded replica, so offline meant read-only. That answer is dead —
+  remote mode keeps no local copy, and offline there means the tool does not work at all. The no-offline
+  paragraph above is the live stance; this line records only that the old one was superseded, not deferred.
+- *Dropped 2026-07-07, now moot for a DIFFERENT reason:* multi-writer reconciliation (LWW-vs-oplog). It was
+  moot under the primary-serialized write contract and it is now moot by construction — one database, one
+  write path, nothing to reconcile. It is deferred to nothing, and the deferral target this line used to name
+  is gone.
+
+**Routed to the v1.3 lock by the D51 cascade (2026-09-22).** Each is open for a stated reason, and none is
+answered here.
+1. **NFR-19 has no remote-mode reading.** Its forward-migration promise — a released binary opens any earlier
+   released binary's database by migrating it forward through the `PRAGMA user_version` ladder — assumes one
+   writer on one file. In remote mode the schema lives in the one shared database that other developers'
+   processes are using concurrently. Three things are undecided — who runs the ladder, what an OLDER binary
+   does when it meets a NEWER shared schema (NFR-19 promises only the forward direction), and whether the
+   version pragma is addressable over the protocol at all.
+2. **Where the mode is SELECTED.** `unblock-engine` carries a `remote` boolean on its session config, while
+   storage construction lives in `unblock-config`, which already reserves a `backend` startup key held for v1.3
+   backend selection. That split now decides which library runs, because the mode selects the LIBRARY rather
+   than setting a flag on one library. Which of the two owns the choice, and what happens when both are set,
+   is undecided.
+3. **The required advisory and dependency-ban jobs will not SEE a feature-gated client.** `deny.toml` sets
+   `all-features = false`, and `cargo-audit` runs the same default resolution, so a client crate that appears
+   only under the `remote` feature is invisible to both required jobs. The spike's clean audit was measured on
+   a scratch crate, not on this repository's own jobs, and the feature-on audit leg that would close the gap
+   is unspecified.
+4. **The `no-network` CI job needs a SECOND whitelist entry.** That required job (ci-cd §2) scans the whole
+   workspace and asserts that no networking symbol links into any crate except the `self-update`-gated
+   axoupdater path in `unblock-cli`. Remote mode puts an HTTP client inside `unblock-storage` behind a
+   feature, so the whitelist must grow a second, explicitly feature-gated entry — otherwise a required job
+   goes red for a reason unrelated to its own decision.
+5. **The hardcoded protocol path has three named exits and none is taken.** PRD §14.2's RK-8 records that the
+   client hardcodes the SQL-over-HTTP version-3 path with no configuration knob, so remote mode addresses sqld
+   and Turso Cloud but returns 404 against `tursodb --sync-server`, the vendor's 0.0.1 reference
+   implementation, which serves only the version-2 endpoint. Three exits are named and none is yet taken — ask
+   upstream for a configurable endpoint path or a v2 fallback; speak the protocol directly over the `reqwest`
+   already in the lockfile; or accept that remote mode targets a v3 server. The lock picks one and re-checks
+   RK-8's dated maturity facts.
+6. **What replaces the replica-lag health row.** With one shared database there is no replica to lag, no sync
+   to conflict and no drift to detect, so the v1.1 "Drifted" level gains no remote meaning — it has no remote
+   referent at all. The real questions are reachability, token validity, endpoint and protocol errors, and
+   schema skew between a developer's binary and the shared database. Designing that is a lock job, and it
+   carries a placement constraint. The doctor body is pure, non-async and storage-free under D29, so a network
+   probe cannot live inside `unblock-health` and must arrive as data from the engine, the way integrity-check
+   rows already do.
 
 ---
 
@@ -583,10 +681,11 @@ config split + keychain credential resolution), `unblock-engine` (write topology
 
 **Theme / purpose (Miguel's framing):** an **offline, local, terminal-native** window for the team's
 **developers** to **visualize the state of the project/workspace** — a rich-DX point of visibility *inside* the
-dev workflow (no browser, no context-switch). The same "visualize the state" purpose as the retired web-local
-proposal, now terminal-native. Reads are always local (the local DB, or the local replica in remote
-workspaces); in remote workspaces writes follow the v1.3 stance (network required — roadmap §4). **Phase 1 is
-read-only visualization.**
+dev workflow (no browser, no server, no context-switch). The same "visualize the state" purpose as the retired
+web-local proposal, now terminal-native. **Offline holds in LOCAL mode only.** In a **local-mode** workspace
+every read and write hits the local database and the TUI touches no network at all. In a **remote-mode**
+workspace the TUI is not offline, because every read and write crosses the network (roadmap §4), so with no
+signal a phase-1 screen has nothing to show. **Phase 1 is read-only visualization.**
 
 **Architecture (ratified 2026-07-08):** the TUI is an **MCP client over stdio** — it spawns `unblock mcp` as
 a child process and speaks MCP over **stdio, exactly as Claude Code / agents do today**. There is **no second
@@ -663,10 +762,11 @@ stdio — no new transport). **No Node build stage, no npm gate** (removed with 
   `Semaphore` (D14) serializes within one MCP server, **not across two**, so cross-process serialization is the
   **restored `.unblock/.write.lock` advisory lock (D31)**: this within-machine co-tenancy is now the **SUPPORTED**
   topology (child-per-client, D31), correct-by-construction, with `BEGIN IMMEDIATE` + native `busy_timeout`
-  (NFR-3) as the WAL-level backstop and NFS/SMB the documented residual. This is **distinct** from the
-  cross-machine v1.3 case (one local MCP server per machine; all writes serialize at the shared primary — roadmap §4,
-  PRD §8.2). The v1.3 topology review the roadmap already promises (roadmap §4) now covers only the cross-machine
-  primary-serialization half; the local two-writer case is **RESOLVED by D31**.
+  (NFR-3) as the WAL-level backstop and NFS/SMB the documented residual. This bullet is about a **local-mode**
+  workspace, and it is **distinct** from the remote-mode case, where no local database file exists for two
+  processes to contend over and the server serializes every write across machines (roadmap §4, PRD §8.2). The
+  local two-writer case is **RESOLVED by D31**, and D51 settles the cross-machine half by construction, so the
+  v1.3 topology review this list used to promise is closed on both halves.
 
 ---
 
@@ -718,13 +818,13 @@ locked decision, need a concrete external demand, or imply a materially larger p
 
 | Candidate | Notes / why later |
 |---|---|
-| Cross-project / multi-repo routing (the original's town/mayor) | **Explicitly dropped in v1 (FR-24/D11)**; reintroduce *only* on a concrete multi-repo demand, and likely in a shape informed by v1.3 multi-workspace sync rather than the original's elaborate mayor design |
-| **Turso Sync / Turso Database backend migration** | Storage backend evolution behind the `Storage` trait + the NFR-16 contract suite. The vendor's recommended path for NEW sync projects (as of 2026-07), but its engine is beta — revisit when the engine leaves beta. Also the **only path to offline-write reconciliation** (the v1.3 stance — roadmap §4 — defers queue-and-reconcile to this candidate) |
+| Cross-project / multi-repo routing (the original's town/mayor) | **Explicitly dropped in v1 (FR-24/D11)**; reintroduce *only* on a concrete multi-repo demand, and likely in a shape informed by v1.3 remote-scoped multi-workspace addressing rather than the original's elaborate mayor design |
+| **Storage backend evolution — a sync engine (Turso Sync or a successor)** | Backend evolution rides behind the `Storage` trait + the NFR-16 contract suite, so it stays cheap and stays uncommitted. D51 excludes every sync mechanism from v1.3 — remote mode speaks SQL over HTTP to one shared database and keeps no local copy — so adopting one later would be a NEW decision with its own motivation, not a deferral landing here. **Nothing is parked in this row** — with no offline mode there is no queue-and-reconcile question waiting on a mechanism to carry it |
 | **Fine-grained auth/ACL for shared stores** | The future answer to the v1.3 documented no-ACL limitation (roadmap §4: token = full write within the team trust domain); needs concrete team-scale demand and likely server-side enforcement |
-| **Commercial web dashboard (PRO)** | A **separate commercial product** (NOT the OSS binary): a **static SPA** + a **client-minted read-only Turso token** (`data_read` fine-grained permission — minted by the **team's own Turso account / control plane** (the same trust domain that already holds write in v1.3 — self-hosted `sqld` deployments mint the equivalent `sqld` JWT/Hrana read grant) as a short-lived read grant, *not* by any credential-custodying PRO backend; `data_read` is a Turso-*platform* token scope, not unblock's deferred v2+ ACL, whose future per-user scoping is the fine-grained-ACL row above — held in the browser via `@libsql/client/web` over Hrana/HTTP, so **we never custody credentials, never proxy data**) + **`unblock-model` + `unblock-policy` compiled to WASM** (viable precisely because NFR-15 keeps L0/L1 pure — no tokio/I/O/petgraph-in-policy), so the domain logic that actually lives in those crates — the ready **sort** (the hybrid re-rank comparator, `unblock-policy`) and the scheduler **explanations** — comes from the **same crates**, not reimplemented. The **storage-layer** derivations do NOT: `blocked` (a live 3-pass SQL computation incl. a fixpoint blocked-parent propagation), the ready **filter** (`id NOT IN <blocked set>`) and the epic **rollups** are `unblock-storage` (L2) SQL, not model/policy (PRD §8.1 / `01-design-spine.md` §3.2), so the browser **re-issues that storage SQL directly against the read-only Turso replica** (a future `unblock-storage`-compiled-to-WASM path could later move it in-process). (**FR-9 preserved — the PRO offers no *mutation* surface at all; it is structurally read-only.**) Renders the "wow" that the terminal cannot: the dependency graph, burnup, live swarm observability (the graph / burnup mockups under `temp/tentative-v2/docs/designs/`, TUI-excluded per roadmap §5, inform this). **Zero hosted engine, zero credential custody; no drift on the WASM'd domain logic (sort + explanations) — the storage SQL is the one thing the browser re-executes rather than forks.** This is where **Astro + line-ui migrate** (freed from the binary + D13/NFR-6 — SSR / Astro-Actions become legal again in a separate repo/product; the npm/Node ecosystem lives there, not the OSS tree). **Structurally read-only** — browser writes via raw Hrana would bypass the engine (content_hash / events / claims), so writes are NOT offered; a real-engine-in-browser (a WASM `Storage` backend running the actual engine over Hrana) is a **v2+-dreaming** note only — build nothing on it now. **Gates:** v1.3 shipped (no client Turso remote ⇒ nothing to point at) **AND** a go-to-market decision (external customers = a pivot from D28's "internal company teams" framing — needs its own future D-id and a PRO PRD-lite when/if it locks). **Moat honesty:** the MCP contract is public / self-describing, so a free viewer is buildable by anyone — the moat is the WASM domain core + schema ownership (pre-1.0) + pace + the agent-swarm-native angle, not the UI itself. **Direction only — no spec, no promise, no timeline** (like the rest of this table) |
-| DB-only mode (drop JSONL entirely) | D5 keeps JSONL as optional and notes the design is "reversible toward DB-only later" — a candidate once sync (v1.3) makes JSONL redundant for the shared case |
-| Hosted / managed shared service | PRD §11 keeps this out of scope (collaboration is via libsql sync, not a bespoke server). Only revisit if v1.3 sync proves insufficient for real teams |
-| Pluggable alternative storage backends | The `Storage` trait + contract suite (NFR-16) make this *possible*; a second backend would only ship on concrete demand (the trait exists precisely so this is cheap when needed — the Turso Sync row above is its first concrete instance) |
+| **Commercial web dashboard (PRO)** | A **separate commercial product** (NOT the OSS binary): a **static SPA** + a **client-minted read-only Turso token** (`data_read` fine-grained permission — minted by the **team's own Turso account / control plane** (the same trust domain that already holds write in v1.3 — private `sqld` deployments mint the equivalent `sqld` JWT/Hrana read grant) as a short-lived read grant, *not* by any credential-custodying PRO backend; `data_read` is a Turso-*platform* token scope, not unblock's deferred v2+ ACL, whose future per-user scoping is the fine-grained-ACL row above — held in the browser via `@libsql/client/web` over Hrana/HTTP, so **we never custody credentials, never proxy data**) + **`unblock-model` + `unblock-policy` compiled to WASM** (viable precisely because NFR-15 keeps L0/L1 pure — no tokio/I/O/petgraph-in-policy), so the domain logic that actually lives in those crates — the ready **sort** (the hybrid re-rank comparator, `unblock-policy`) and the scheduler **explanations** — comes from the **same crates**, not reimplemented. The **storage-layer** derivations do NOT: `blocked` (a live 3-pass SQL computation incl. a fixpoint blocked-parent propagation), the ready **filter** (`id NOT IN <blocked set>`) and the epic **rollups** are `unblock-storage` (L2) SQL, not model/policy (PRD §8.1 / `01-design-spine.md` §3.2), so the browser **re-issues that storage SQL directly against the shared database through that read-only token** (a future `unblock-storage`-compiled-to-WASM path could later move it in-process). (**FR-9 preserved — the PRO offers no *mutation* surface at all; it is structurally read-only.**) Renders the "wow" that the terminal cannot: the dependency graph, burnup, live swarm observability (the graph / burnup mockups under `temp/tentative-v2/docs/designs/`, TUI-excluded per roadmap §5, inform this). **Zero hosted engine, zero credential custody; no drift on the WASM'd domain logic (sort + explanations) — the storage SQL is the one thing the browser re-executes rather than forks.** This is where **Astro + line-ui migrate** (freed from the binary + D13/NFR-6 — SSR / Astro-Actions become legal again in a separate repo/product; the npm/Node ecosystem lives there, not the OSS tree). **Structurally read-only** — browser writes via raw Hrana would bypass the engine (content_hash / events / claims), so writes are NOT offered; a real-engine-in-browser (a WASM `Storage` backend running the actual engine over Hrana) is a **v2+-dreaming** note only — build nothing on it now. **Gates:** v1.3 shipped (no shared database exists until then ⇒ nothing to point at) **AND** a go-to-market decision (external customers = a pivot from D28's "internal company teams" framing — needs its own future D-id and a PRO PRD-lite when/if it locks). **Moat honesty:** the MCP contract is public / self-describing, so a free viewer is buildable by anyone — the moat is the WASM domain core + schema ownership (pre-1.0) + pace + the agent-swarm-native angle, not the UI itself. **Direction only — no spec, no promise, no timeline** (like the rest of this table) |
+| DB-only mode (drop JSONL entirely) | D5 keeps JSONL as optional and notes the design is "reversible toward DB-only later" — a candidate once remote mode (v1.3) makes JSONL redundant for the shared case |
+| Hosted / managed shared service | PRD §11 keeps this out of scope — unblock builds no server of its own, and remote mode instead connects to one the team already runs or to Turso Cloud (roadmap §4). Only revisit if remote mode proves insufficient for real teams |
+| Pluggable alternative storage backends | The `Storage` trait + contract suite (NFR-16) make this cheap, and v1.3 is the first exercise of it — remote mode is a SECOND implementation of that trait, committed rather than demand-gated (roadmap §4). Any FURTHER backend still ships only on concrete demand |
 | **Docs-in-DB process-knowledge storage** | The development-knowledge layer `.knowledge/` (memories + wiki run-reports/topics — descriptive, never normative; PROCESS.md section 8) migrates from files into the DB as a queryable store. Its format contract (markdown + flat frontmatter, stable slugs, index-as-data — ci-cd-and-distribution.md §2.3) is deliberately the file-based precursor, so content lifts wholesale. **Distinct from the "memory screen" DISCARDED at roadmap §5** — that was a *product* memory concept (which does not exist); this is process-knowledge storage for building unblock, not a product feature. Direction only — no spec, no promise, no timeline (like the rest of this table) |
 
 **Moved out of the committed versions (2026-07-07 resequence, updated by the 2026-07-20 resequence — PRD §4 D41):**
@@ -736,8 +836,9 @@ locked decision, need a concrete external demand, or imply a materially larger p
   the 2026-07-20 resequence). A D2 extension — **stdio stays primary** — whose "UI enabler" justification is
   **gone**: the v1.4 local TUI speaks MCP over stdio (roadmap §5) and the v2+ PRO web reads Turso directly
   (above), so neither needs it. Its only remaining rationale is thin — an MCP server exposed to clients that
-  **cannot spawn a local stdio child** (a shared team MCP-server endpoint); under the v1.3 embedded-replica model
-  each machine already runs its own local MCP server over stdio, so there is no committed demand. **Any other
+  **cannot spawn a local stdio child** (a shared team MCP-server endpoint); under remote mode (v1.3) each client
+  still spawns its own local `unblock mcp` child, which connects to the shared database itself, so there is no
+  committed demand. **Any other
   transports likewise stay unscheduled** and would follow the same isolation discipline.
 
 These are intentionally unscheduled. Each requires a product decision (and several reverse a locked PRD §4
@@ -765,22 +866,23 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 | Layered config (FR-13) | ● subset | | ● full | | ◐ remote keys + config split | | | |
 | Workspace bootstrap (FR-14) | ● | | | | ◐ multi-ws + join-remote onboarding | | | |
 | Pure-DB diagnostics (FR-15) | ● | ◐ D45 `dangling` action | | ◐ milestone filters/counters | | | | |
-| Workspace health (FR-16) | ● lite | ◐ D45 dangling findings folded into doctor-lite | ● full | | ◐ sync health | | ◐ scale | |
+| Workspace health (FR-16) | ● lite | ◐ D45 dangling findings folded into doctor-lite | ● full | | ◐ remote-mode health | | ◐ scale | |
 | Cooperative shutdown (FR-17) | ● | | | | | | | |
 | Swarm coordination / scheduler (FR-18) | | | ● diagnostics | | ◐ actor attribution | | ◐ active + v2 | |
 | Workflow gates (FR-19) | | | ● | ◐ milestone-close gate (candidate) | | | | |
-| MCP stdio server (FR-20) | ● | ◐ argument-boundary defect class (D42 — L7 seam + L2 dep fields; additive contract bump `v1.5`→`v1.6`) + duplicate-key rejection (D43 — an owned scanning transport; NO contract bump) + a NEW `dangling` diagnostics action (D45 — additive contract bump `v1.7`→`v1.8`) | ◐ surface | ◐ planning tool | ◐ sync resources | | ◐ batch/stream | ◐ other transports (unscheduled) |
+| MCP stdio server (FR-20) | ● | ◐ argument-boundary defect class (D42 — L7 seam + L2 dep fields; additive contract bump `v1.5`→`v1.6`) + duplicate-key rejection (D43 — an owned scanning transport; NO contract bump) + a NEW `dangling` diagnostics action (D45 — additive contract bump `v1.7`→`v1.8`) | ◐ surface | ◐ planning tool | ◐ remote-mode status surface (candidate) | | ◐ batch/stream | ◐ other transports (unscheduled) |
 | Saved queries (FR-21) | | | ● | | | | | |
 | Audit / flight recorder (FR-22) | | | ● | | ◐ actor conventions | | | |
 | Shell completions (FR-23) | | | ● | | | | | |
 | Cross-project routing (FR-24) | ✗ dropped | | | | | | | ◐ reconsider |
 | Self-update (FR-25) | ● | ◐ end-to-end update smoke | | | | | | |
 | TOON output | | | ● | | | | | |
-| **libsql remote/replica sync (embedded replicas)** `[NEW]` | (off, D15) | | | | ● GA | | | ◐ Turso Sync candidate |
+| **Remote mode — one shared database** `[NEW]` | (feature off, D15) | | | | ● GA | | | ◐ backend evolution |
 | **Credential / keychain handling** `[NEW]` | | | | | ● | | | |
 | **Join-existing-workspace onboarding** `[NEW]` | | | | | ● | | | |
-| **Self-hosted sqld (documented + tested)** `[NEW]` | | | | | ● | | | |
-| **Multi-workspace (sync-scoped)** `[NEW]` | | | | | ● | | | |
+| **Private sqld server (documented + tested)** `[NEW]` | | | | | ● | | | |
+| **Turso Cloud (documented + tested)** `[NEW]` | | | | | ● | | | |
+| **Multi-workspace (remote-scoped)** `[NEW]` | | | | | ● | | | |
 | **Milestones (first-class) + milestone-scoped queries** `[NEW]` | | | | ● | | | | |
 | **Goals (first-class, slim)** `[NEW]` | | | | ● | | | | |
 | **MCP streamable-HTTP transport** `[NEW]` | | | | | | | | ◐ unscheduled |
@@ -796,7 +898,7 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 
 Legend (distinct from the roadmap §8 feature-matrix legend — here the glyphs track **crate work per release**,
 not feature-landing): ● substantial work in that release · ◐ incidental / hardening touch · blank = untouched.
-(So a crate can be ● here in a release where the roadmap §8 feature row is ◐ or blank — e.g. `unblock-health` is ● at v1.3 (substantial sync-diagnostics work) while its FR-16 feature-matrix row is only ◐ sync health.)
+(So a crate can be ● here in a release where the roadmap §8 feature row is ◐ or blank — e.g. `unblock-config` is ● at v1.3 (the remote URL, the committed-versus-per-user config split and the keychain credential path) while its FR-13 feature-matrix row is only ◐ remote keys + config split.)
 
 | Crate | v1 | v1.0.1 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 | v2+ |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -804,8 +906,8 @@ not feature-landing): ● substantial work in that release · ◐ incidental / h
 | `unblock-error` | ● | ◐ D46 | ● | | ◐ | | ◐ | |
 | `unblock-policy` | ● | | ● | ◐ | | | ● | |
 | `unblock-storage` | ● | ● | ◐ | ● | ● | | ● | ◐ |
-| `unblock-sync` | ● | ● | ◐ | | ◐ | | ◐ | ◐ |
-| `unblock-health` | ● lite | | ● full | | ● | | ● | |
+| `unblock-sync` | ● | ● | ◐ | | | | ◐ | ◐ |
+| `unblock-health` | ● lite | | ● full | | ◐ | | ● | |
 | `unblock-config` | ● subset | ◐ D46 | ● full | | ● | | | |
 | `unblock-engine` | ● | ● | ● | ● | ● | | ● | |
 | `unblock-render` | ● | | ● | ◐ | | | ◐ | |
@@ -891,6 +993,15 @@ Notes:
   `unblock-cli` gains nothing, because its shipped `emit_diagnostic_writes_the_error_line` cell keeps reading
   the transport message and stays green. D49 mints no `ErrorCode`, moves no published byte,
   and carries no `contract_version` bump and no `CONTRACT_HASH` re-pin — `unblock.mcp.v1.9` stands.
+- **v1.3 under D51 (2026-09-22)** moves two cells and re-grounds a third. **`unblock-sync` drops to blank at
+  v1.3** — its entry used to reserve reconciliation seams, and with no local copy of the database nothing is
+  ever reconciled, so those seams will never be built. **`unblock-health` moves from ● to ◐ at v1.3** — the
+  substantial work it carried was sync diagnostics (replica lag, sync conflicts, WAL-on-remote integrity), and
+  all three concepts go with the replica; what remains is taxonomy work over findings the ENGINE composes,
+  because D29 clause F3 keeps `run_doctor` pure, non-async and storage-free. **`unblock-mcp` stays ◐ at v1.3
+  on a condition rather than on a plan** — whether remote-mode status gets its own surface is open question 6
+  of roadmap §4. `unblock-storage` ●, `unblock-config` ●, `unblock-engine` ● and `unblock-cli` ◐ do not move,
+  and the storage work is a SECOND `Storage` implementation rather than a replica engine.
 - **100% Rust, no Node:** the TUI adds **no npm/Node build stage** to `dist` and **no `ui` Cargo feature** —
   `cargo-deny` covers the whole tree and the binary gains no npm supply-chain surface. (The web dashboard's
   npm/Node ecosystem lives in the separate v2+ commercial PRO product — roadmap §7 — not the OSS tree.)
@@ -901,13 +1012,14 @@ Notes:
 
 v1 proves the wedge is *correct* (atomic claim + no hot-spin at 250k); v1.1 makes it *ergonomic* for swarms and
 humans-via-clients (coordination diagnostics, gates, organization); **v1.2 gives the store a *planning layer***
-(goals = why, milestones = when) — settled on **one cheap local file BEFORE replication**, so the additive
-planning schema (`Issue.milestone_id`, Milestone/Goal) is proven against a single primary rather than migrated
-across version-skewed replicas later (schema-before-distribution, PRD §4 D41 — and it answers the felt dogfood
-demand, the team hand-building epics/milestones today); **v1.3 makes it *shared*** for mixed human+agent teams
-(PRD §4 D28 — libsql embedded replicas: reads local, all writes serialized at the primary, no multi-master; a
-mandatory Turso-Sync-vs-embedded-replicas maturity check is folded into its lock); **v1.4 opens the *human
-window*** (an offline, local, terminal-native, read-first **TUI** that is itself an MCP client over **stdio** —
+(goals = why, milestones = when) — settled while **one binary owns one local file**, so the additive planning
+schema (`Issue.milestone_id`, Milestone/Goal) is proven before it ever has to be migrated inside a shared
+database that a version-skewed fleet of binaries is connected to (schema-before-distribution, PRD §4 D41 — and
+it answers the felt dogfood demand, the team hand-building epics/milestones today); **v1.3 makes it *shared***
+for mixed human+agent teams (PRD §4 D28 and D51 — remote mode, where one shared database is reached by SQL
+over HTTP, every read and every write crosses the network, the server serializes every write, and there is
+neither multi-master nor offline); **v1.4 opens the *human
+window*** (a local, terminal-native, read-first **TUI**, offline in local mode, itself an MCP client over **stdio** —
 no new transport needed, FR-9's single surface preserved, its screens now fed by the v1.2 planning + v1.1 swarm
 data that land first); **v1.5 makes it *fast and actively helpful at the top of the scale curve*** (1M as a CI
 gate, active coordination, richer MCP) — its scheduler v2 consumes v1.2's milestone signals, so planning still
@@ -915,6 +1027,6 @@ lands well ahead of that consumer. The streamable-HTTP transport is **unschedule
 rationale is gone (the TUI speaks stdio; the PRO web reads Turso directly). Everything else in v2-plus either
 reverses a locked decision or awaits concrete external demand and is therefore deliberately unscheduled. The
 acyclic layering and the `Storage` trait/contract suite are the two invariants that make this sequence cheap:
-remote storage (v1.3), backend evolution (the v2+ Turso Sync candidate) and alternative backends slot in
+remote storage (v1.3), backend evolution (the v2+ sync-engine candidate) and alternative backends slot in
 behind the trait without touching callers, and the TUI rides the existing MCP contract instead of minting a
 second domain surface.

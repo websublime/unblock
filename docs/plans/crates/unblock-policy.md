@@ -22,7 +22,7 @@ Two orthogonal "versions" appear in this plan and must not be conflated:
 - **v1** (M1 / plan T1.1): the *pure decision primitives the v1 walking skeleton needs* — ready/hybrid-sort ranking, dependency→ready gating predicate, validation/inheritance helpers, the cache-key contract usage. (Plan T1.1 verbatim.)
 - **v1.1** (LOCKED): scheduler contract (`unblock.scheduler.v1`, FR-18), coordination diagnosis (`unblock.coordination.v1`, FR-18), workflow + close gates (`unblock.gate.v1` / `unblock.close_policy.v1`, FR-19), saved-query filter-set normalization (FR-21 — the *pure* part), inheritance selection (full).
 - **v1.2** (PROPOSED — planning layer): an **incidental `◐` touch** (roadmap §9 row: `unblock-policy` is `◐` at v1.2) — gate/scheduler seams over milestones + goals (roadmap §3: the FR-19 gate candidate on milestone close; the v1.5 scheduler consumes milestone due dates / critical path). **No new public API is committed yet** — shapes are resolved at v1.2 lock.
-- **v1.3:** **no policy work** (roadmap §9 row: `unblock-policy` blank for v1.3 — that release is storage/sync/config remote shared-state). Listed for completeness only.
+- **v1.3:** **no policy work** (roadmap §9 row: `unblock-policy` blank for v1.3 — that release is storage/config REMOTE-mode shared state (D51)). Listed for completeness only.
 - **v1.5** (PROPOSED): scheduler v2 (critical-path / cost-aware ranking, `unblock.scheduler.v2`); active-coordination reclaim contracts (claim TTL/heartbeat decision, deterministic re-assignment evidence — still pure, still DB-derived); cache policy kernel promoted from "fields only / reserved" to an exercised S3-FIFO admission/eviction policy for the 1M-issue read path.
 
 ---

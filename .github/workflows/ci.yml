@@ -30,8 +30,8 @@
 #     when `self-update` is off) + the default-on leg + cargo-tree (dis)appearance controls.
 #
 # Feature policy (D15/NFR-10, ci-cd §2.2): the testkit clippy/test steps use TARGETED features
-# (`-p unblock-storage --features testkit`), never `--all-features` — `--all-features` resolves the
-# libsql `remote` TLS stack (reqwest/hyper/rustls) which must stay off the M0 gate.
+# (`-p unblock-storage --features testkit`), never `--all-features` — at v1.3 `--all-features` selects
+# the storage `remote` feature and its HTTP client, which must stay off the M0 gate (D15/D51).
 
 name: ci
 
@@ -151,7 +151,8 @@ jobs:
       - name: NFR-5 stress + interleaving (integrity-only)
         run: cargo test -p unblock-engine --locked --test stress_longlived --test interleaved_families
       # NFR-4 export fault-injection seam — a TARGETED feature leg (NEVER --all-features, which pulls
-      # the libsql remote TLS stack, D15/NFR-10). Clippy proves the feature-gated seam is lint-clean.
+      # the storage remote-mode HTTP client, D15/D51/NFR-10). Clippy proves the feature-gated seam is
+      # lint-clean.
       - name: NFR-4 fault-injection (clippy)
         run: cargo clippy -p unblock-sync --all-targets --features fault-injection --locked -- -D warnings
       - name: NFR-4 fault-injection (per-stage seam tests)
@@ -179,8 +180,8 @@ jobs:
             exit 1
           fi
       # Run the four gated criterion suites — TARGETED features (`--features testkit` for the
-      # storage/engine corpus seeder), NEVER `--all-features` (which resolves the libsql `remote` TLS
-      # stack, ci-cd §2.2). Each writes `target/criterion/**/estimates.json`.
+      # storage/engine corpus seeder), NEVER `--all-features` (which at v1.3 selects the storage `remote`
+      # feature and its HTTP client, ci-cd §2.2). Each writes `target/criterion/**/estimates.json`.
       # Freshness guard (SF-B): purge any cached criterion output so the bench-gate REQUIRED-benches
       # guard cannot be satisfied by a stale `new/estimates.json` from a prior run (a deleted/renamed
       # required bench must fail, not silently pass on cached data).

@@ -70,7 +70,7 @@ pub struct ProjectConfig {
 /// The `[remote]` table — typed only to deny `auth_token` (NFR-18). v1.3 will give it real fields.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RemoteTable {
-    /// A forbidden libsql auth token (NFR-18): credentials never live in `config.toml`. If present
+    /// A forbidden remote-mode auth token (NFR-18): credentials never live in `config.toml`. If present
     /// (even null/empty) the parse is rejected with [`ConfigError::InvalidValue`].
     pub auth_token: Option<toml::Value>,
     /// Other `[remote]` keys (e.g. a future `url`) — captured for warn, not an error.
@@ -123,7 +123,7 @@ impl ProjectConfig {
         Ok(config)
     }
 
-    /// Deny any libsql credential in `config.toml` (NFR-18): a `[remote] auth_token` or a top-level
+    /// Deny any remote-mode credential in `config.toml` (NFR-18): a `[remote] auth_token` or a top-level
     /// `auth_token`. Credentials must come from env / keychain only.
     fn deny_credentials(&self) -> Result<(), ConfigError> {
         if let Some(remote) = &self.remote
