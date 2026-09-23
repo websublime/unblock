@@ -4,7 +4,7 @@ description: Landing the two-product-modes decision as a spec-first documentatio
 type: run
 date: 2026-09-23
 branch: ub-b07-two-product-modes
-pr: '-'
+pr: '446'
 issues: [ub-b07]
 ---
 
