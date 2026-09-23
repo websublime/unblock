@@ -8,7 +8,9 @@
 [graph]
 # Leave `targets` unset → cargo-deny evaluates ALL target platforms, so a platform-specific git crate
 # (e.g. a windows-only one) cannot slip past the no-git ban behind a cfg. Default features only — we
-# do NOT enable `--all-features` here (it would pull the libsql `remote` TLS stack; D15/NFR-10).
+# do NOT enable `--all-features` here, because at v1.3 it selects the storage `remote` feature and its
+# client (D15/D51/NFR-10). That also means a feature-gated client is INVISIBLE to this job — closing
+# that leg is a v1.3-lock obligation, not a property this setting gives us.
 all-features = false
 
 # -------------------------------------------------------------------------------------------------

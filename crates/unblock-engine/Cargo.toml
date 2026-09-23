@@ -45,7 +45,7 @@ serde_json = { workspace = true }
 default = ["sync", "health"]
 sync = ["dep:unblock-sync"]
 health = ["dep:unblock-health"]
-# D15: forwards only to storage's non-default remote/replica path.
+# D15/D51: forwards only to storage's non-default REMOTE-mode feature. Not a libsql feature.
 remote = ["unblock-storage/remote"]
 # T3.5/D34: forwards to storage's `testkit` so `benches/engine.rs` + `tests/scale.rs` can seed the
 # NFR-1/NFR-2 corpus via `unblock_storage::testkit::seed_corpus` (storage-direct, non-minted — F-2).

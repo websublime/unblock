@@ -30,7 +30,7 @@
 ### v1.5
 - Large-result formatting helpers (streaming/chunked CSV + markdown writer over an iterator, not a `Vec`) for the 1M-issue / batch surface (roadmap §6, `unblock-render` ◐). Additive: `render_stream_csv(iter, …) -> impl` writer-based API alongside the v1 `Vec`-based one.
 
-> **v1.2 (planning layer) — `◐`** (roadmap §9; roadmap §3 "Crates touched" names `unblock-render` (formatting)): the milestone/goal views need plain/markdown/csv formatting. Shape resolved at v1.2 lock — additive, no v1 API change. **No v1.3 participation** (roadmap §9: render is blank for v1.3 — remote/replica sync touches storage/config/health, not formatting).
+> **v1.2 (planning layer) — `◐`** (roadmap §9; roadmap §3 "Crates touched" names `unblock-render` (formatting)): the milestone/goal views need plain/markdown/csv formatting. Shape resolved at v1.2 lock — additive, no v1 API change. **No v1.3 participation** (roadmap §9: render is blank for v1.3 — REMOTE mode touches storage/config/health, not formatting (D51)).
 
 ---
 

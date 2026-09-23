@@ -2,7 +2,8 @@
 
 This directory holds the multi-crate Rust workspace for **unblock**, an agent-first, **MCP-first**
 issue tracker. Every domain feature is an MCP tool/resource/prompt over stdio; the CLI is
-lifecycle/ops only. libsql is the source of truth; JSONL is an optional export (D5).
+lifecycle/ops only. The database is the source of truth — libsql locally, the shared database in
+remote mode (D51); JSONL is an optional export (D5).
 
 The single shipped binary is **`unblock`** (from `unblock-cli`); all `unblock-*` library crates are
 workspace-internal (`publish = false`) and never published to crates.io.
@@ -31,7 +32,7 @@ storage + policy). `unblock-fuzz` is an unpublished member (fuzz harness over in
 | `unblock-model` | L0 | Pure domain types, `content_hash`/`sync_equals`, validation, §1.10 DTOs |
 | `unblock-error` | L0 | `ErrorCode`, 0–8 exit-code table, `StructuredError`, `CodedError` |
 | `unblock-policy` | L1 | Ready-sort, gating, scheduler, cache-key — pure, side-effect-free |
-| `unblock-storage` | L2 | `Storage` trait + libsql impl (WAL + `busy_timeout`); remote behind a feature (D15) |
+| `unblock-storage` | L2 | `Storage` trait + libsql impl (WAL + `busy_timeout`); remote mode behind the non-default `remote` feature (D15/D51) |
 | `unblock-sync` | L3 | Light JSONL export/import + `bd` import; atomic write; path confinement |
 | `unblock-health` | L3 | libsql `integrity_check` + `doctor` (full taxonomy v1.1) |
 | `unblock-config` | L4 | Layered TOML, `.unblock/` discovery, builds the `Arc<dyn Storage>` (CF-D) |

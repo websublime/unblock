@@ -737,7 +737,7 @@ The L7 boundary converts any composed crate error → `StructuredError` (CLI: se
 
 ## 3. Storage trait — `unblock-storage` (L2)
 
-Async (`async_trait`), backend-agnostic error (`StorageError`, §2.1). The libsql impl is the only backend-aware code; remote/replica behind a non-default feature (D15). Depends on **model + error only**.
+Async (`async_trait`), backend-agnostic error (`StorageError`, §2.1). **TWO backend-aware implementations, one per product MODE (D51).** The `libsql` module serves LOCAL mode and is the only backend in the default build (§3.3); the `sql_over_http` module serves REMOTE mode behind the non-default `remote` feature (§3.4). Neither leaks a backend type (§6.2), and every other file in the crate stays backend-free. Depends on **model + error only**.
 
 ### 3.1 Supporting types
 
@@ -780,7 +780,7 @@ pub struct IssuePatch {
 }
 ```
 
-**`WriteLockGuard` (storage-owned; D31 — the cross-process advisory write-lock RAII guard, NORMATIVE).** A public opaque RAII guard returned by `Storage::acquire_write_lock` (§3.2). It owns the locked advisory `std::fs::File` handle on `.unblock/.write.lock` (`Send`, `'static`) and releases the flock on `Drop` (with an explicit `unlock()` backstop). It carries **no** public fields and names **no** libsql/backend type (spine §6 rule 2). `Storage::acquire_write_lock` returns `Ok(None)` on the file-less in-memory path (no lock is needed there — connection-private shared cache, no cross-process sharing). **Re-entrancy (MF4 — ported beads `write_lock_already_held`):** an in-memory held-marker on the L2 lock primitive makes a NESTED acquire by the current holder return a **re-entrant no-op guard** (owns nothing, releases nothing on drop) instead of opening a fresh fd that would self-contend on the process's own advisory lock (per-open-fd) and surface a spurious `DatabaseLocked`; the marker is set only after the flock is truly held and cleared when the real guard drops (the L5 `Semaphore` serializes the check-then-set to one in-process writer; nesting is stack-disciplined). The engine holds the guard across the whole mutation (allocation READ + write tx), then drops it inner-first, before the write permit.
+**`WriteLockGuard` (storage-owned; D31 — the cross-process advisory write-lock RAII guard, NORMATIVE).** A public opaque RAII guard returned by `Storage::acquire_write_lock` (§3.2). It owns the locked advisory `std::fs::File` handle on `.unblock/.write.lock` (`Send`, `'static`) and releases the flock on `Drop` (with an explicit `unlock()` backstop). It carries **no** public fields and names **no** libsql/backend type (spine §6 rule 2). `Storage::acquire_write_lock` returns `Ok(None)` on BOTH file-less paths — the in-memory one (connection-private shared cache, no cross-process sharing) and the REMOTE-mode backend (D51: no local file exists, so there is nothing to flock; cross-machine writers serialize at the server's `BEGIN IMMEDIATE`, §3.4). **Re-entrancy (MF4 — ported beads `write_lock_already_held`):** an in-memory held-marker on the L2 lock primitive makes a NESTED acquire by the current holder return a **re-entrant no-op guard** (owns nothing, releases nothing on drop) instead of opening a fresh fd that would self-contend on the process's own advisory lock (per-open-fd) and surface a spurious `DatabaseLocked`; the marker is set only after the flock is truly held and cleared when the real guard drops (the L5 `Semaphore` serializes the check-then-set to one in-process writer; nesting is stack-disciplined). The engine holds the guard across the whole mutation (allocation READ + write tx), then drops it inner-first, before the write permit.
 
 **`close_reason` persistence (T1.2 Verify-gate, NORMATIVE).** `close_reason` is the nullable-text tri-state (`None` = leave unchanged; `Some(None)` = clear to the column default `''`; `Some(Some(s))` = set). `update_issue` persists it to the existing `close_reason TEXT DEFAULT ''` column (already projected by `ISSUE_COLUMNS`; `create_issue` already binds it from the `Issue`). The engine's `close_with_suggestions(id, reason)` (§4.1) builds a `status = Closed` patch carrying `close_reason` and persists it through `update_issue` under the write permit — the reason is **stored**, not tracing-only. The `close_reason` column is **not** part of the frozen `content_hash` (spine §1.8), so persisting it does not perturb import idempotency (FR-26).
 
@@ -991,8 +991,9 @@ pub trait Storage: Send + Sync {
     //  the permit and ABOVE the write-conn Mutex + `BEGIN IMMEDIATE`. Bounded + non-spinning (NFR-3): one
     //  native `try_lock` fast-path, else an async `tokio::time::sleep(25ms)` poll to the store's
     //  `write_lock_timeout_ms` (threaded down at open; default 30000); a timeout → retryable
-    //  StorageError::DatabaseLocked → ErrorCode::DatabaseLocked (NO new ErrorCode). `Ok(None)` on the
-    //  file-less in-memory path (no lock needed). RAII: `WriteLockGuard` owns the locked `std::fs::File`
+    //  StorageError::DatabaseLocked → ErrorCode::DatabaseLocked (NO new ErrorCode). `Ok(None)` on BOTH
+    //  file-less paths — in-memory (no lock needed) and the D51 remote backend (no local file; the server
+    //  serializes writers, §3.4). RAII: `WriteLockGuard` owns the locked `std::fs::File`
     //  (Send, 'static) and releases the flock on Drop (explicit `unlock()`). Reads take NO lock (WAL MVCC).
     //  A distinct file from the vestigial `.unblock.lock` OrphanedLockFile detector target, which stays
     //  never-written (unblock-health UNCHANGED). `migrate` acquires the SAME exclusive lock internally with
@@ -1945,12 +1946,66 @@ DependencyRemoved, LabelAdded, LabelRemoved, Compacted, Deleted, Restored, **Com
 - **WAL** journal mode; **`busy_timeout = 5000 ms` (native, `Connection::busy_timeout`)** — `const BUSY_TIMEOUT_MS: u64 = 5000`. This is the **sanctioned INVERSE of beads**, which set `busy_timeout = 0` + a hand-rolled flock + sleep backoff to dodge *frankensqlite*'s hot-spin. libsql ships **real SQLite**, whose native `busy_timeout` is sleep-based (it blocks, it never spins), so a non-zero native timeout resolves fsqlite-243 **by construction**. The beads `busy_timeout=0` + hand-rolled SQLITE_BUSY backoff-spin machinery stays **REJECTED** (native timeout blocks, never spins); **the cross-process advisory `.write.lock` flock IS restored (D31)** as a SEPARATE cross-process write serializer composing ABOVE this native `busy_timeout` — via `std::fs::File::try_lock` + a bounded async SLEEP-poll (`tokio::time::sleep(25ms)`, never a busy-spin, NFR-3), NOT the beads `busy_timeout=0`+backoff dodge for frankensqlite's hot handler (see the D31 advisory-lock bullet below).
 - **Pragmas (read schema.rs:606–643):** `foreign_keys = ON`, `synchronous = NORMAL`, `temp_store = MEMORY`, `cache_size = -8000`, `journal_size_limit = 33554432` on every connection; the **WAL-only** pragmas — `journal_mode = WAL` and **`wal_autocheckpoint = 0`** (+ a **manual `wal_checkpoint(TRUNCATE)`** on fresh-bootstrap) — are applied **on the file-backed path only**. A shared-cache `:memory:` DB **cannot** use WAL (it always reports `journal_mode = memory`), so asserting WAL there is both a no-op AND an intermittent "API misuse"/`DatabaseLocked` flake under parallel opens; it is skipped for `open_in_memory`. **Periodic in-flight checkpointing (RESOLVED at T0.8):** a **passive** `wal_checkpoint(PASSIVE)` fires on the **held write connection** every **50 committed mutations** (`CHECKPOINT_EVERY_N_MUTATIONS = 50`) — **never `TRUNCATE` in the write path** (an exclusive lock there would manufacture contention). This is distinct from the one-shot fresh-bootstrap `wal_checkpoint(TRUNCATE)` above: that runs **once at migration time on an empty DB** (no concurrent writers to block), whereas the steady-state write path uses PASSIVE only. PASSIVE folds committed frames back into the main DB without blocking, so the WAL file's space is reused in place and stays **bounded** (it does not shrink to zero — PASSIVE reuses, it does not truncate). The T0.8 contention lab asserts the `-wal` sidecar stays bounded under sustained multi-instance contention with this cadence on, and a `#[ignore]`d negative control shows it **breaches** the ceiling with it off.
 - **Transactions:** every **mutating** tx uses **`BEGIN IMMEDIATE`** (`transaction_with_behavior(TransactionBehavior::Immediate)`); reads use the default **Deferred** behaviour.
-- **Cross-process advisory write lock (D31 — normative).** Every mutation acquires the advisory `.unblock/.write.lock` EXCLUSIVE at the WHOLE-MUTATION scope via `Storage::acquire_write_lock` (§3.2) — the engine holds the guard across the allocation READ + the write tx, composing BELOW the L5 `Semaphore` permit and ABOVE the write-conn `Mutex` + `BEGIN IMMEDIATE` (acquire order: permit → `.write.lock` → `Mutex` → `BEGIN IMMEDIATE`, release inner-first; deadlock-free — one in-process writer past the Semaphore, one cross-process resource). Acquire = a native `std::fs::File::try_lock` fast-path, then a bounded async `tokio::time::sleep(25ms)` poll to `write_lock_timeout_ms` (threaded DOWN from `unblock-config` L4 at open — `open_local(path, lock_timeout_ms)`; default 30000; **NO** L2→L4 back-edge, the lock path is derived from the db-file parent, like the health file-state paths). A timeout → retryable `StorageError::DatabaseLocked` (NO new ErrorCode). The lock file is opened `create(true).truncate(false)` with **NO content written** — a pure flock target, kernel-released on process death (never orphans), **DISTINCT** from the vestigial `.unblock.lock` `OrphanedLockFile` detector target (which stays never-written; `unblock-health`/F5 UNCHANGED). **`migrate` bypasses `with_immediate_tx`**, so it takes the SAME `.write.lock` EXCLUSIVE **explicitly with timeout=0 for the WHOLE command, UNCONDITIONALLY** (single-try fail-fast: a concurrent mid-mutation writer makes migrate fail fast with `DatabaseLocked`, never corrupting) — acquired BEFORE the version check + migration run, so both happen UNDER the held lock. Taking it unconditionally (rather than only when the schema advances) removes the lock-free pre-read TOCTOU. Residual (accepted): migrate is "tightened, still best-effort for an already-open pre-migrate connection" — NOT fully enforced (a single-owner model is the full fix, deferred). The in-memory shared-cache path takes NO lock (`acquire_write_lock` → `Ok(None)` — connection-private, no cross-process sharing). The in-process `Semaphore` (L5) and write-conn `Mutex` (L2) BOTH STAY — the file lock is an ADDITIONAL cross-process layer, never a replacement. NFS/SMB/9p void it (documented residual — advisory locks + WAL `-shm` break; no fs-type detection).
+- **Cross-process advisory write lock (D31 — normative).** Every mutation acquires the advisory `.unblock/.write.lock` EXCLUSIVE at the WHOLE-MUTATION scope via `Storage::acquire_write_lock` (§3.2) — the engine holds the guard across the allocation READ + the write tx, composing BELOW the L5 `Semaphore` permit and ABOVE the write-conn `Mutex` + `BEGIN IMMEDIATE` (acquire order: permit → `.write.lock` → `Mutex` → `BEGIN IMMEDIATE`, release inner-first; deadlock-free — one in-process writer past the Semaphore, one cross-process resource). Acquire = a native `std::fs::File::try_lock` fast-path, then a bounded async `tokio::time::sleep(25ms)` poll to `write_lock_timeout_ms` (threaded DOWN from `unblock-config` L4 at open — `open_local(path, lock_timeout_ms)`; default 30000; **NO** L2→L4 back-edge, the lock path is derived from the db-file parent, like the health file-state paths). A timeout → retryable `StorageError::DatabaseLocked` (NO new ErrorCode). The lock file is opened `create(true).truncate(false)` with **NO content written** — a pure flock target, kernel-released on process death (never orphans), **DISTINCT** from the vestigial `.unblock.lock` `OrphanedLockFile` detector target (which stays never-written; `unblock-health`/F5 UNCHANGED). **`migrate` bypasses `with_immediate_tx`**, so it takes the SAME `.write.lock` EXCLUSIVE **explicitly with timeout=0 for the WHOLE command, UNCONDITIONALLY** (single-try fail-fast: a concurrent mid-mutation writer makes migrate fail fast with `DatabaseLocked`, never corrupting) — acquired BEFORE the version check + migration run, so both happen UNDER the held lock. Taking it unconditionally (rather than only when the schema advances) removes the lock-free pre-read TOCTOU. Residual (accepted): migrate is "tightened, still best-effort for an already-open pre-migrate connection" — NOT fully enforced (a single-owner model is the full fix, deferred). TWO file-less paths take NO lock (`acquire_write_lock` → `Ok(None)`): the in-memory shared-cache path (connection-private, no cross-process sharing) and the D51 REMOTE backend (no local file exists; cross-machine writers serialize at the server's `BEGIN IMMEDIATE` instead — §3.4 carries the mechanism). The in-process `Semaphore` (L5) and write-conn `Mutex` (L2) BOTH STAY — the file lock is an ADDITIONAL cross-process layer, never a replacement. NFS/SMB/9p void it (documented residual — advisory locks + WAL `-shm` break; no fs-type detection).
 - **OQ-5 (RESOLVED — Miguel + design Review): two connections, not one.** `LibsqlStorage` holds a **serialized WRITE connection** (writes go through `BEGIN IMMEDIATE`; the engine's D14 `Semaphore` serializes writers at L5) **AND a separate READ connection** for the read fast path, so WAL gives concurrent MVCC reader snapshots vs the single writer (FR-10). For `open_in_memory`, both connections must see the **same** in-memory database — a bare `:memory:` is connection-private — so the impl opens a **named shared-cache in-memory URI** (`file:<unique>?mode=memory&cache=shared`, valid because libsql-ffi compiles SQLite with `SQLITE_USE_URI`); this path is **shared-cache, NOT WAL** (see the pragmas bullet). Public constructors: `open_local(&Path)` and `open_in_memory()`. (Earlier OQ-5 wording said "single connection" — superseded.) **Real WAL + native `busy_timeout` concurrency is validated by the T0.8 contention lab on a FILE DB, not an in-memory one** (the in-memory shared-cache path cannot exercise WAL).
-- **Default build = local file / bundled only.** Remote/embedded-replica is a non-default Cargo feature `remote` (TLS/HTTP transitive surface kept off the normal path; D15/NFR-10). When `remote`, app-level jittered retry (`backon`/`tokio-retry`, **not** archived `backoff 0.4`) guards only that path; `wiremock` for tests.
+- **This module is LOCAL mode only, permanently (D51).** `libsql` is pulled `default-features = false, features = ["core"]` in EVERY build — the local file / bundled-SQLite shape. No libsql replication or remote feature is ever enabled, and §3.4 records the measured reason. Remote mode is a different module over a different client crate; nothing here is shared with it but the `Storage` trait.
 - Mutations are **transactional**: issue rows + audit `Event` rows committed together inside one tx.
 - libsql/SQLite errors are absorbed into `StorageError::Backend { .. }` (opaque) and surfaced only as `ErrorCode` — no backend type in the public API. The single `From<libsql::Error>` bridge maps `SqliteFailure(code, _)` with `(code & 0xff) ∈ {5, 6}` (SQLITE_BUSY / SQLITE_LOCKED) to `DatabaseLocked`; everything else becomes `Backend{..}` (the catch-all arm is required — `libsql::Error` is `#[non_exhaustive]`).
 - Backed by a backend-independent **contract suite** (NFR-16) exercising every trait method; the contention lab (NFR-3, M0 gate) drives N concurrent writers asserting correctness + no 100% CPU hot-spin.
+
+### 3.4 Remote-mode impl notes (normative for `unblock-storage`)
+
+- **The mode is the architecture axis (D51).** LOCAL mode is one SQLite file on one machine, served by §3.3.
+  REMOTE mode is one shared database with every developer connected to it, served by this module. The two modes
+  need two libraries with no overlap, which is why this is a second implementation and not a second constructor
+  on `LibsqlStorage`. Choosing the SERVER is a deployment choice, not an architecture one — the two supported
+  options differ only by URL and token, and the code never distinguishes them (PRD §4 D51 carries the dated
+  status note on the self-hosted option).
+- **Home and shape.** A NEW `src/sql_over_http/` module, sibling to `src/libsql/`, named after the protocol it
+  speaks. It defines `SqlOverHttpStorage` with ONE public constructor, `open_remote(url: &str, token: &str) -> Result<Self, StorageError>`,
+  behind `#[cfg(feature = "remote")]`. `LibsqlStorage` is UNCHANGED and keeps its name and its two constructors
+  (`open_local`, `open_in_memory`, §3.3). There is no `open_replica` — embedded replicas are out (below).
+- **The client crate holds no SQL engine.** The transport is SQL over HTTP through `turso_serverless` 0.1.3,
+  whose only constructor opens a remote connection, so it cannot open a local file even in principle. Its
+  dependency set is `reqwest`, `serde`, `tokio`, `base64`, `bytes`, `futures` and `thiserror`. It audited clean
+  on 2026-09-22 — zero advisories and zero warnings across 183 transitive crates — **measured on a scratch
+  crate, not on this repository's own `audit`/`deny` jobs**, which do not see a feature-gated dependency
+  (`deny.toml` sets `all-features = false`). Closing that gap is a v1.3-lock obligation, not a claim this
+  section may make. The crate hardcodes the version-3 protocol path with no configuration knob.
+- **No backend type crosses the public API (§6.2).** Client errors absorb into `StorageError::Backend { source: BackendOpaque }`
+  exactly as libsql errors do, sanitized at construction. No `turso_serverless` type appears in any signature,
+  and no libsql type appears in this module at all.
+- **No advisory write lock (D31 carve-out).** `acquire_write_lock` returns `Ok(None)` — there is no local file
+  for two processes to contend over. Cross-machine write serialization is the SERVER's `BEGIN IMMEDIATE`, which
+  does across machines what the `.write.lock` flock does on one. The L5 `Semaphore(1)` still serializes writers
+  inside one process and is unchanged. Measured: eight concurrent writers doing twelve identifier allocations
+  each committed 96 rows, 96 distinct, exactly 1..=96, no gap and no conflict; a `BEGIN DEFERRED` control run on
+  the same harness produced 12 commits and 84 conflicts, so the harness is known to detect the race.
+- **Mutations stay one transaction (§4.2).** An issue row and its audit `Event` must commit together or roll
+  back together. The protocol carries the shape §4.2 requires. One batch request with explicit
+  `BEGIN IMMEDIATE`, `COMMIT` and `ROLLBACK` steps committed both rows and rolled both back on a `NOT NULL`
+  violation, on both server generations (`ub-w3a`, 2026-09-22). Meeting §4.2 in this module is a v1.3
+  implementation obligation.
+- **NFR-3 non-spin, remote reading.** §3.3's primary guarantee (WAL + native `busy_timeout`) has NO referent
+  here — there is no local SQLite, no WAL and no `busy_timeout`. Remote mode's guarantee is BOUNDED app-level
+  jittered retry (`backon`/`tokio-retry`, never archived `backoff 0.4`) plus the `failsafe` circuit breaker,
+  which NFR-3 already names as the secondary arm. That arm carries the whole guarantee here; in local mode it
+  only backs up the WAL handler.
+- **There is NO offline (D51).** No cache is built, no mirror is maintained, and no read falls back to a stale
+  copy. In remote mode an unavailable network stops the tool, READS INCLUDED. Embedded replicas are excluded on
+  measured grounds rather than asserted — their only Rust client is the `libsql` crate behind its `replication`
+  feature, which fails this repository's own required `audit` job with five vulnerabilities that cannot be
+  bumped past, because libsql 0.9.30 pins the older majors of `hyper`, `hyper-rustls` and `tonic`. Four of the
+  five sit in the `rustls-webpki 0.102.x` family, which this repository's tree does not carry — its committed
+  `Cargo.lock` pins `rustls-webpki 0.103.15` — so adopting that route would reintroduce an advisory class this
+  repository is free of. The `libsql` crate's own `remote` feature reports the SAME five, so that route is
+  closed for the same reason.
+- **Tested with `wiremock`** (NFR-16) — the contract suite's second backend, plus the three probe shapes above as
+  its seed cells. `wiremock` is a better fit here than it ever was for a replica, because the path is plain HTTP.
+- **Open at the v1.3 lock, not settled here.** WHERE the mode is selected (§4.1's `SessionConfig.remote` bool vs
+  `unblock-config`'s reserved `backend` startup key), how NFR-19's forward-migration ladder reads against one
+  shared schema, and what the no-network CI whitelist entry looks like. Those are named in the roadmap's v1.3
+  open-questions list. This section states the seam; it does not decide them.
 
 ---
 
@@ -2156,7 +2211,9 @@ pub struct Session { /* storage: Arc<dyn Storage>, write_permit: Arc<tokio::sync
 pub struct SessionConfig {
     pub jsonl_export: bool,            // auto-export JSONL after mutating ops (FR-7)
     pub import_on_open: bool,          // run import_jsonl during open() if the JSONL is newer (FR-8)
-    pub remote: bool,                  // enable the non-default remote storage path (D15; off in v1)
+    pub remote: bool,                  // v1: always false (D15). Under D51 the mode selects the LIBRARY, and
+                                       // storage is built by unblock-config (CF-D) before the Session exists,
+                                       // so WHERE the mode is chosen is open at the v1.3 lock.
     /* ...other engine knobs... */
 }
 
@@ -3365,7 +3422,7 @@ stdout carries ONLY MCP framing (logging is stderr-only, NFR-14). **Supported to
 Per-crate plans MUST use these exact type/field/signature shapes; deviations require amending this file first.
 
 ### 6.2 No backend type in public API
-No backend (libsql) type may appear in any public API outside `unblock-storage`'s private impl (NFR-15).
+No backend type may appear in any public API outside `unblock-storage`'s private impls (NFR-15) — `libsql` in local mode, the SQL-over-HTTP client in remote mode (D51). Both absorb into `StorageError::Backend { source: BackendOpaque }`.
 
 ### 6.3 content_hash recomputed on load
 `content_hash` is `#[serde(skip)]` and recomputed on load; it is the import idempotency key (FR-26).
@@ -3380,4 +3437,4 @@ Every error surfaced at L7 maps to exactly one `ErrorCode` and one 0–8 exit co
 MCP tool count stays ≤ 8; new domain surface extends existing tools by discriminator before adding tools (RK-3). D22's `create_bulk` is a NEW `action` arm on the existing `issue` tool (NOT a new tool) — the live `list_tools` golden (T2.3) keeps the count at 7. **D37 (the `comment` tool):** the dedicated `comment` tool (D-B) is the deliberate exception to "extend before add" — a distinct domain verb, not an `issue` arm — bringing the count to **8 ≤ 8** at T3.9; the RK-3 budget is now **FULL** and any further domain surface must extend an existing tool by discriminator. **D45 is the first surface to land under that FULL budget and it obeys the rule literally:** the dangling-dependency listing is a new `kind` arm on the existing `diagnostics` tool (§5.1 row 7 / §5.2), NOT a ninth tool — the count stays **8 ≤ 8** and the live `list_tools` assert does not move.
 
 ### 6.7 Safety / no-git / no-default-network
-`forbid(unsafe_code)`, no git crate / `Command::new("git")` anywhere (NFR-6/NFR-9); network/TLS only behind the non-default `remote` feature (D15) AND the default-on `self-update` axoupdater path (FR-25/D17), which the D5 no-network source-scan whitelists (NFR-10 names both).
+`forbid(unsafe_code)`, no git crate / `Command::new("git")` anywhere (NFR-6/NFR-9). **LOCAL mode is the default build and makes no network CALL on any normal command path.** Network/TLS already links into that build, and exactly two routes put it into any build of this workspace — the default-on `self-update` axoupdater path (FR-25/D17), which calls out only on an explicit `unblock update`, and the non-default, opt-in `remote` feature that selects remote mode's HTTP client (D15/D51). The no-network source-scan whitelists the first; the second needs its own explicitly feature-gated entry before that client lands, or a required job fails for a reason unrelated to its own decision (ci-cd §2). NFR-10 names both routes.

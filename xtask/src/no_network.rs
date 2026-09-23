@@ -10,10 +10,12 @@
 //!
 //! Run: `cargo xtask no-network`. The CI `no-network` job wires this in (ci-cd §2 / §5 NFR-17).
 //!
-//! # Distinct from the libsql `remote` stack (D15)
-//! This is a SOURCE-symbol scan; the D15-banned libsql `remote` TLS stack (reqwest/hyper/rustls pulled
-//! by `--all-features`) is kept off the build by the targeted-features policy + `cargo deny`, NOT by
-//! this scan (no crate references those symbols in source).
+//! # Distinct from the storage `remote` feature (D15/D51)
+//! This is a SOURCE-symbol scan. The storage `remote` feature selects REMOTE mode's HTTP client and is kept
+//! off the default build by the targeted-features policy + `cargo deny`, NOT by this scan. Today no crate
+//! references a banned symbol in source. When that client lands, this scan needs a SECOND feature-gated
+//! whitelist entry beside the updater one, and the client crate's own name has to join `NETWORK_SYMBOLS` or
+//! a module naming only it passes silently.
 //!
 //! # The AUTHORITATIVE confinement gate is the feature-matrix build
 //! The definitive proof is the CI `cargo build -p unblock-cli --no-default-features` job (`feature-matrix`,

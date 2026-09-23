@@ -26,12 +26,12 @@ path = "tests/bin/c5_abandoned_tx.rs"
 name = "write_lock_race"
 path = "tests/bin/write_lock_race.rs"
 
-# L2 — the backend-free `Storage` trait + the only backend-aware impl (libsql).
+# L2 — the backend-free `Storage` trait + its backend-aware impls, one per product mode (D51).
 # `libsql` and `petgraph` are PRIVATE deps (no backend/graph type in any public signature,
-# spine §6 rule 2). The default build is local file / bundled SQLite only (no TLS, no
-# network — RK-4): `libsql` is pulled with `features = ["core"]` (which statically bundles
-# SQLite) and `default-features = false`. The `remote`/replica path stays behind the
-# non-default `remote` feature (D15/NFR-10).
+# spine §6 rule 2). LOCAL mode is this default build — `libsql` with `default-features = false,
+# features = ["core"]`, which statically bundles SQLite and links no network. That pin is
+# permanent — no libsql replication or remote feature is ever enabled. REMOTE mode is a
+# separate client crate behind the non-default `remote` feature (D15/D51/NFR-10).
 [dependencies]
 unblock-model = { workspace = true }
 unblock-error = { workspace = true }
@@ -40,7 +40,7 @@ chrono = { workspace = true }
 snafu = { workspace = true }
 # JSON values for the `CodedError::context()` payloads (no backend; serde_json::Map/Value only).
 serde_json = { workspace = true }
-# Backend: local file / bundled SQLite by default; remote/replica behind the `remote` feature.
+# LOCAL mode's backend: local file, SQLite bundled by `core`. Never built with another feature.
 libsql = { workspace = true }
 # Private: backs `detect_cycles` / cycle-path detection / dependency tree. No petgraph type in
 # any public signature (spine §6 rule 2).
@@ -78,11 +78,13 @@ harness = false
 
 [features]
 default = []
-# Non-default `remote`/replica seam (D15). The engine forwards
-# `remote = ["unblock-storage/remote"]`, so the passthrough must resolve. T0.6 keeps this an
-# empty marker (the remote/replica `remote.rs` lands at v1.3 with the libsql remote/replica +
-# `backon`/`failsafe` deps); an empty feature pulls nothing, so the no-TLS/no-network
-# default-feature property still holds.
+# REMOTE mode, non-default (D15/D51). This feature selects THIS CRATE's SQL-over-HTTP
+# implementation — `src/sql_over_http/`, the second `Storage` impl — plus `backon` and
+# `failsafe` for bounded retry. It has never forwarded to a libsql cargo feature and never
+# will, because `libsql` stays `features = ["core"]` in every build. The engine forwards
+# `remote = ["unblock-storage/remote"]`, so the passthrough must resolve; until the v1.3
+# implementation lands this stays an empty marker, which pulls nothing and leaves the
+# no-network default-feature property intact.
 remote = []
 # Exposes the backend-independent NFR-16 contract suite (`testkit::run_storage_contract_suite`) and
 # the gated `StorageTestkit` seam so a future backend (roadmap v2+) reuses the same proof. The seam

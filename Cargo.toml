@@ -78,8 +78,9 @@ petgraph = "0.7"
 # adds ZERO new transitive surface. Version tracks the locked `regex` (1.12.x).
 regex = "1"
 
-# --- external: storage backend (local file / bundled SQLite by default; remote/replica
-#     behind the non-default `remote` feature, D15/NFR-10 — `core` statically bundles SQLite) ---
+# --- external: LOCAL mode's storage backend. `core` statically bundles SQLite and links no
+#     network; this pin is permanent, since REMOTE mode uses a different client crate
+#     behind the storage `remote` feature (D15/D51/NFR-10) ---
 libsql = { version = "0.9.30", default-features = false, features = ["core"] }
 
 # --- external: MCP (primary surface, RK-2 pinned via committed Cargo.lock) ---
@@ -103,7 +104,8 @@ tokio-util = "0.7"
 # --- external: self-update (D17/FR-25; behind cli `self-update` feature, CF-K) ---
 axoupdater = "0.10"
 
-# --- external: resilience for the remote/replica path only (NFR-3; backon, not archived backoff) ---
+# --- external: bounded retry + circuit breaker for REMOTE mode's HTTP client only (NFR-3, D51;
+#     backon, not archived backoff) ---
 backon = { version = "1", features = ["tokio-sleep"] }
 failsafe = "1.3"
 

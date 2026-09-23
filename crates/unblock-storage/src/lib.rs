@@ -7,10 +7,11 @@
 //! [`BackendOpaque`]). The query/result contract types are **re-exported from `unblock-model`**
 //! (§1.10 — CF-A/CF-B/CF-C) so this crate never redefines them.
 //!
-//! The only backend-aware implementation ([`LibsqlStorage`]: schema/migrations, queries,
-//! transactional mutate, WAL + native `busy_timeout` non-spin discipline, NFR-3) lives in the
-//! `libsql` module. No libsql type ever crosses the public API (spine §6 rule 2); remote/replica is
-//! behind the non-default `remote` feature (D15). See `docs/plans/crates/unblock-storage.md`.
+//! [`LibsqlStorage`] serves LOCAL mode from the `libsql` module — schema/migrations, queries,
+//! transactional mutate, WAL + native `busy_timeout` non-spin discipline (NFR-3). REMOTE mode
+//! arrives at v1.3 as a second implementation over SQL over HTTP, behind the non-default `remote`
+//! feature (D15/D51). No backend type ever crosses the public API (spine §6 rule 2). See
+//! `docs/plans/crates/unblock-storage.md`.
 //!
 //! # Example
 //!

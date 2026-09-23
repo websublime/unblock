@@ -1,4 +1,4 @@
-//! [`LibsqlStorage`] — the only backend-aware [`Storage`] implementation (libsql / bundled `SQLite`).
+//! [`LibsqlStorage`] — LOCAL mode's backend-aware [`Storage`] implementation (libsql / bundled `SQLite`).
 //!
 //! # Connection model (OQ-5, spine §3.3 — RESOLVED)
 //!
