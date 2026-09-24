@@ -431,6 +431,7 @@ shape (only additive `contract_version` bumps).
 | FR-21 | Saved queries (named reusable `list` filter sets) | policy, storage, engine, mcp |
 | FR-22 | Audit / flight recorder: append-only `interactions.jsonl`, Tier-1 attribution (capture-only) | engine, sync, mcp |
 | FR-23 | Shell completions (bash/zsh/fish/powershell/elvish) | cli |
+| FR-14 (`init --agents`) | `init --agents` opts into the `agents` managed-block merge after a successful scaffold; a bare `init` prints a stderr hint naming `unblock agents --dir` (onboarding DX from dogfooding, `ub-lp9.14`; PRD §4 D27/AF-3 amended in place, no new D-id) | cli |
 | — | **TOON output** (feature-gated) in render | render |
 
 ### Crates touched
@@ -864,7 +865,7 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 | Shared engine + write Semaphore + read fast path (FR-9/10) | ● | | | | ◐ primary-serialized topology | | ◐ TTL | |
 | Agent contract + exit codes + capabilities/schema (FR-11/12) | ● | | | ◐ planning tool (additive bump) | | | ◐ richer | |
 | Layered config (FR-13) | ● subset | | ● full | | ◐ remote keys + config split | | | |
-| Workspace bootstrap (FR-14) | ● | | | | ◐ multi-ws + join-remote onboarding | | | |
+| Workspace bootstrap (FR-14) | ● | | ◐ `init --agents` opt-in + next-step hint | | ◐ multi-ws + join-remote onboarding | | | |
 | Pure-DB diagnostics (FR-15) | ● | ◐ D45 `dangling` action | | ◐ milestone filters/counters | | | | |
 | Workspace health (FR-16) | ● lite | ◐ D45 dangling findings folded into doctor-lite | ● full | | ◐ remote-mode health | | ◐ scale | |
 | Cooperative shutdown (FR-17) | ● | | | | | | | |

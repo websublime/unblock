@@ -101,14 +101,25 @@ unblock's product surface is MCP, so the goal is to get an MCP client spawning t
    unblock init                 # or: unblock init --prefix myproj
    ```
 
-2. **Write the agent wiring block.** Writes/refreshes a managed block in `AGENTS.md` (delimited by
-   `<!-- BEGIN unblock -->` / `<!-- END unblock -->`) documenting the full MCP surface — tool,
-   resource, and prompt tables, the per-action parameter surface, the error-code/exit table, and the
-   contract id. This is the machine-facing wiring doc for agents in the workspace.
+   From v1.1, `unblock init --agents` also writes the step 2 block in the same run, and a bare
+   `unblock init` prints a one-line hint on stderr naming the `unblock agents --dir …` command to run
+   next (`-q` silences it). Release 1.0.x has neither, and it rejects `--agents` as a usage error.
+
+2. **Write or refresh the agent wiring block.** Writes/refreshes a managed block in `AGENTS.md`
+   (delimited by `<!-- BEGIN unblock -->` / `<!-- END unblock -->`) documenting the full MCP surface —
+   tool, resource, and prompt tables, the per-action parameter surface, the error-code/exit table, and
+   the contract id. This is the machine-facing wiring doc for agents in the workspace.
 
    ```sh
    unblock agents
    ```
+
+   Run it after a bare `init`, and again after upgrading `unblock`, because the block carries the
+   binary's contract id. From v1.1, `init --agents` runs it once for you. `unblock agents` is the
+   only non-destructive way to refresh the block on an existing workspace, because a second
+   `init --agents` is refused by the clobber guard and `init --force` replaces `config.toml` wholesale
+   (the prefix resets to `ub` unless `--prefix` is passed, and every other key, a custom `db_filename`
+   included, is dropped).
 
 3. **Register the server with your MCP client.** Point the client at the `unblock` binary over stdio.
    **How you point at the workspace depends on where the config lives** — a config committed to the repo
@@ -247,8 +258,9 @@ The `unblock` binary is lifecycle/ops only — domain features are MCP tools. Se
 | `unblock agents` | Write / refresh the managed `AGENTS.md` MCP-wiring block (FR-14) |
 | `unblock update` | Self-update the `unblock` binary (checksum-verified before swap, FR-25/D17) |
 
-Command-specific flags: `init` takes `--prefix <PREFIX>` and `--force`; `update` takes `--dry-run`;
-`version` takes `--short`.
+Command-specific flags: `init` takes `--prefix <PREFIX>`, `--force` and, from v1.1, `--agents` (after
+scaffolding, it also writes the `AGENTS.md` block through the same merge `unblock agents` runs);
+`update` takes `--dry-run`; `version` takes `--short`.
 
 **Global options** (present on every subcommand):
 

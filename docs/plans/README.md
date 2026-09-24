@@ -94,7 +94,7 @@ Legend: ● new/major work · ◐ extended/hardened · (—) untouched.
 | `unblock-engine` | ● Session lifecycle/read/write/interchange/shutdown | ● organization/coordination/gates/saved_queries/audit | ◐ `remote_wiring.rs` | ◐ `compaction.rs` |
 | `unblock-render` | ● renderer/format/backends/sanitize | ◐ toon + v1.1 DTO views | (—) | ◐ `stream.rs` |
 | `unblock-mcp` | ● 8 tools (D37 added `comment` at T3.9 — RK-3 budget FULL) + resources + prompts + server | ● discriminator growth + coordination resource | ◐ remote-status resource (shape open) | ◐ batch/streaming/changes |
-| `unblock-cli` | ● mcp/migrate/doctor/version/init/agents + `unblock update` (FR-25, D17; axoupdater dep) | ● completions | (—) | (—) |
+| `unblock-cli` | ● mcp/migrate/doctor/version/init/agents + `unblock update` (FR-25, D17; axoupdater dep) | ● completions · ◐ `init --agents` + next-step hint (`ub-lp9.14`) | (—) | (—) |
 | `unblock-fuzz` | ● content_hash/jsonl/sync_cycle/bd/query/config-smoke | ● config full + claim_race | ◐ remote_http (feature) | ◐ scale_ingest |
 
 > **Note (2026-07-20, D41 resequence):** this per-crate table predates the full v1.2–v1.5 shape, and its two PROPOSED columns are **relabeled, not re-scoped**: **v1.3 (PROPOSED)** carries the shared-state work (REMOTE mode over SQL-over-HTTP, credentials, multi-workspace — D51) and **v1.5 (PROPOSED)** carries the scale / swarm-coordination / MCP-richness work — numbered v1.2 and v1.4 respectively before D41. The **v1.2 planning layer** (milestones + goals) and the **v1.4 local TUI** are not yet represented as columns here. `00-roadmap.md` §3–§7 (and the roadmap §9 crate-impact table) is authoritative for the v1.2–v1.5 crate shape.
