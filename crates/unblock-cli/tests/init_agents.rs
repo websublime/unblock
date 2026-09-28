@@ -370,6 +370,31 @@ fn agents_managed_block_is_snapshot_pinned() {
     insta::assert_snapshot!("agents_managed_block", content);
 }
 
+/// A stderr whose reader has exited fails the "wrote X" note, and `agents` still exits 0.
+#[cfg(unix)]
+#[test]
+fn agents_with_a_broken_stderr_still_exits_0() {
+    let ws = Workspace::init();
+    let (reader, writer) = std::io::pipe().expect("create a pipe");
+    drop(reader);
+
+    let out = ws
+        .cmd()
+        .arg("agents")
+        .stderr(writer)
+        .output()
+        .expect("run agents");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a failed note must not change the exit code"
+    );
+    assert!(
+        ws.root().join("AGENTS.md").is_file(),
+        "agents writes AGENTS.md before the note"
+    );
+}
+
 #[test]
 fn agents_requires_a_workspace() {
     // `agents` opens resolve-only — no workspace → NotInitialized (exit 2), so AGENTS.md sits next to
