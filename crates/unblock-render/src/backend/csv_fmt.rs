@@ -1,15 +1,18 @@
-//! CSV backend (RFC-4180) — hand-rolled, byte-faithful port of the original `format/csv.rs`.
+//! CSV backend (RFC-4180), a hand-rolled, byte-faithful port of the original `format/csv.rs`.
 //!
-//! There is **no** `csv` runtime dependency (decision #2): `escape_field` is ported verbatim
-//! (manual double-quote wrapping + quote-doubling + the formula-injection guard) and rows are
-//! written via `writeln!` into an in-memory `String` (infallible — no I/O, no `IoError` path). Only
-//! `issue`/`issues` produce CSV; every other kind returns [`RenderError::UnsupportedFormat`].
+//! The crate has no `csv` runtime dependency (decision #2). `escape_field` is ported verbatim, with
+//! its manual double-quote wrapping, quote-doubling and formula-injection guard. Every view builds
+//! its payload in an in-memory `String`, so no I/O and no `IoError` path exist. `issue`/`issues`
+//! render the issue columns, and `diagnostics` renders a lifecycle report as `label,detail` rows, a
+//! view the original lacks. `counts`, `dep_tree`, `cycles` and `structured_error` return
+//! [`RenderError::UnsupportedFormat`].
 //!
-//! Untrusted columns (`id`, `title`, `description`, `notes`, `assignee`, `owner`, `external_ref`,
-//! and the `status`/`issue_type` open-enum labels incl. their `Custom` arms) are routed through
-//! [`crate::sanitize::sanitize_inline`] **before** `escape_field` (sanitize → escape; NFR-18 /
-//! MF-2). Machine-generated columns (timestamps via [`crate::fmt_ts`], the bare-int `priority`) are
-//! control-free by construction and are not sanitized.
+//! Untrusted cells pass through [`crate::sanitize::sanitize_inline`] **before** `escape_field`
+//! (sanitize → escape; NFR-18 / MF-2). They are the issue columns `id`, `title`, `description`,
+//! `notes`, `assignee`, `owner` and `external_ref`, the `status`/`issue_type` open-enum labels incl.
+//! their `Custom` arms, and every diagnostics `label` and `detail`. Machine-generated columns
+//! (timestamps via [`crate::fmt_ts`], the bare-int `priority`) are control-free by construction and
+//! are not sanitized.
 
 use std::fmt::Write as _;
 
@@ -54,6 +57,9 @@ pub(crate) const ALL_FIELDS: &[&str] = &[
     "notes",
     "external_ref",
 ];
+
+/// The header row of the `diagnostics` view.
+const DIAGNOSTICS_HEADER: [&str; 2] = ["label", "detail"];
 
 /// Escape a CSV field value — **verbatim** port of the original (`csv.rs:46-64`).
 ///
@@ -121,7 +127,7 @@ fn optional_user(value: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-/// The CSV renderer. `fields` is resolved at construction (default or validated selection).
+/// The CSV renderer. `resolve_fields` resolves the issue field list on each call.
 pub(crate) struct CsvRenderer {
     opts: RenderOptions,
 }
@@ -237,24 +243,34 @@ impl Renderer for CsvRenderer {
         })
     }
 
+    /// Renders the `label,detail` header, then one row per finding in caller order.
+    ///
+    /// Each cell is sanitized, then escaped, so every record stays on one physical line. Rows join
+    /// with `\n` and the payload ends without a newline. The report `kind` is not rendered, and
+    /// `csv_fields` does not apply.
     fn diagnostics(
         &self,
-        _value: &unblock_model::DiagnosticReport,
+        value: &unblock_model::DiagnosticReport,
         _opts: &RenderOptions,
     ) -> Result<RenderOutput, RenderError> {
-        Err(RenderError::UnsupportedFormat {
-            format: unblock_model::OutputFormat::Csv,
-        })
+        let mut lines = Vec::with_capacity(value.findings.len() + 1);
+        lines.push(DIAGNOSTICS_HEADER.map(escape_field).join(","));
+        for finding in &value.findings {
+            let label = escape_field(&sanitize_inline(&finding.label));
+            let detail = escape_field(&sanitize_inline(&finding.detail));
+            lines.push(format!("{label},{detail}"));
+        }
+        Ok(RenderOutput::new(lines.join("\n"), ContentType::Csv))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ALL_FIELDS, CsvRenderer, DEFAULT_FIELDS, escape_field, get_field_value};
-    use crate::options::RenderOptions;
+    use crate::options::{ContentType, RenderOptions, RenderOutput};
     use crate::renderer::Renderer;
     use chrono::{TimeZone, Utc};
-    use unblock_model::{Issue, Status};
+    use unblock_model::{DiagnosticFinding, DiagnosticKind, DiagnosticReport, Issue, Status};
 
     fn fixture(id: &str, title: &str) -> Issue {
         Issue {
@@ -350,5 +366,88 @@ mod tests {
     fn unsupported_kinds_error() {
         let r = CsvRenderer::new(RenderOptions::default());
         assert!(r.counts(&[], &RenderOptions::default()).is_err());
+    }
+
+    fn report(kind: DiagnosticKind, findings: &[(&str, &str)]) -> DiagnosticReport {
+        DiagnosticReport {
+            kind,
+            findings: findings
+                .iter()
+                .map(|(label, detail)| DiagnosticFinding {
+                    label: (*label).to_string(),
+                    detail: (*detail).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn render_diagnostics(value: &DiagnosticReport, opts: &RenderOptions) -> RenderOutput {
+        CsvRenderer::new(opts.clone())
+            .diagnostics(value, opts)
+            .expect("csv renders a diagnostics report")
+    }
+
+    /// Pins the exact bytes. The `total` row precedes `open`, so any sorting of the rows shows.
+    #[test]
+    fn diagnostics_is_a_header_then_one_row_per_finding() {
+        let value = report(DiagnosticKind::Stats, &[("total", "42"), ("open", "7")]);
+        let out = render_diagnostics(&value, &RenderOptions::default());
+        assert_eq!(out.stdout, "label,detail\ntotal,42\nopen,7");
+        assert_eq!(out.content_type, ContentType::Csv);
+    }
+
+    /// Each cell is sanitized, then escaped. The labels and the details both carry cells that need
+    /// quoting, and the raw string holds the escapes as literal text.
+    #[test]
+    fn diagnostics_cells_are_sanitized_then_escaped() {
+        let value = report(
+            DiagnosticKind::Info,
+            &[
+                ("features", "remote,self-update"),
+                ("say \"hi\"", "ok"),
+                ("formula", "=HYPERLINK(\"x\")"),
+                ("ub-\x07bell", "blocks -> ub-ghost"),
+                ("esc", "danger\x1b[2Jwipe"),
+                (
+                    "integrity_problem",
+                    "*** in database main ***\nPage 3 is never used",
+                ),
+            ],
+        );
+        let out = render_diagnostics(&value, &RenderOptions::default());
+        let expected = r#"label,detail
+features,"remote,self-update"
+"say ""hi""",ok
+formula,"'=HYPERLINK(""x"")"
+ub-\u{7}bell,blocks -> ub-ghost
+esc,danger\u{1b}[2Jwipe
+integrity_problem,*** in database main ***\nPage 3 is never used"#;
+        assert_eq!(out.stdout, expected);
+        assert!(!out.stdout.contains(['\x1b', '\x07']), "no raw ESC or BEL");
+    }
+
+    /// `csv_fields` selects issue columns, so an unknown name leaves the `diagnostics` view alone.
+    #[test]
+    fn diagnostics_ignores_csv_fields() {
+        let opts = RenderOptions::default().with_csv_fields(Some(vec!["bogus".to_string()]));
+        let value = report(DiagnosticKind::Info, &[("health", "healthy")]);
+        let out = render_diagnostics(&value, &opts);
+        assert_eq!(out.stdout, "label,detail\nhealth,healthy");
+    }
+
+    #[test]
+    fn empty_diagnostics_is_header_only() {
+        let value = report(DiagnosticKind::Info, &[]);
+        let out = render_diagnostics(&value, &RenderOptions::default());
+        assert_eq!(out.stdout, "label,detail");
+    }
+
+    #[test]
+    fn diagnostics_kind_is_not_rendered() {
+        let findings = [("version", "1.0.0"), ("build", "debug")];
+        let opts = RenderOptions::default();
+        let version = render_diagnostics(&report(DiagnosticKind::Version, &findings), &opts);
+        let info = render_diagnostics(&report(DiagnosticKind::Info, &findings), &opts);
+        assert_eq!(version.stdout, info.stdout);
     }
 }

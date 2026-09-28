@@ -6,10 +6,13 @@
 //! - `sanitize_inline` never panics and **never** emits a raw control byte (it escapes `\n`/`\t`
 //!   too);
 //! - `sanitize_text` never panics and never emits a raw control byte except the allowed `\n`/`\t`;
-//! - both are idempotent on already-sanitized input.
+//! - both are idempotent on already-sanitized input;
+//! - the csv `diagnostics` view writes one physical line and two cells per record, whatever the
+//!   label and detail hold.
 
 use proptest::prelude::*;
-use unblock_render::{sanitize_inline, sanitize_text};
+use unblock_model::{DiagnosticFinding, DiagnosticKind, DiagnosticReport, OutputFormat};
+use unblock_render::{RenderOptions, renderer_for, sanitize_inline, sanitize_text};
 
 /// A seed corpus of adversarial inputs that must always sanitize cleanly.
 const SEEDS: &[&str] = &[
@@ -76,5 +79,40 @@ proptest! {
         let once = sanitize_text(&input).into_owned();
         let twice = sanitize_text(&once).into_owned();
         prop_assert_eq!(once, twice);
+    }
+
+    /// `(?s)` lets `.` yield `\n`, which a bare `.*` never does.
+    #[test]
+    fn csv_diagnostics_is_one_line_and_two_cells_per_record(
+        rows in proptest::collection::vec(("(?s).{0,24}", "(?s).{0,24}"), 0..8)
+    ) {
+        let report = DiagnosticReport {
+            kind: DiagnosticKind::Info,
+            findings: rows
+                .iter()
+                .map(|(label, detail)| DiagnosticFinding {
+                    label: label.clone(),
+                    detail: detail.clone(),
+                })
+                .collect(),
+        };
+        let opts = RenderOptions::default();
+        let out = renderer_for(OutputFormat::Csv, opts.clone())
+            .diagnostics(&report, &opts)
+            .expect("csv renders diagnostics");
+
+        prop_assert_eq!(out.stdout.split('\n').count(), rows.len() + 1);
+        prop_assert!(!out.stdout.chars().any(|c| c.is_control() && c != '\n'));
+
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(out.stdout.as_bytes());
+        let mut records = 0usize;
+        for record in reader.records() {
+            let record = record.expect("emitted CSV must be RFC-4180 well-formed");
+            prop_assert_eq!(record.len(), 2);
+            records += 1;
+        }
+        prop_assert_eq!(records, rows.len());
     }
 }

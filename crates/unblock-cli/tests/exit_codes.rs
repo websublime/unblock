@@ -56,6 +56,37 @@ fn exit_0_success_emits_valid_json_on_stdout() {
     assert_eq!(value["kind"], "version", "the version report shape");
 }
 
+/// `version -o csv` renders one `label,detail` document and exits 0. The renderer ends its payload
+/// without a newline and `emit_report` adds exactly one.
+#[test]
+fn version_csv_is_one_label_detail_document() {
+    let out = unblock()
+        .args(["version", "--output", "csv"])
+        .output()
+        .expect("run version");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "exit code; stderr: {stderr}");
+    assert!(
+        !stderr.contains("error["),
+        "no error line; stderr: {stderr}"
+    );
+
+    let stdout = String::from_utf8(out.stdout.clone()).expect("utf-8 stdout");
+    assert!(
+        stdout.starts_with("label,detail\n"),
+        "the csv header opens the document: {stdout:?}"
+    );
+    assert!(
+        stdout.ends_with('\n') && !stdout.ends_with("\n\n"),
+        "the document ends in exactly one newline: {stdout:?}"
+    );
+    let records = common::csv_report(&out.stdout);
+    let labels = common::csv_labels(&records);
+    assert_eq!(labels.first(), Some(&"version"), "labels: {labels:?}");
+    assert_eq!(labels.get(1), Some(&"build"), "labels: {labels:?}");
+    assert_eq!(labels.last(), Some(&"features"), "labels: {labels:?}");
+}
+
 #[test]
 fn exit_1_internal_error_from_update_unconfigured() {
     // `update` outside a dist install refuses (the release source is not configured/verifiable) →

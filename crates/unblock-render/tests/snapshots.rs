@@ -182,6 +182,7 @@ fn plain_goldens() {
 #[test]
 fn csv_goldens() {
     snap!("csv_issues_default_fields", OutputFormat::Csv, "issues");
+    snap!("csv_diagnostics", OutputFormat::Csv, "diagnostics");
 
     // Empty list = header only.
     let opts = RenderOptions::default();

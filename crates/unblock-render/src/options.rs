@@ -32,7 +32,8 @@ pub struct RenderOptions {
     pub pretty_json: bool,
     /// Maximum visible width for single-line plain output (title truncation). `None` = no cap.
     pub max_width: Option<usize>,
-    /// Explicit CSV field selection. `None` = the default 8-column set.
+    /// Selects the CSV issue columns. `None` selects the default 8-column set. The `diagnostics` view
+    /// ignores it.
     pub csv_fields: Option<Vec<String>>,
     /// Render timestamps at second precision (the only supported form; reserved for future
     /// sub-second toggles). Currently informational — [`crate::fmt_ts`] is always second-precision.

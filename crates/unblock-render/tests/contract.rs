@@ -3,7 +3,8 @@
 //!
 //! For each (format × kind) it asserts: (a) no panic, (b) byte-determinism across two runs, (c)
 //! parse-back for the structured formats — json/robot via serde to the equal §1.10 DTO, csv via
-//! `csv::Reader` (dev-dep, read side only) for RFC-4180 well-formedness + cell count.
+//! `csv::Reader` (dev-dep, read side only) for RFC-4180 well-formedness + cell count. csv re-parses
+//! the `issues` view and `diagnostics`.
 //!
 //! Two HARD acceptance criteria are pinned here (they cannot be skipped at Verify):
 //! - the **context-value-ESC escape** test (plain/markdown/csv) — an ESC byte in a
@@ -17,7 +18,9 @@ use unblock_model::{
     CountBucket, DepTree, DependencyType, DiagnosticFinding, DiagnosticKind, DiagnosticReport,
     GraphEdge, Issue, OutputFormat, Status,
 };
-use unblock_render::{ContentType, RenderOptions, RenderOutput, renderer_for};
+use unblock_render::{
+    ContentType, RenderError, RenderOptions, RenderOutput, renderer_for, sanitize_inline,
+};
 
 fn all_formats() -> Vec<OutputFormat> {
     let formats = vec![
@@ -225,15 +228,119 @@ fn csv_reparses_to_same_cell_count() {
     assert_eq!(data_rows, issues.len());
 }
 
+/// `RenderError` derives only `Debug` and `Snafu`, so the variant is matched, not compared.
 #[test]
-fn csv_rejects_non_issue_kinds() {
+fn csv_rejects_counts_trees_cycles_and_errors() {
     let opts = RenderOptions::default();
     let r = renderer_for(OutputFormat::Csv, opts.clone());
-    assert!(r.counts(&counts_fixture(), &opts).is_err());
-    assert!(r.dep_tree(&dep_tree_fixture(), &opts).is_err());
-    assert!(r.cycles(&cycles_fixture(), &opts).is_err());
-    assert!(r.structured_error(&error_fixture(), &opts).is_err());
-    assert!(r.diagnostics(&diagnostics_fixture(), &opts).is_err());
+    assert!(matches!(
+        r.counts(&counts_fixture(), &opts),
+        Err(RenderError::UnsupportedFormat {
+            format: OutputFormat::Csv
+        })
+    ));
+    assert!(matches!(
+        r.dep_tree(&dep_tree_fixture(), &opts),
+        Err(RenderError::UnsupportedFormat {
+            format: OutputFormat::Csv
+        })
+    ));
+    assert!(matches!(
+        r.cycles(&cycles_fixture(), &opts),
+        Err(RenderError::UnsupportedFormat {
+            format: OutputFormat::Csv
+        })
+    ));
+    assert!(matches!(
+        r.structured_error(&error_fixture(), &opts),
+        Err(RenderError::UnsupportedFormat {
+            format: OutputFormat::Csv
+        })
+    ));
+}
+
+fn finding(label: &str, detail: &str) -> DiagnosticFinding {
+    DiagnosticFinding {
+        label: label.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+/// A comma, a quote and an embedded newline each re-parse to exactly two cells per record. The
+/// reader is not flexible, so a record with a third cell fails the parse.
+#[test]
+fn csv_diagnostics_reparses_to_two_cells_per_finding() {
+    let opts = RenderOptions::default();
+    let report = DiagnosticReport {
+        kind: DiagnosticKind::Info,
+        findings: vec![
+            finding("features", "remote,self-update"),
+            finding("say \"hi\"", "ok"),
+            finding("sidecar_mismatch", "sidecar mismatch (WAL=true, SHM=false)"),
+            finding(
+                "integrity_problem",
+                "*** in database main ***\nPage 3 is never used",
+            ),
+        ],
+    };
+    let out = renderer_for(OutputFormat::Csv, opts.clone())
+        .diagnostics(&report, &opts)
+        .expect("csv renders diagnostics");
+
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(out.stdout.as_bytes());
+    let headers: Vec<String> = reader
+        .headers()
+        .expect("a header row")
+        .iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(headers, ["label", "detail"]);
+    let records: Vec<csv::StringRecord> = reader
+        .records()
+        .collect::<Result<_, _>>()
+        .expect("emitted CSV must be RFC-4180 well-formed");
+    assert_eq!(
+        records.len(),
+        report.findings.len(),
+        "one record per finding"
+    );
+    for (record, finding) in records.iter().zip(&report.findings) {
+        assert_eq!(record.len(), 2, "two cells per record: {record:?}");
+        assert_eq!(&record[0], sanitize_inline(&finding.label));
+        assert_eq!(&record[1], sanitize_inline(&finding.detail));
+    }
+}
+
+/// The CLI's `emit_report` appends exactly one newline, so no format may end its payload with one,
+/// even when the last detail does.
+#[test]
+fn diagnostics_payloads_end_without_a_newline_in_every_format() {
+    let opts = RenderOptions::default();
+    let report = DiagnosticReport {
+        kind: DiagnosticKind::Info,
+        findings: vec![
+            finding("health", "healthy"),
+            finding("integrity_problem", "Page 3 is never used\n"),
+        ],
+    };
+    for fmt in [
+        OutputFormat::Json,
+        OutputFormat::Robot,
+        OutputFormat::Plain,
+        OutputFormat::Csv,
+        OutputFormat::Markdown,
+    ] {
+        let out = renderer_for(fmt, opts.clone())
+            .diagnostics(&report, &opts)
+            .unwrap_or_else(|err| panic!("{fmt:?} renders diagnostics: {err}"));
+        assert!(
+            !out.stdout.ends_with('\n'),
+            "{fmt:?} must end its payload without a newline: {:?}",
+            out.stdout
+        );
+    }
 }
 
 // ----- HARD AC 1: context-value ESC escape across plain/markdown (csv: Custom status) -----
