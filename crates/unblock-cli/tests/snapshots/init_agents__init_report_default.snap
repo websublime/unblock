@@ -1,0 +1,29 @@
+---
+source: crates/unblock-cli/tests/init_agents.rs
+expression: "redacted_init_report(&[])"
+---
+{
+  "findings": [
+    {
+      "detail": "<root>",
+      "label": "workspace_dir"
+    },
+    {
+      "detail": "<root>/.unblock",
+      "label": "unblock_dir"
+    },
+    {
+      "detail": "<root>/.unblock/unblock.db",
+      "label": "db_path"
+    },
+    {
+      "detail": "<root>/.unblock/config.toml",
+      "label": "config_path"
+    },
+    {
+      "detail": "ub",
+      "label": "id_prefix"
+    }
+  ],
+  "kind": "info"
+}

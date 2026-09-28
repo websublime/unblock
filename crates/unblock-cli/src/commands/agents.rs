@@ -1,10 +1,12 @@
 //! `unblock agents` (FR-14, D27/AF-3, T3.4.3/D33) — inject/maintain a managed `AGENTS.md` block: a
 //! FULL capabilities table rendered from the typed `unblock_mcp::agents_digest()` (Option C).
 //!
-//! A pure file op (SEPARATE from `init`): resolve-only open (`open_workspace_with_cli`, NO DB) to find
-//! `workspace_dir`, then an idempotent merge of a MANAGED block delimited by markers (a re-run updates
-//! ONLY the block). Requires an existing workspace (`WorkspaceNotFound` → `NotInitialized`, exit 2) so
-//! `AGENTS.md` sits next to `.unblock/`. Writes a terse "wrote X" note to stderr.
+//! `agents` is a pure file op and a separate command, and `init --agents` calls the same write. It
+//! opens resolve-only (`open_workspace_with_cli`, no database) to find `workspace_dir`, then merges
+//! a managed block delimited by markers, so a re-run updates only the block. It requires an
+//! existing workspace (`WorkspaceNotFound` → `NotInitialized`, exit 2), so `AGENTS.md` sits next to
+//! the workspace dir. [`write_managed_block`] holds the merge and the terse "wrote X" note on
+//! stderr, and it returns the raw I/O error, so each caller attaches its own.
 //!
 //! [`managed_block`] is a THIN markdown renderer over [`unblock_mcp::agents_digest`] (D33): the
 //! schema-shape walk (incl. resolving an arm-root `$ref`, e.g. `issue create` → `title`) lives in

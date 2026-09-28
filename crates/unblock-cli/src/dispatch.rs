@@ -4,7 +4,9 @@
 //! **Who opens a `WorkspaceContext` via `open_with_storage_with_cli`:** mcp, migrate, doctor.
 //! **Who does NOT open storage:** `version` (pure `build.rs` env — runs OUTSIDE a workspace),
 //! `update` (self-update, no workspace). **`init`** creates + opens through the facade (one code path,
-//! FR-9 no-drift). **`agents`** opens resolve-only (NO DB) to learn `workspace_dir`.
+//! FR-9 no-drift), and `init --agents` then runs the shared `AGENTS.md` write at that open's own
+//! `workspace_dir`. **`agents`** opens resolve-only (NO DB) to learn `workspace_dir`, then runs the
+//! same write.
 //!
 //! Each handler returns `Result<Option<u8>, CliError>`: `Some(128+signo)` = an `mcp` signal exit;
 //! `None` = success (exit 0). `run_with` maps that through the exit boundary.
