@@ -206,14 +206,15 @@ fn diag_to(message: &str, out: &mut impl Write) {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::path::PathBuf;
 
     use super::{
         InitReport, MigrateReport, ToDiagnosticReport, VersionReport, diag_to, pick_cli_format,
     };
     use crate::cli::GlobalArgs;
-    use unblock_engine::{DiagnosticKind, DiagnosticReport};
-    use unblock_render::OutputFormat;
+    use unblock_engine::{DiagnosticFinding, DiagnosticKind, DiagnosticReport};
+    use unblock_render::{OutputFormat, RenderOptions, renderer_for};
 
     /// A writer whose every write fails, as a stderr whose reader has exited does.
     struct ClosedWriter;
@@ -367,6 +368,86 @@ mod tests {
         // SAFETY of test: only assert the flag-absent + env-absent default deterministically.
         if std::env::var("UNBLOCK_OUTPUT_FORMAT").is_err() {
             assert_eq!(pick_cli_format(&bare), OutputFormat::Json);
+        }
+    }
+
+    /// Renders `report` in all five formats, one payload under each `--- <format>` delimiter, and
+    /// closes the document with `--- end`. A payload that ends in a newline shows as a blank line
+    /// before the next delimiter.
+    fn render_in_every_format(report: &DiagnosticReport) -> String {
+        let mut document = String::new();
+        for (name, format) in [
+            ("json", OutputFormat::Json),
+            ("robot", OutputFormat::Robot),
+            ("plain", OutputFormat::Plain),
+            ("csv", OutputFormat::Csv),
+            ("markdown", OutputFormat::Markdown),
+        ] {
+            let opts = RenderOptions::default();
+            let out = renderer_for(format, opts.clone())
+                .diagnostics(report, &opts)
+                .unwrap_or_else(|e| panic!("{name} renders a lifecycle report: {e}"));
+            let _ = writeln!(document, "--- {name}\n{}", out.stdout);
+        }
+        document.push_str("--- end\n");
+        document
+    }
+
+    /// A report shaped like the one `Session::doctor()` returns. Its integrity problem holds a
+    /// newline, and its sidecar detail holds a comma.
+    fn doctor_report() -> DiagnosticReport {
+        let rows = [
+            ("health", "recoverable"),
+            ("integrity", "1 problem(s)"),
+            (
+                "integrity_problem",
+                "*** in database main ***\nPage 3 is never used",
+            ),
+            ("sidecar_mismatch", "sidecar mismatch (WAL=false, SHM=true)"),
+            ("schema_version", "2"),
+            ("schema_expected", "2"),
+            ("ub-a1", "blocks -> ub-ghost"),
+        ];
+        DiagnosticReport {
+            kind: DiagnosticKind::Info,
+            findings: rows
+                .into_iter()
+                .map(|(label, detail)| DiagnosticFinding {
+                    label: label.to_string(),
+                    detail: detail.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn lifecycle_reports_render_in_all_five_formats() {
+        let version = VersionReport {
+            version: "1.0.1".to_string(),
+            build: "release".to_string(),
+            commit: Some("abc1234".to_string()),
+            rustc: Some("1.96.0".to_string()),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            features: vec!["remote".to_string(), "self-update".to_string()],
+        };
+        let migrate = MigrateReport {
+            database: "/ws/.unblock/unblock.db".into(),
+            schema_from: 1,
+            schema_to: 2,
+            applied: true,
+        };
+        let reports = [
+            ("lifecycle_version", version.to_report()),
+            ("lifecycle_migrate", migrate.to_report()),
+            ("lifecycle_doctor", doctor_report()),
+            ("lifecycle_init", init_report(None).to_report()),
+            (
+                "lifecycle_init_with_agents",
+                init_report(Some("/ws/AGENTS.md")).to_report(),
+            ),
+        ];
+        for (name, report) in reports {
+            insta::assert_snapshot!(name, render_in_every_format(&report));
         }
     }
 }

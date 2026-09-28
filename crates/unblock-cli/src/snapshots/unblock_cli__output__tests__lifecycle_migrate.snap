@@ -1,0 +1,30 @@
+---
+source: crates/unblock-cli/src/output.rs
+expression: render_in_every_format(&report)
+---
+--- json
+{"kind":"info","findings":[{"label":"database","detail":"/ws/.unblock/unblock.db"},{"label":"schema_from","detail":"1"},{"label":"schema_to","detail":"2"},{"label":"applied","detail":"true"}]}
+--- robot
+{"kind":"info","findings":[{"label":"database","detail":"/ws/.unblock/unblock.db"},{"label":"schema_from","detail":"1"},{"label":"schema_to","detail":"2"},{"label":"applied","detail":"true"}]}
+--- plain
+Diagnostics: Info
+  database: /ws/.unblock/unblock.db
+  schema_from: 1
+  schema_to: 2
+  applied: true
+--- csv
+label,detail
+database,/ws/.unblock/unblock.db
+schema_from,1
+schema_to,2
+applied,true
+--- markdown
+## Diagnostics: Info
+
+| label | detail |
+| --- | --- |
+| database | /ws/\.unblock/unblock\.db |
+| schema\_from | 1 |
+| schema\_to | 2 |
+| applied | true |
+--- end
