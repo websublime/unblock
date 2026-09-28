@@ -1,0 +1,33 @@
+---
+source: crates/unblock-cli/src/output.rs
+expression: render_in_every_format(&report)
+---
+--- json
+{"kind":"info","findings":[{"label":"workspace_dir","detail":"/ws"},{"label":"unblock_dir","detail":"/ws/.unblock"},{"label":"db_path","detail":"/ws/.unblock/unblock.db"},{"label":"config_path","detail":"/ws/.unblock/config.toml"},{"label":"id_prefix","detail":"ub"}]}
+--- robot
+{"kind":"info","findings":[{"label":"workspace_dir","detail":"/ws"},{"label":"unblock_dir","detail":"/ws/.unblock"},{"label":"db_path","detail":"/ws/.unblock/unblock.db"},{"label":"config_path","detail":"/ws/.unblock/config.toml"},{"label":"id_prefix","detail":"ub"}]}
+--- plain
+Diagnostics: Info
+  workspace_dir: /ws
+  unblock_dir: /ws/.unblock
+  db_path: /ws/.unblock/unblock.db
+  config_path: /ws/.unblock/config.toml
+  id_prefix: ub
+--- csv
+label,detail
+workspace_dir,/ws
+unblock_dir,/ws/.unblock
+db_path,/ws/.unblock/unblock.db
+config_path,/ws/.unblock/config.toml
+id_prefix,ub
+--- markdown
+## Diagnostics: Info
+
+| label | detail |
+| --- | --- |
+| workspace\_dir | /ws |
+| unblock\_dir | /ws/\.unblock |
+| db\_path | /ws/\.unblock/unblock\.db |
+| config\_path | /ws/\.unblock/config\.toml |
+| id\_prefix | ub |
+--- end

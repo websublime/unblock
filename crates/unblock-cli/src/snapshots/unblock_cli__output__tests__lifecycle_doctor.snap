@@ -1,0 +1,39 @@
+---
+source: crates/unblock-cli/src/output.rs
+expression: render_in_every_format(&report)
+---
+--- json
+{"kind":"info","findings":[{"label":"health","detail":"recoverable"},{"label":"integrity","detail":"1 problem(s)"},{"label":"integrity_problem","detail":"*** in database main ***\nPage 3 is never used"},{"label":"sidecar_mismatch","detail":"sidecar mismatch (WAL=false, SHM=true)"},{"label":"schema_version","detail":"2"},{"label":"schema_expected","detail":"2"},{"label":"ub-a1","detail":"blocks -> ub-ghost"}]}
+--- robot
+{"kind":"info","findings":[{"label":"health","detail":"recoverable"},{"label":"integrity","detail":"1 problem(s)"},{"label":"integrity_problem","detail":"*** in database main ***\nPage 3 is never used"},{"label":"sidecar_mismatch","detail":"sidecar mismatch (WAL=false, SHM=true)"},{"label":"schema_version","detail":"2"},{"label":"schema_expected","detail":"2"},{"label":"ub-a1","detail":"blocks -> ub-ghost"}]}
+--- plain
+Diagnostics: Info
+  health: recoverable
+  integrity: 1 problem(s)
+  integrity_problem: *** in database main ***\nPage 3 is never used
+  sidecar_mismatch: sidecar mismatch (WAL=false, SHM=true)
+  schema_version: 2
+  schema_expected: 2
+  ub-a1: blocks -> ub-ghost
+--- csv
+label,detail
+health,recoverable
+integrity,1 problem(s)
+integrity_problem,*** in database main ***\nPage 3 is never used
+sidecar_mismatch,"sidecar mismatch (WAL=false, SHM=true)"
+schema_version,2
+schema_expected,2
+ub-a1,blocks -> ub-ghost
+--- markdown
+## Diagnostics: Info
+
+| label | detail |
+| --- | --- |
+| health | recoverable |
+| integrity | 1 problem\(s\) |
+| integrity\_problem | \*\*\* in database main \*\*\*\\nPage 3 is never used |
+| sidecar\_mismatch | sidecar mismatch \(WAL=false, SHM=true\) |
+| schema\_version | 2 |
+| schema\_expected | 2 |
+| ub\-a1 | blocks \-\> ub\-ghost |
+--- end

@@ -1,0 +1,36 @@
+---
+source: crates/unblock-cli/src/output.rs
+expression: render_in_every_format(&report)
+---
+--- json
+{"kind":"version","findings":[{"label":"version","detail":"1.0.1"},{"label":"build","detail":"release"},{"label":"commit","detail":"abc1234"},{"label":"rustc","detail":"1.96.0"},{"label":"target","detail":"x86_64-unknown-linux-gnu"},{"label":"features","detail":"remote,self-update"}]}
+--- robot
+{"kind":"version","findings":[{"label":"version","detail":"1.0.1"},{"label":"build","detail":"release"},{"label":"commit","detail":"abc1234"},{"label":"rustc","detail":"1.96.0"},{"label":"target","detail":"x86_64-unknown-linux-gnu"},{"label":"features","detail":"remote,self-update"}]}
+--- plain
+Diagnostics: Version
+  version: 1.0.1
+  build: release
+  commit: abc1234
+  rustc: 1.96.0
+  target: x86_64-unknown-linux-gnu
+  features: remote,self-update
+--- csv
+label,detail
+version,1.0.1
+build,release
+commit,abc1234
+rustc,1.96.0
+target,x86_64-unknown-linux-gnu
+features,"remote,self-update"
+--- markdown
+## Diagnostics: Version
+
+| label | detail |
+| --- | --- |
+| version | 1\.0\.1 |
+| build | release |
+| commit | abc1234 |
+| rustc | 1\.96\.0 |
+| target | x86\_64\-unknown\-linux\-gnu |
+| features | remote,self\-update |
+--- end
