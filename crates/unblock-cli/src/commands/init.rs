@@ -12,11 +12,20 @@
 //! discovery at that root later binds the directory `init` scaffolds. `init` never walks up and
 //! never reads `CLAUDE_PROJECT_DIR`.
 //!
+//! The target's sibling is the other of `.unblock` and `_unblock` in the same parent, and two
+//! checks read the pair. Before the clobber guard, the binds-first check refuses the target with
+//! `CliError::SiblingBindsFirst` when the pair's `.unblock` is a directory holding no scaffold and
+//! its `_unblock` is the target or holds a scaffold, because discovery at their root binds that
+//! `.unblock/` first. After the clobber guard, the sibling guard refuses a target whose sibling
+//! holds a scaffold, naming the sibling. Both checks refuse with or without `--force`, and neither
+//! fires when the sibling resolves to the target itself.
+//!
 //! The open forwards the global flags with the target as its `--dir`, so `-o` and `--actor` reach
 //! config (the spine §5b forwarder rule). An actor that fails validation fails that open (exit 7)
 //! after `config.toml` is written, and `init --force` recovers.
 
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use snafu::{ResultExt, ensure};
 use unblock_config::{
@@ -25,7 +34,7 @@ use unblock_config::{
 use unblock_model::normalize_prefix;
 
 use crate::cli::{GlobalArgs, InitArgs};
-use crate::exit::{AlreadyInitializedSnafu, CliError, IoSnafu};
+use crate::exit::{AlreadyInitializedSnafu, CliError, IoSnafu, SiblingBindsFirstSnafu};
 use crate::output::{self, InitReport, ToDiagnosticReport};
 
 /// The scaffolded config filename.
@@ -40,7 +49,11 @@ const NEW_UNBLOCK_DIR: &str = UNBLOCK_DIR_NAMES[0];
 /// Run `unblock init`.
 ///
 /// # Errors
-/// - [`CliError::AlreadyInitialized`] if the target already holds a scaffold (no `--force`);
+/// - [`CliError::SiblingBindsFirst`] if discovery at the target's root binds a `.unblock` directory
+///   holding no scaffold before an `_unblock` that is the target or holds a scaffold, with or
+///   without `--force`;
+/// - [`CliError::AlreadyInitialized`] if the target already holds a scaffold (no `--force`), or if
+///   a distinct sibling of the target holds one, with or without `--force`;
 /// - [`CliError::Io`] if reading the cwd, creating the directory or writing `config.toml` fails;
 /// - [`CliError::Config`] if opening/migrating the fresh database fails;
 /// - [`CliError::Render`]/[`CliError::Io`] if rendering / writing the report fails.
@@ -48,32 +61,38 @@ pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, Cli
     // 1. Resolve the target, probing a project root the way discovery does.
     let unblock_dir = target_unblock_dir(global)?;
 
-    // 2. Clobber guard (AF-3): refuse if config.toml OR unblock.db already present without `--force`.
-    let config_path = unblock_dir.join(CONFIG_FILENAME);
-    let db_present = unblock_dir.join(DB_FILENAME).exists();
+    // 2. The binds-first check refuses the target when discovery at its root binds a `.unblock`
+    //    holding no scaffold before an `_unblock` that is the target or holds one.
+    check_binds_first(&unblock_dir)?;
+
+    // 3. The clobber guard (AF-3) refuses a target that already holds a scaffold, unless `--force`.
     ensure!(
-        args.force || !(config_path.exists() || db_present),
+        args.force || !is_scaffolded(&unblock_dir),
         AlreadyInitializedSnafu {
             path: unblock_dir.clone(),
         }
     );
 
-    // 3. Create the target (mkdir -p).
+    // 4. The sibling guard refuses a target beside a distinct sibling that holds a scaffold.
+    check_sibling(&unblock_dir)?;
+
+    // 5. Create the target (mkdir -p).
     std::fs::create_dir_all(&unblock_dir).context(IoSnafu)?;
 
-    // 4. Hand-write config.toml (`ProjectConfig` is Deserialize-only — DR-8). Seed the NORMALIZED prefix.
+    // 6. Hand-write config.toml (`ProjectConfig` is Deserialize-only — DR-8). Seed the NORMALIZED prefix.
     let prefix = args
         .prefix
         .as_deref()
         .map_or_else(|| DEFAULT_PREFIX.to_string(), normalize_prefix);
+    let config_path = unblock_dir.join(CONFIG_FILENAME);
     std::fs::write(&config_path, render_config_toml(&prefix)).context(IoSnafu)?;
 
-    // 5. Open+migrate via the facade to create the migrated empty unblock.db (FR-9 no-drift). The
+    // 7. Open+migrate via the facade to create the migrated empty unblock.db (FR-9 no-drift). The
     //    open forwards the global flags, and the target replaces any raw `--dir`.
     let overrides = global.to_overrides().with_dir(&unblock_dir);
     let ctx = open_with_storage_with_cli(&overrides).await?;
 
-    // 6. Report exactly what was scaffolded.
+    // 8. Report exactly what was scaffolded.
     let fmt = ctx.config.output_format;
     let report = InitReport {
         workspace_dir: ctx.workspace_dir,
@@ -99,6 +118,65 @@ fn target_unblock_dir(global: &GlobalArgs) -> Result<PathBuf, CliError> {
     Ok(probe_workspace_root(&root).unwrap_or_else(|| root.join(NEW_UNBLOCK_DIR)))
 }
 
+/// Refuses `target` through `SiblingBindsFirst` when discovery at its root binds a `.unblock`
+/// directory that holds no scaffold before the `_unblock` of the pair.
+///
+/// An `_unblock` target is refused beside such a `.unblock`. A `.unblock` target that is such a
+/// directory is refused when the `_unblock` beside it holds a scaffold. A pair that resolves to one
+/// directory never blocks.
+fn check_binds_first(target: &Path) -> Result<(), CliError> {
+    let Some(sibling) = sibling_unblock_dir(target) else {
+        return Ok(());
+    };
+    let target_is_dot = target.file_name() == Some(OsStr::new(NEW_UNBLOCK_DIR));
+    if target_is_dot && !is_scaffolded(&sibling) {
+        return Ok(());
+    }
+    let (bound, hidden) = if target_is_dot {
+        (target.to_path_buf(), sibling)
+    } else {
+        (sibling, target.to_path_buf())
+    };
+    if !bound.is_dir() || is_scaffolded(&bound) || is_same_dir(&bound, &hidden) {
+        return Ok(());
+    }
+    SiblingBindsFirstSnafu { bound, hidden }.fail()
+}
+
+/// Refuses `target` through `AlreadyInitialized` naming a distinct sibling that holds a scaffold.
+fn check_sibling(target: &Path) -> Result<(), CliError> {
+    let Some(sibling) = sibling_unblock_dir(target) else {
+        return Ok(());
+    };
+    if !is_scaffolded(&sibling) || is_same_dir(&sibling, target) {
+        return Ok(());
+    }
+    AlreadyInitializedSnafu { path: sibling }.fail()
+}
+
+/// Returns `target` with its workspace-dir name swapped for the other one.
+fn sibling_unblock_dir(target: &Path) -> Option<PathBuf> {
+    let name = target.file_name()?;
+    UNBLOCK_DIR_NAMES
+        .iter()
+        .find(|other| OsStr::new(other) != name)
+        .map(|other| target.with_file_name(other))
+}
+
+/// Reports whether `a` and `b` canonicalize to the same directory. A path that fails to
+/// canonicalize matches nothing.
+fn is_same_dir(a: &Path, b: &Path) -> bool {
+    matches!(
+        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+        (Ok(canon_a), Ok(canon_b)) if canon_a == canon_b
+    )
+}
+
+/// Reports whether `unblock_dir` already holds `config.toml` or `unblock.db`.
+fn is_scaffolded(unblock_dir: &Path) -> bool {
+    unblock_dir.join(CONFIG_FILENAME).exists() || unblock_dir.join(DB_FILENAME).exists()
+}
+
 /// Render the minimal `config.toml` text the resolver deserializes. Only `id_prefix` is seeded (every
 /// other value defaults); a comment header records the scaffold provenance.
 fn render_config_toml(id_prefix: &str) -> String {
@@ -110,15 +188,11 @@ fn render_config_toml(id_prefix: &str) -> String {
     )
 }
 
-/// Whether the given `.unblock` dir already holds a scaffold (used by the clobber-guard test).
-#[cfg(test)]
-fn is_scaffolded(unblock_dir: &std::path::Path) -> bool {
-    unblock_dir.join(CONFIG_FILENAME).exists() || unblock_dir.join(DB_FILENAME).exists()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_PREFIX, is_scaffolded, render_config_toml};
+    use std::path::{Path, PathBuf};
+
+    use super::{DEFAULT_PREFIX, is_scaffolded, render_config_toml, sibling_unblock_dir};
     use unblock_config::ProjectConfig;
     use unblock_model::normalize_prefix;
 
@@ -149,5 +223,29 @@ mod tests {
         assert!(!is_scaffolded(dir));
         std::fs::write(dir.join("config.toml"), "id_prefix = \"ub\"\n").unwrap();
         assert!(is_scaffolded(dir));
+
+        let db_only = tempfile::tempdir().expect("tempdir");
+        std::fs::write(db_only.path().join("unblock.db"), b"").expect("write unblock.db");
+        assert!(
+            is_scaffolded(db_only.path()),
+            "a directory holding only unblock.db holds a scaffold"
+        );
+    }
+
+    #[test]
+    fn sibling_unblock_dir_swaps_the_workspace_dir_name() {
+        let cases = [
+            ("/p/.unblock", "/p/_unblock"),
+            ("/p/_unblock", "/p/.unblock"),
+            ("/p/.unblock/", "/p/_unblock"),
+            (".unblock", "_unblock"),
+        ];
+        for (target, sibling) in cases {
+            assert_eq!(
+                sibling_unblock_dir(Path::new(target)),
+                Some(PathBuf::from(sibling)),
+                "the sibling of {target}"
+            );
+        }
     }
 }
