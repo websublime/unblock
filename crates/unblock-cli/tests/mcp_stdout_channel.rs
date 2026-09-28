@@ -39,10 +39,7 @@
 //!   `init_underscore_beside_an_empty_dot_unblock_is_refused` and
 //!   `an_initialized_underscore_beside_an_empty_dot_unblock_is_refused_naming_the_dot_unblock`
 //!   (`init`);
-//!   `agents_requires_a_workspace` (`agents`; the only cell that asserts an
-//!   ERROR PAYLOAD ON STDOUT for that command — `init_agents.rs` and `help_snapshots.rs` cover
-//!   `agents` in other ways, so the exclusivity is over this list's own predicate, not over the
-//!   command).
+//!   `agents_requires_a_workspace` and `agents_io_failure_keeps_its_message` (`agents`).
 //! - `migrate_doctor.rs` — `migrate_on_a_future_schema_db_exits_2_with_schema_mismatch` and
 //!   `a_lying_stamp_exits_2_with_a_hint_that_names_the_repair_and_the_missing_columns` (`migrate`);
 //!   `doctor_on_a_corrupt_db_exits_2` (`doctor`).
