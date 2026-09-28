@@ -68,6 +68,8 @@ unblock-engine = { workspace = true }
 unblock-config = { workspace = true }
 unblock-model = { workspace = true }
 serde_json = { workspace = true }
+# Re-parses the `-o csv` lifecycle reports in the integration suites (read side only).
+csv = { workspace = true }
 # Enable the `test-util` seam of unblock-mcp for this crate's error-boundary cells ONLY (the standard
 # cargo idiom). It exposes the four `McpServerError` constructors this crate calls —
 # `__transport_error` and `__run_loop_error`, which let `exit.rs` build BOTH `CliError::Mcp` arms and

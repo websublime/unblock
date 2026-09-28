@@ -53,6 +53,36 @@ fn init_scaffolds_only_config_and_db() {
     );
 }
 
+/// `UNBLOCK_OUTPUT_FORMAT=csv` reaches `init` through config's env layer, so the scaffold report
+/// renders as csv and the run exits 0.
+#[test]
+fn init_csv_via_env_reports_the_scaffold() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let out = unblock()
+        .current_dir(root.path())
+        .env("UNBLOCK_OUTPUT_FORMAT", "csv")
+        .arg("init")
+        .output()
+        .expect("run init");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "init under UNBLOCK_OUTPUT_FORMAT=csv must exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let records = common::csv_report(&out.stdout);
+    assert_eq!(
+        common::csv_labels(&records),
+        [
+            "workspace_dir",
+            "unblock_dir",
+            "db_path",
+            "config_path",
+            "id_prefix"
+        ]
+    );
+}
+
 #[test]
 fn init_is_clobber_guarded_and_force_overwrites() {
     let ws = Workspace::init();

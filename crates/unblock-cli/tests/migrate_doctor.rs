@@ -12,10 +12,14 @@
 //!   — the corruption is surfaced as a `DATABASE_ERROR` structured error (the deterministic corruption
 //!   a page-overwrite yields; the non-empty-`integrity_check` → exit-2 mapping is unit-tested in
 //!   `commands/doctor.rs::database_error_exit_is_two`).
+//! - csv (`ub-q3k`): `migrate` and a healthy `doctor` render one `label,detail` document and exit 0.
+//!   A readable database whose `integrity_check` reports a problem renders the report and exits 2.
+//!   A corrupt database still fails before the report renders, with the human error on stderr and
+//!   exit 2.
 
 mod common;
 
-use common::{Workspace, detail, json_report};
+use common::{Workspace, csv_labels, csv_report, detail, json_report};
 use serde_json::Value;
 
 /// An `init`-built workspace is ALREADY CURRENT — `init` opened it through the same config facade,
@@ -92,6 +96,37 @@ fn migrate_report_json(ws: &Workspace) -> Value {
 fn migrate_report_shape_on_an_already_current_workspace_is_snapshot_pinned() {
     let ws = Workspace::init();
     insta::assert_json_snapshot!("migrate_report_already_current", migrate_report_json(&ws));
+}
+
+/// `migrate -o csv` migrates, renders the report in the adapter's order and keeps exit 0.
+#[test]
+fn migrate_csv_reports_the_delta_and_exits_0() {
+    let ws = Workspace::init();
+    let out = ws
+        .cmd()
+        .args(["migrate", "--output", "csv"])
+        .output()
+        .expect("run migrate");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "migrate -o csv must exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let records = csv_report(&out.stdout);
+    assert_eq!(
+        csv_labels(&records),
+        ["database", "schema_from", "schema_to", "applied"]
+    );
+    assert_eq!(
+        records[2].1,
+        unblock_storage::CURRENT_SCHEMA_VERSION.to_string(),
+        "schema_to is the current schema version"
+    );
+    assert_eq!(
+        records[3].1, "false",
+        "init already migrated this workspace"
+    );
 }
 
 /// **D46 clause (10) — the NEVER-MIGRATED direction, which this command could not show AT ALL before.**
@@ -457,11 +492,10 @@ fn doctor_with_advisory_jsonl_conflict_renders_the_anomaly_yet_exits_0() {
     );
 }
 
-// SF4/SF5 (v1.1 follow-up): an e2e fixture driving a readable-but-integrity-DIRTY libsql DB to exit 2
-// (and `Session::doctor()` over genuinely corrupt integrity rows) is impractical to synthesize
-// reliably; `doctor_exit(&[String])` non-empty→exit-2 is unit + mutation-proven in `commands/doctor.rs`
-// and the corrupt-DB error path is covered by `doctor_on_a_corrupt_db_exits_2` below (see the health
-// crate plan's "deferred should-fixes" note).
+// `doctor_exit(&[String])` non-empty→exit-2 is unit + mutation-proven in `commands/doctor.rs`. A
+// corrupt database fails before the report renders (the cell below). A readable database whose
+// `integrity_check` reports a problem renders the report and exits 2
+// (`doctor_csv_on_a_readable_integrity_dirty_db_reports_and_exits_2`, over `orphan_a_page`).
 #[test]
 fn doctor_on_a_corrupt_db_exits_2() {
     // Corrupt the DB deterministically (overwrite a large b-tree region past the header page) so the
@@ -486,6 +520,143 @@ fn doctor_on_a_corrupt_db_exits_2() {
         value["code"], "DATABASE_ERROR",
         "corruption maps to the db-bucket DATABASE_ERROR code (spine §2.3 unchanged)"
     );
+}
+
+/// `doctor -o csv` on a clean workspace renders the health report and keeps exit 0.
+#[test]
+fn doctor_csv_on_a_healthy_workspace_exits_0() {
+    let ws = Workspace::init();
+    let out = ws
+        .cmd()
+        .args(["doctor", "--output", "csv"])
+        .output()
+        .expect("run doctor");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "doctor -o csv must exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let records = csv_report(&out.stdout);
+    let labels = csv_labels(&records);
+    assert_eq!(
+        records.first(),
+        Some(&("health".to_string(), "healthy".to_string())),
+        "labels: {labels:?}"
+    );
+    assert_eq!(
+        records.get(1),
+        Some(&("integrity".to_string(), "ok".to_string())),
+        "labels: {labels:?}"
+    );
+    assert!(labels.contains(&"schema_version"), "labels: {labels:?}");
+    assert!(labels.contains(&"schema_expected"), "labels: {labels:?}");
+}
+
+/// A corrupt database fails before the report renders, so this pins the error route under
+/// `-o csv`. The human error stays on stderr, stdout stays empty and the exit stays 2.
+#[test]
+fn doctor_csv_on_a_corrupt_db_reports_on_stderr_and_exits_2() {
+    let ws = Workspace::init();
+    corrupt_db(&ws.db_path());
+    let out = ws
+        .cmd()
+        .args(["doctor", "--output", "csv"])
+        .output()
+        .expect("run doctor on corrupt db");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "exit code; stderr: {stderr}");
+    assert!(
+        out.stdout.is_empty(),
+        "a csv error never reaches stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr.starts_with("error[DATABASE_ERROR]"),
+        "the human error line opens stderr: {stderr}"
+    );
+}
+
+/// A readable database whose `integrity_check` reports a problem renders the report and exits 2.
+///
+/// The json leg proves the fixture, because the report carries an `integrity_problem` row and the
+/// run exits 2. The csv leg pins that the csv render keeps that exit 2.
+#[test]
+fn doctor_csv_on_a_readable_integrity_dirty_db_reports_and_exits_2() {
+    let ws = Workspace::init();
+    orphan_a_page(&ws.db_path());
+
+    let json = ws
+        .cmd()
+        .args(["doctor", "--output", "json"])
+        .output()
+        .expect("run doctor -o json");
+    assert_eq!(
+        json.status.code(),
+        Some(2),
+        "an integrity problem exits 2; stderr: {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let report: Value = serde_json::from_slice(&json.stdout).expect("a JSON doctor report");
+    assert!(
+        detail(&report, "integrity_problem").is_some_and(|problem| problem.contains("never used")),
+        "the report carries the orphaned page; report: {report}"
+    );
+
+    let csv = ws
+        .cmd()
+        .args(["doctor", "--output", "csv"])
+        .output()
+        .expect("run doctor -o csv");
+    assert_eq!(
+        csv.status.code(),
+        Some(2),
+        "the csv render keeps doctor's exit 2; stderr: {}",
+        String::from_utf8_lossy(&csv.stderr)
+    );
+    let records = csv_report(&csv.stdout);
+    assert!(
+        records
+            .iter()
+            .any(|(label, problem)| label == "integrity_problem" && problem.contains("never used")),
+        "the csv report carries the orphaned page: {records:?}"
+    );
+}
+
+/// Append one zeroed page to the database file and count it in the header, so `integrity_check`
+/// reports the page as never used while every table stays readable.
+///
+/// The in-header page count is authoritative only while no WAL frame is pending. `SQLite` checkpoints
+/// the WAL when `init`'s last connection closes, and the fixture asserts that no frame remains.
+fn orphan_a_page(db: &std::path::Path) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let wal = db.with_extension("db-wal");
+    assert!(
+        !std::fs::metadata(&wal).is_ok_and(|meta| meta.len() > 0),
+        "the fixture needs a checkpointed database, but {} holds frames",
+        wal.display()
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(db)
+        .expect("open db");
+    let mut header = [0u8; 100];
+    file.read_exact(&mut header).expect("read the db header");
+    let page_size = match u16::from_be_bytes([header[16], header[17]]) {
+        1 => 65_536,
+        size => usize::from(size),
+    };
+    let page_count = u32::from_be_bytes([header[28], header[29], header[30], header[31]]);
+    file.seek(SeekFrom::End(0)).expect("seek to the end");
+    file.write_all(&vec![0u8; page_size])
+        .expect("append a page");
+    file.seek(SeekFrom::Start(28))
+        .expect("seek to the page count");
+    file.write_all(&(page_count + 1).to_be_bytes())
+        .expect("count the new page");
+    file.flush().expect("flush");
 }
 
 /// Overwrite a deep region of the `SQLite` file with garbage (keeping the `100`-byte header + page 1

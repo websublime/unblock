@@ -74,10 +74,11 @@ pub trait Renderer {
         opts: &RenderOptions,
     ) -> Result<RenderOutput, RenderError>;
 
-    /// Render a [`DiagnosticReport`].
+    /// Render a [`DiagnosticReport`]. The payload ends without a newline in every format.
     ///
     /// # Errors
-    /// Returns [`RenderError::UnsupportedFormat`] for formats that cannot represent diagnostics (CSV).
+    /// Returns [`RenderError::Serialize`] if JSON serialization fails. Under the `toon` feature the
+    /// TOON placeholder returns [`RenderError::UnsupportedFormat`]. No other format errs here.
     fn diagnostics(
         &self,
         value: &DiagnosticReport,

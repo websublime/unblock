@@ -1,0 +1,7 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Csv, & opts, \"diagnostics\")"
+---
+label,detail
+total,42
+open,7

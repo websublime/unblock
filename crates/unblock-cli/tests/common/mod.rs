@@ -926,6 +926,38 @@ pub fn detail<'a>(report: &'a Value, label: &str) -> Option<&'a str> {
         .and_then(|f| f["detail"].as_str())
 }
 
+/// Parse a `-o csv` lifecycle report into its `(label, detail)` records.
+///
+/// It asserts the `label,detail` header and two cells per record. The reader is not flexible, so a
+/// record with a third cell fails the parse, and every caller proves the document well-formed.
+#[must_use]
+pub fn csv_report(stdout: &[u8]) -> Vec<(String, String)> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(stdout);
+    let header: Vec<String> = reader
+        .headers()
+        .expect("a csv header row")
+        .iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(header, ["label", "detail"], "the lifecycle csv header");
+    reader
+        .records()
+        .map(|record| {
+            let record = record.expect("a well-formed csv record");
+            assert_eq!(record.len(), 2, "two cells per record: {record:?}");
+            (record[0].to_string(), record[1].to_string())
+        })
+        .collect()
+}
+
+/// The labels of a parsed [`csv_report`], in document order.
+#[must_use]
+pub fn csv_labels(records: &[(String, String)]) -> Vec<&str> {
+    records.iter().map(|(label, _)| label.as_str()).collect()
+}
+
 // ----------------------------------------------------------------------------------------------
 // T3.2 — shared shutdown-case oracle + the pinned bulk fixture.
 // ----------------------------------------------------------------------------------------------
