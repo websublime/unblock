@@ -12,6 +12,11 @@
 //!
 //! [`discover_unblock_dir`] returns the **`unblock_dir`** (the actual `.unblock`/`_unblock`
 //! directory). The `workspace_dir` (project root) is its parent.
+//!
+//! The child probe has one home. [`UNBLOCK_DIR_NAMES`] lists the workspace-dir names in probe
+//! order, [`has_unblock_dir_name`] tests a path's last component against them, and
+//! [`probe_workspace_root`] finds a root's workspace dir. Every tier that tests a name or probes a
+//! root calls them, and `unblock init` calls them to pick its target (spine §4 D39).
 
 use std::path::{Path, PathBuf};
 
@@ -54,9 +59,16 @@ pub(crate) struct DiscoveredWorkspace {
     pub(crate) source: WorkspaceSource,
 }
 
-/// Whether `name` is a workspace-dir name: `.unblock` OR `_unblock` (FORK-2/D8 monorepo alias).
-fn is_unblock_dir_name(name: &str) -> bool {
-    name == ".unblock" || name == "_unblock"
+/// Discovery probes a root for `.unblock` first, then for the `_unblock` monorepo alias
+/// (FORK-2/D8). A new workspace gets the first.
+pub const UNBLOCK_DIR_NAMES: [&str; 2] = [".unblock", "_unblock"];
+
+/// Reports whether the last component of `path` is a workspace-dir name.
+#[must_use]
+pub fn has_unblock_dir_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| UNBLOCK_DIR_NAMES.contains(&name))
 }
 
 /// Discover the active `unblock_dir` (the `.unblock`/`_unblock` directory itself).
@@ -167,11 +179,7 @@ pub(crate) fn derive_dir_from_db(db: &Path) -> Option<PathBuf> {
 fn unblock_dir_from_db(db: &Path) -> Option<PathBuf> {
     let mut current = db.to_path_buf();
     loop {
-        if current
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(is_unblock_dir_name)
-        {
+        if has_unblock_dir_name(&current) {
             return Some(current);
         }
         if !current.pop() {
@@ -205,30 +213,24 @@ fn resolve_explicit_dir(dir: &Path) -> Result<PathBuf, ConfigError> {
 /// `.unblock`/`_unblock` dir is honored by either, and the two cannot drift apart on that self-check.
 fn resolve_root_or_self(dir: &Path) -> Option<PathBuf> {
     // The path is ITSELF the unblock dir.
-    if dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(is_unblock_dir_name)
-        && dir.is_dir()
-    {
+    if has_unblock_dir_name(dir) && dir.is_dir() {
         return Some(dir.to_path_buf());
     }
     // Or the path is a workspace ROOT holding `.unblock`/`_unblock`.
     probe_workspace_root(dir)
 }
 
-/// Probe `root` as a workspace ROOT: return its `.unblock`/`_unblock` child dir on a hit, else `None`.
+/// Probes `root` as a project root, as discovery does for `--dir`, `CLAUDE_PROJECT_DIR` and each
+/// walk-up ancestor.
 ///
-/// The workspace-ROOT half of [`resolve_root_or_self`]. Returns the child path (non-canonical — the
-/// caller canonicalizes); never errors (a miss is a `None`, not a failure).
-fn probe_workspace_root(root: &Path) -> Option<PathBuf> {
-    for name in [".unblock", "_unblock"] {
-        let candidate = root.join(name);
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-    None
+/// Returns `root/.unblock` if it is a directory, else `root/_unblock` if it is a directory, else
+/// `None`. The directory test follows symlinks, and the returned path is not canonicalized.
+#[must_use]
+pub fn probe_workspace_root(root: &Path) -> Option<PathBuf> {
+    UNBLOCK_DIR_NAMES
+        .iter()
+        .map(|name| root.join(name))
+        .find(|candidate| candidate.is_dir())
 }
 
 /// Walk up the ancestors of `start` (or CWD) for the nearest `.unblock`/`_unblock` directory,
@@ -260,11 +262,8 @@ fn walk_up_for_unblock_dir(
 
     while let Some(dir) = current {
         // Probe FIRST — the boundary dir itself is inspected before the stop (INCLUSIVE).
-        for name in [".unblock", "_unblock"] {
-            let candidate = dir.join(name);
-            if candidate.is_dir() {
-                return Ok(candidate);
-            }
+        if let Some(candidate) = probe_workspace_root(dir) {
+            return Ok(candidate);
         }
         // D39 guard: stop AFTER probing the boundary dir; never ascend above it.
         let at_repo_root = dir.join(".git").exists(); // `std::fs` stat — NOT a git op (D13/NFR-6).
@@ -347,14 +346,14 @@ fn absolutize(path: &Path) -> PathBuf {
 mod tests {
     use super::{
         WorkspaceSource, derive_dir_from_db, discover_optional_unblock_dir, discover_unblock_dir,
-        discover_workspace,
+        discover_workspace, has_unblock_dir_name, probe_workspace_root,
     };
     use crate::cli::CliOverrides;
     use crate::env::EnvSource;
     use crate::error::ConfigError;
     use std::collections::HashMap;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// An injected [`EnvSource`] for the discovery tests — NEVER the process-global env (NFR-16: a
     /// host `$HOME` could otherwise bound a tempdir walk — the macOS-masks-Linux landmine).
@@ -832,5 +831,134 @@ mod tests {
         let err = discover_unblock_dir(Some(&nested), &CliOverrides::default(), &empty_env())
             .expect_err("`.git` bounds even with no $HOME");
         assert!(matches!(err, ConfigError::WorkspaceNotFound { .. }));
+    }
+
+    // -- The shared workspace-dir helpers (spine §4 D39) ------------------------------------------
+
+    #[test]
+    fn has_unblock_dir_name_matches_both_names_only() {
+        for path in ["/p/.unblock", "/p/.unblock/", "/p/_unblock", ".unblock"] {
+            assert!(
+                has_unblock_dir_name(Path::new(path)),
+                "{path} ends in a workspace-dir name"
+            );
+        }
+        for path in ["/p", ".", "/", "/p/unblock", "/p/.unblock.bak", ""] {
+            assert!(
+                !has_unblock_dir_name(Path::new(path)),
+                "{path:?} ends in no workspace-dir name"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt as _;
+
+            let not_utf8 = Path::new("/p").join(OsStr::from_bytes(b"_unblock\xff"));
+            assert!(
+                !has_unblock_dir_name(&not_utf8),
+                "a last component that is not UTF-8 is no workspace-dir name"
+            );
+        }
+    }
+
+    /// Lays out a fresh tempdir `T` with `build` and creates `T/sub`. Returns the tempdir, the root
+    /// `T/sub/..` and what `probe_workspace_root` returns for that root. The `sub/..` makes a
+    /// canonicalized return differ from `root.join(name)` on every host.
+    fn probe_layout(build: impl FnOnce(&Path)) -> (tempfile::TempDir, PathBuf, Option<PathBuf>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build(tmp.path());
+        fs::create_dir(tmp.path().join("sub")).expect("mkdir sub");
+        let root = tmp.path().join("sub").join("..");
+        let probed = probe_workspace_root(&root);
+        (tmp, root, probed)
+    }
+
+    fn mkdir(parent: &Path, name: &str) {
+        fs::create_dir(parent.join(name)).expect("mkdir");
+    }
+
+    #[test]
+    fn probe_workspace_root_prefers_dot_unblock_then_underscore() {
+        let (_tmp, _root, probed) = probe_layout(|_| {});
+        assert_eq!(probed, None, "a root holding neither name");
+
+        let (_tmp, root, probed) = probe_layout(|t| mkdir(t, ".unblock"));
+        assert_eq!(probed, Some(root.join(".unblock")), "only .unblock/");
+
+        let (_tmp, root, probed) = probe_layout(|t| mkdir(t, "_unblock"));
+        assert_eq!(probed, Some(root.join("_unblock")), "only _unblock/");
+
+        let (_tmp, root, probed) = probe_layout(|t| {
+            mkdir(t, ".unblock");
+            mkdir(t, "_unblock");
+        });
+        assert_eq!(probed, Some(root.join(".unblock")), "both names");
+
+        let (_tmp, root, probed) = probe_layout(|t| {
+            fs::write(t.join(".unblock"), b"not a dir").expect("write the .unblock file");
+            mkdir(t, "_unblock");
+        });
+        assert_eq!(
+            probed,
+            Some(root.join("_unblock")),
+            "a .unblock file beside _unblock/"
+        );
+
+        #[cfg(unix)]
+        {
+            let (_tmp, root, probed) = probe_layout(|t| {
+                mkdir(t, "elsewhere");
+                std::os::unix::fs::symlink(t.join("elsewhere"), t.join(".unblock"))
+                    .expect("symlink .unblock to a directory");
+            });
+            assert_eq!(
+                probed,
+                Some(root.join(".unblock")),
+                "a .unblock symlink to a directory"
+            );
+        }
+    }
+
+    /// Each discovery tier that reads a root binds the probe's result for that root.
+    /// `dunce::canonicalize` runs on both sides alike, so the cell holds on every platform.
+    #[test]
+    fn every_root_tier_binds_what_the_probe_returns() {
+        /// Names a root layout and builds it inside a root.
+        type Layout = (&'static str, fn(&Path));
+
+        let layouts: [Layout; 4] = [
+            ("only .unblock/", |t| mkdir(t, ".unblock")),
+            ("only _unblock/", |t| mkdir(t, "_unblock")),
+            ("both names", |t| {
+                mkdir(t, ".unblock");
+                mkdir(t, "_unblock");
+            }),
+            ("a .unblock file beside _unblock/", |t| {
+                fs::write(t.join(".unblock"), b"not a dir").expect("write the .unblock file");
+                mkdir(t, "_unblock");
+            }),
+        ];
+        for (layout, build) in layouts {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = tmp.path();
+            build(root);
+            let probed = probe_workspace_root(root).expect("the layout holds a workspace dir");
+            let expected = dunce::canonicalize(&probed).expect("canonicalize the probe result");
+
+            let explicit =
+                discover_unblock_dir(None, &CliOverrides::new().with_dir(root), &empty_env())
+                    .expect("the --dir tier binds");
+            let env = MapEnv::new(&[("CLAUDE_PROJECT_DIR", root.to_str().expect("utf8"))]);
+            let project = discover_unblock_dir(None, &CliOverrides::default(), &env)
+                .expect("the CLAUDE_PROJECT_DIR tier binds");
+            let walk_up = discover_unblock_dir(Some(root), &CliOverrides::default(), &empty_env())
+                .expect("the walk-up tier binds");
+
+            assert_eq!(explicit, expected, "{layout}: the --dir tier");
+            assert_eq!(project, expected, "{layout}: the CLAUDE_PROJECT_DIR tier");
+            assert_eq!(walk_up, expected, "{layout}: the walk-up tier");
+        }
     }
 }

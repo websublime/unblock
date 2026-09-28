@@ -13,7 +13,9 @@
 //! **Discovery** walks up for the nearest dir named `.unblock` **or** `_unblock` (the monorepo alias,
 //! FORK-2/D8); the discovered dir is **canonicalized** so artifacts are confined to the canonical
 //! subtree (FORK-3, NFR-18). An explicit `--dir`/`UNBLOCK_DIR` is used directly with no walk-up
-//! (MF-2).
+//! (MF-2). [`UNBLOCK_DIR_NAMES`], [`has_unblock_dir_name`] and [`probe_workspace_root`] hold the
+//! workspace-dir names and the child probe. Discovery and `unblock init` share them, so the two
+//! agree on which directory a root holds (spine §4 D39).
 //!
 //! **Two facade pairs** front the resolver. The permanent `&Path` facades — [`open_workspace`]
 //! (resolve-only, no DB) / [`open_with_storage`] (open + migrate libsql, build the
@@ -69,7 +71,10 @@ pub use context::{
     ResolvedContext, WorkspaceContext, open_with_storage, open_with_storage_with_cli,
     open_workspace, open_workspace_with_cli,
 };
-pub use discovery::{WorkspaceSource, discover_optional_unblock_dir, discover_unblock_dir};
+pub use discovery::{
+    UNBLOCK_DIR_NAMES, WorkspaceSource, discover_optional_unblock_dir, discover_unblock_dir,
+    has_unblock_dir_name, probe_workspace_root,
+};
 pub use env::{EnvOverrides, EnvSource};
 pub use error::ConfigError;
 pub use keys::{KeyClass, RUNTIME_KEYS, RuntimeKey, STARTUP_KEYS, StartupKey, classify};
