@@ -3,8 +3,14 @@
 //! code path, FR-9 no-drift).
 //!
 //! NO `.gitignore`, NO `metadata.json`, NO seeded `issues.jsonl` (D13/NFR-6/model-B). Clobber guard:
-//! refuse if `config.toml` OR `unblock.db` is already present under the target `.unblock/` without
-//! `--force` → a CLI-local `CliError::AlreadyInitialized` (`ConfigError` has none) → exit 2.
+//! refuse if `config.toml` OR `unblock.db` is already present under the target without `--force` →
+//! a CLI-local `CliError::AlreadyInitialized` (`ConfigError` has none) → exit 2.
+//!
+//! A `--dir` named `.unblock` or `_unblock` is the target as given. Any other `--dir`, or the cwd
+//! without one, is a project root, which `init` probes with discovery's own child probe. The target
+//! is the root's existing `.unblock/`, else its existing `_unblock/`, else a new `.unblock/`, so
+//! discovery at that root later binds the directory `init` scaffolds. `init` never walks up and
+//! never reads `CLAUDE_PROJECT_DIR`.
 //!
 //! The open forwards the global flags with the target as its `--dir`, so `-o` and `--actor` reach
 //! config (the spine §5b forwarder rule). An actor that fails validation fails that open (exit 7)
@@ -13,7 +19,9 @@
 use std::path::PathBuf;
 
 use snafu::{ResultExt, ensure};
-use unblock_config::open_with_storage_with_cli;
+use unblock_config::{
+    UNBLOCK_DIR_NAMES, has_unblock_dir_name, open_with_storage_with_cli, probe_workspace_root,
+};
 use unblock_model::normalize_prefix;
 
 use crate::cli::{GlobalArgs, InitArgs};
@@ -26,16 +34,18 @@ const CONFIG_FILENAME: &str = "config.toml";
 const DB_FILENAME: &str = "unblock.db";
 /// The default issue-id prefix when `--prefix` is absent (D21).
 const DEFAULT_PREFIX: &str = "ub";
+/// `init` names a new workspace dir with the name discovery probes first.
+const NEW_UNBLOCK_DIR: &str = UNBLOCK_DIR_NAMES[0];
 
 /// Run `unblock init`.
 ///
 /// # Errors
-/// - [`CliError::AlreadyInitialized`] if the target `.unblock/` already holds a scaffold (no `--force`);
-/// - [`CliError::Io`] if creating the directory or writing `config.toml` fails;
+/// - [`CliError::AlreadyInitialized`] if the target already holds a scaffold (no `--force`);
+/// - [`CliError::Io`] if reading the cwd, creating the directory or writing `config.toml` fails;
 /// - [`CliError::Config`] if opening/migrating the fresh database fails;
 /// - [`CliError::Render`]/[`CliError::Io`] if rendering / writing the report fails.
 pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, CliError> {
-    // 1. Resolve the target `.unblock` dir: the explicit `--dir` if set, else `<cwd>/.unblock`.
+    // 1. Resolve the target, probing a project root the way discovery does.
     let unblock_dir = target_unblock_dir(global)?;
 
     // 2. Clobber guard (AF-3): refuse if config.toml OR unblock.db already present without `--force`.
@@ -48,7 +58,7 @@ pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, Cli
         }
     );
 
-    // 3. Create `.unblock/` (mkdir -p).
+    // 3. Create the target (mkdir -p).
     std::fs::create_dir_all(&unblock_dir).context(IoSnafu)?;
 
     // 4. Hand-write config.toml (`ProjectConfig` is Deserialize-only — DR-8). Seed the NORMALIZED prefix.
@@ -75,13 +85,18 @@ pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, Cli
     output::emit_report(&report.to_report(), fmt).map(|()| None)
 }
 
-/// The target `.unblock` directory for `init`: the explicit `--dir` if set, else `<cwd>/.unblock`.
+/// Resolves the directory `init` scaffolds.
+///
+/// A `--dir` named `.unblock` or `_unblock` is the target as given. Any other `--dir`, or the cwd
+/// without one, is a project root. Its target is the workspace dir discovery's child probe finds
+/// there, or a new `.unblock` when the root holds none.
 fn target_unblock_dir(global: &GlobalArgs) -> Result<PathBuf, CliError> {
-    if let Some(dir) = &global.dir {
-        return Ok(dir.clone());
-    }
-    let cwd = std::env::current_dir().context(IoSnafu)?;
-    Ok(cwd.join(".unblock"))
+    let root = match &global.dir {
+        Some(dir) if has_unblock_dir_name(dir) => return Ok(dir.clone()),
+        Some(root) => root.clone(),
+        None => std::env::current_dir().context(IoSnafu)?,
+    };
+    Ok(probe_workspace_root(&root).unwrap_or_else(|| root.join(NEW_UNBLOCK_DIR)))
 }
 
 /// Render the minimal `config.toml` text the resolver deserializes. Only `id_prefix` is seeded (every

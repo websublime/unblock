@@ -88,7 +88,7 @@ pub enum CliError {
     /// variant, so this is CLI-local.
     #[snafu(display("workspace already initialized at {}", path.display()))]
     AlreadyInitialized {
-        /// The `.unblock/` directory that already contains a scaffold.
+        /// Names the refused target, a `.unblock` or `_unblock` directory, as `init` formed it.
         path: PathBuf,
     },
 
