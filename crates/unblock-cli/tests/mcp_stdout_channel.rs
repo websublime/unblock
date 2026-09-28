@@ -29,8 +29,16 @@
 //!   (`init`); `exit_1_internal_error_from_update_unconfigured` (`update`).
 //! - `init_agents.rs` — `init_rejects_an_invalid_actor_after_writing_config_and_force_recovers`,
 //!   `init_dir_naming_an_initialized_root_is_refused`,
-//!   `init_dir_naming_a_root_with_an_underscore_workspace_is_refused` and
-//!   `bare_init_in_a_root_with_an_underscore_workspace_is_refused` (`init`);
+//!   `init_dir_naming_a_root_with_an_underscore_workspace_is_refused`,
+//!   `bare_init_in_a_root_with_an_underscore_workspace_is_refused`,
+//!   `init_beside_an_initialized_underscore_sibling_is_refused`,
+//!   `init_underscore_beside_an_initialized_dot_unblock_sibling_is_refused`,
+//!   `init_force_beside_an_initialized_sibling_is_still_refused`,
+//!   `bare_init_on_an_empty_dot_unblock_beside_an_initialized_underscore_is_refused`,
+//!   `a_root_with_two_initialized_workspace_dirs_is_refused_by_each_guard`,
+//!   `init_underscore_beside_an_empty_dot_unblock_is_refused` and
+//!   `an_initialized_underscore_beside_an_empty_dot_unblock_is_refused_naming_the_dot_unblock`
+//!   (`init`);
 //!   `agents_requires_a_workspace` (`agents`; the only cell that asserts an
 //!   ERROR PAYLOAD ON STDOUT for that command — `init_agents.rs` and `help_snapshots.rs` cover
 //!   `agents` in other ways, so the exclusivity is over this list's own predicate, not over the

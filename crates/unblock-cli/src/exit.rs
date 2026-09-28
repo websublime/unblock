@@ -7,7 +7,9 @@
 //! it does NOT impl `CodedError`, so `exit.rs` maps `Transport`/`RunLoop` EXPLICITLY to
 //! `ErrorCode::InternalError` (exit 1) — an MCP-server run-loop/transport failure is an INTERNAL condition,
 //! not a user `IoError` (exit 8). CLI-local variants: `AlreadyInitialized` (exit 2, the init clobber
-//! guard — `ConfigError` has none), scaffold/agents `Io` (exit 8), `Update` (exit 1).
+//! guard and sibling guard — `ConfigError` has none), `SiblingBindsFirst` (exit 2 through
+//! `ALREADY_INITIALIZED`, the init binds-first check), scaffold/agents `Io` (exit 8), `Update`
+//! (exit 1).
 //!
 //! **NFR-14 + FR-11 stream split:** in `json`/`robot` the structured error renders to the command's
 //! REPORT channel (always valid JSON even on error, FR-11); in `plain`/`csv`/`markdown` a human
@@ -28,7 +30,7 @@ use std::process::ExitCode;
 
 use snafu::Snafu;
 use unblock_error::{ErrorCode, StructuredError};
-use unblock_render::{OutputFormat, RenderOptions, renderer_for};
+use unblock_render::{OutputFormat, RenderOptions, renderer_for, sanitize_inline};
 
 /// D48: what a command's STDOUT *is* — its own report channel, or a wire-protocol framing channel.
 ///
@@ -83,13 +85,29 @@ pub enum CliError {
         source: unblock_mcp::McpServerError,
     },
 
-    /// `unblock init` clobber guard: a `config.toml` or `unblock.db` is already present without
-    /// `--force` (AF-3). Maps to `ErrorCode::AlreadyInitialized` (exit 2); `ConfigError` has no such
-    /// variant, so this is CLI-local.
+    /// `unblock init` refused a directory that already holds a scaffold, from the clobber guard
+    /// without `--force` or from the sibling guard with or without it (AF-3). Maps to
+    /// `ErrorCode::AlreadyInitialized` (exit 2). `ConfigError` has no such variant, so this is
+    /// CLI-local.
     #[snafu(display("workspace already initialized at {}", path.display()))]
     AlreadyInitialized {
-        /// Names the refused target, a `.unblock` or `_unblock` directory, as `init` formed it.
+        /// Names the refused directory, the target or its sibling, as `init` formed it.
         path: PathBuf,
+    },
+
+    /// `unblock init` refused a target because discovery at its root binds a `.unblock` directory
+    /// that holds no scaffold before the `_unblock` beside it (v1.1). Maps to
+    /// `ErrorCode::AlreadyInitialized` (exit 2).
+    #[snafu(display(
+        "{} already exists, and discovery binds it before {}",
+        sanitize_inline(&bound.display().to_string()),
+        sanitize_inline(&hidden.display().to_string())
+    ))]
+    SiblingBindsFirst {
+        /// Names the `.unblock` directory, which discovery binds first, as `init` formed it.
+        bound: PathBuf,
+        /// Names the `_unblock` directory, which that binding hides, as `init` formed it.
+        hidden: PathBuf,
     },
 
     /// A CLI-local file-system operation failed (scaffold write / `AGENTS.md` write). Maps to
@@ -121,7 +139,9 @@ impl CliError {
             Self::Render { source } => source.code(),
             // McpServerError has NO CodedError — an MCP-server failure is internal (exit 1), not I/O.
             Self::Mcp { .. } => ErrorCode::InternalError,
-            Self::AlreadyInitialized { .. } => ErrorCode::AlreadyInitialized,
+            Self::AlreadyInitialized { .. } | Self::SiblingBindsFirst { .. } => {
+                ErrorCode::AlreadyInitialized
+            }
             Self::Io { .. } => ErrorCode::IoError,
             #[cfg(feature = "self-update")]
             Self::Update { .. } => ErrorCode::InternalError,
@@ -776,5 +796,59 @@ mod tests {
                 assert_eq!(payload["code"], "ALREADY_INITIALIZED");
             }
         }
+    }
+
+    // -- `init` refusals (ub-lp9.14) ----------------------------------------------------------
+
+    /// The binds-first refusal maps to exit 2 without a hint and names the bound `.unblock` first.
+    /// It escapes a newline in either path, so the human arm writes exactly one line.
+    #[test]
+    fn sibling_binds_first_maps_to_exit_2_and_escapes_both_paths() {
+        let err = CliError::SiblingBindsFirst {
+            bound: "/ws/proj/.unblock".into(),
+            hidden: "/ws/proj/_unblock".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "/ws/proj/.unblock already exists, and discovery binds it before /ws/proj/_unblock"
+        );
+        assert_eq!(err.code(), ErrorCode::AlreadyInitialized);
+        assert_eq!(err.code().exit_code(), 2);
+        assert!(
+            to_structured(err).hint.is_none(),
+            "the refusal publishes no structured hint"
+        );
+
+        let with_newlines = || CliError::SiblingBindsFirst {
+            bound: "/ws/a\nb/.unblock".into(),
+            hidden: "/ws/a\nb/_unblock".into(),
+        };
+        let display = with_newlines().to_string();
+        assert!(!display.contains('\n'), "no raw newline: {display:?}");
+        assert_eq!(
+            display,
+            r"/ws/a\nb/.unblock already exists, and discovery binds it before /ws/a\nb/_unblock",
+            "both paths carry the escaped newline"
+        );
+
+        let (mut out, mut err_sink) = (Vec::new(), Vec::new());
+        let code = into_exit_to(
+            with_newlines(),
+            OutputFormat::Plain,
+            StdoutRole::Reports,
+            &mut out,
+            &mut err_sink,
+        );
+        assert_eq!(code, 2);
+        assert!(out.is_empty(), "the human arm never uses stdout");
+        let line = String::from_utf8(err_sink).expect("utf8 diagnostic");
+        assert!(
+            line.starts_with("error[ALREADY_INITIALIZED]: "),
+            "the NFR-14 line shape: {line:?}"
+        );
+        assert!(
+            line.ends_with('\n') && line.matches('\n').count() == 1,
+            "exactly one newline-terminated line: {line:?}"
+        );
     }
 }

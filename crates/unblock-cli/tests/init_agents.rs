@@ -436,7 +436,7 @@ fn refusal_message(out: &Output) -> String {
         .to_string()
 }
 
-/// The clobber-guard message naming `dir` as `init` formed it.
+/// The `AlreadyInitialized` message naming `dir` as `init` formed it.
 fn already_initialized(dir: &Path) -> String {
     format!("workspace already initialized at {}", dir.display())
 }
@@ -680,4 +680,356 @@ fn init_dir_naming_a_root_with_an_empty_underscore_scaffolds_inside_it() {
         "no .unblock/ appears beside the empty _unblock/"
     );
     assert_reports_unblock_dir(&report, &underscore);
+}
+
+// -- The binds-first check and the sibling guard (ub-lp9.14) --------------------------------------
+
+/// The flag sets a refusal must hold under, because `--force` overrides only the clobber guard.
+const WITH_AND_WITHOUT_FORCE: [&[&str]; 2] = [&[], &["--force"]];
+
+/// The binds-first message for the pair's `.unblock` and `_unblock` directories as `init` formed
+/// them.
+fn binds_first(bound: &Path, hidden: &Path) -> String {
+    format!(
+        "{} already exists, and discovery binds it before {}",
+        bound.display(),
+        hidden.display()
+    )
+}
+
+/// Asserts that `dir` is a directory with no entries.
+fn assert_empty_dir(dir: &Path) {
+    let mut entries = std::fs::read_dir(dir).expect("read the directory");
+    assert!(entries.next().is_none(), "{} stays empty", dir.display());
+}
+
+/// `init --dir <root>/.unblock` beside an initialized `_unblock/` is refused, naming the sibling.
+#[test]
+fn init_beside_an_initialized_underscore_sibling_is_refused() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let underscore = root.path().join("_unblock");
+    scaffold_report(&init_dir(elsewhere.path(), &underscore, &[]));
+    let saved = std::fs::read(underscore.join("config.toml")).expect("read config.toml");
+
+    // The `--dir` runs through `sub/..`, so a guard that canonicalizes the sibling it names changes
+    // the message on every host.
+    std::fs::create_dir(root.path().join("sub")).expect("mkdir sub");
+    let via_sub = root.path().join("sub").join("..");
+    let message = refusal_message(&init_dir(elsewhere.path(), &via_sub.join(".unblock"), &[]));
+    assert_eq!(message, already_initialized(&via_sub.join("_unblock")));
+    assert!(
+        !root.path().join(".unblock").exists(),
+        "no .unblock/ appears to hide the _unblock/ workspace"
+    );
+    assert_eq!(
+        std::fs::read(underscore.join("config.toml")).expect("re-read config.toml"),
+        saved,
+        "the _unblock/ workspace is untouched"
+    );
+}
+
+/// `init --dir <root>/_unblock` beside an initialized `.unblock/` is refused, naming the sibling.
+#[test]
+fn init_underscore_beside_an_initialized_dot_unblock_sibling_is_refused() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let dot = root.path().join(".unblock");
+    scaffold_report(&init_dir(elsewhere.path(), &dot, &[]));
+
+    let underscore = root.path().join("_unblock");
+    let message = refusal_message(&init_dir(elsewhere.path(), &underscore, &[]));
+    assert_eq!(message, already_initialized(&root.path().join(".unblock")));
+    assert!(
+        !underscore.exists(),
+        "no _unblock/ appears beside the .unblock/ workspace"
+    );
+}
+
+/// `--force` replaces only the target's own scaffold, so the sibling guard still refuses.
+#[test]
+fn init_force_beside_an_initialized_sibling_is_still_refused() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    scaffold_report(&init_dir(
+        elsewhere.path(),
+        &root.path().join("_unblock"),
+        &[],
+    ));
+
+    let dot = root.path().join(".unblock");
+    let message = refusal_message(&init_dir(elsewhere.path(), &dot, &["--force"]));
+    assert_eq!(message, already_initialized(&root.path().join("_unblock")));
+    assert!(
+        !dot.exists(),
+        "no .unblock/ appears to hide the _unblock/ workspace"
+    );
+}
+
+/// Layout L holds an initialized `_unblock/` beside an empty `.unblock/`. A bare `init` and
+/// `init --force` at its root, and `init --dir <root>/.unblock`, are each refused, naming the
+/// `.unblock/` that discovery binds first.
+#[test]
+fn bare_init_on_an_empty_dot_unblock_beside_an_initialized_underscore_is_refused() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let underscore = root.path().join("_unblock");
+    scaffold_report(&init_dir(elsewhere.path(), &underscore, &[]));
+    let saved = std::fs::read(underscore.join("config.toml")).expect("read config.toml");
+    let dot = root.path().join(".unblock");
+    std::fs::create_dir(&dot).expect("mkdir .unblock");
+
+    for flags in WITH_AND_WITHOUT_FORCE {
+        let out = common::unblock_in(root.path())
+            .arg("init")
+            .args(flags)
+            .args(["--output", "json"])
+            .output()
+            .expect("run init");
+        let message = refusal_message(&out);
+        assert!(
+            message.contains("already exists, and discovery binds it before"),
+            "{flags:?}: the binds-first refusal: {message}"
+        );
+
+        // The child reads its cwd as the physical path, which `std::fs::canonicalize` matches on
+        // unix.
+        #[cfg(unix)]
+        {
+            let canonical_root = std::fs::canonicalize(root.path()).expect("canonicalize the root");
+            assert_eq!(
+                message,
+                binds_first(
+                    &canonical_root.join(".unblock"),
+                    &canonical_root.join("_unblock")
+                ),
+                "{flags:?}"
+            );
+        }
+    }
+
+    let message = refusal_message(&init_dir(elsewhere.path(), &dot, &[]));
+    assert_eq!(message, binds_first(&dot, &underscore));
+    assert_empty_dir(&dot);
+    assert_eq!(
+        std::fs::read(underscore.join("config.toml")).expect("re-read config.toml"),
+        saved,
+        "the _unblock/ workspace is untouched"
+    );
+}
+
+/// An empty sibling directory never blocks a `.unblock` target, whether `--dir` names it or the
+/// probe finds it.
+#[test]
+fn init_beside_an_empty_sibling_directory_proceeds() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let underscore = root.path().join("_unblock");
+    std::fs::create_dir(&underscore).expect("mkdir _unblock");
+
+    scaffold_report(&init_dir(
+        elsewhere.path(),
+        &root.path().join(".unblock"),
+        &[],
+    ));
+    assert!(
+        root.path().join(".unblock").join("config.toml").exists(),
+        "the scaffold lands in .unblock/"
+    );
+    assert_empty_dir(&underscore);
+
+    let both_empty = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(both_empty.path().join(".unblock")).expect("mkdir .unblock");
+    std::fs::create_dir(both_empty.path().join("_unblock")).expect("mkdir _unblock");
+    scaffold_report(&init_dir(elsewhere.path(), both_empty.path(), &[]));
+    assert!(
+        both_empty
+            .path()
+            .join(".unblock")
+            .join("config.toml")
+            .exists(),
+        "the probed .unblock/ receives the scaffold"
+    );
+    assert_empty_dir(&both_empty.path().join("_unblock"));
+}
+
+/// A root whose two workspace dirs both hold a scaffold meets the clobber guard first, naming the
+/// probed `.unblock/`. Under `--force` the sibling guard refuses it, naming the `_unblock/`.
+#[test]
+fn a_root_with_two_initialized_workspace_dirs_is_refused_by_each_guard() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let underscore = root.path().join("_unblock");
+    scaffold_report(&init_dir(elsewhere.path(), &underscore, &[]));
+    let dot = root.path().join(".unblock");
+    std::fs::create_dir(&dot).expect("mkdir .unblock");
+    std::fs::write(dot.join("config.toml"), "id_prefix = \"ub\"\n").expect("write config.toml");
+    let saved_dot = std::fs::read(dot.join("config.toml")).expect("read .unblock/config.toml");
+    let saved_underscore =
+        std::fs::read(underscore.join("config.toml")).expect("read _unblock/config.toml");
+
+    let message = refusal_message(&init_dir(elsewhere.path(), root.path(), &[]));
+    assert_eq!(
+        message,
+        already_initialized(&root.path().join(".unblock")),
+        "the clobber guard names the probed .unblock/"
+    );
+    let message = refusal_message(&init_dir(elsewhere.path(), root.path(), &["--force"]));
+    assert_eq!(
+        message,
+        already_initialized(&root.path().join("_unblock")),
+        "under --force the sibling guard names the _unblock/"
+    );
+    assert_eq!(
+        std::fs::read(dot.join("config.toml")).expect("re-read .unblock/config.toml"),
+        saved_dot,
+        "the .unblock/ scaffold is untouched"
+    );
+    assert_eq!(
+        std::fs::read(underscore.join("config.toml")).expect("re-read _unblock/config.toml"),
+        saved_underscore,
+        "the _unblock/ scaffold is untouched"
+    );
+}
+
+/// An `_unblock` target beside a `.unblock` directory holding no scaffold is refused with or
+/// without `--force`, naming that `.unblock/`. A regular `.unblock` file never blocks. A `.unblock`
+/// symlink to a directory blocks, and so does a `.unblock/` holding only an export.
+#[test]
+fn init_underscore_beside_an_empty_dot_unblock_is_refused() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let dot = root.path().join(".unblock");
+    std::fs::create_dir(&dot).expect("mkdir .unblock");
+    let underscore = root.path().join("_unblock");
+    for flags in WITH_AND_WITHOUT_FORCE {
+        let message = refusal_message(&init_dir(elsewhere.path(), &underscore, flags));
+        assert_eq!(message, binds_first(&dot, &underscore), "{flags:?}");
+    }
+    assert!(!underscore.exists(), "the refused target is never created");
+    assert_empty_dir(&dot);
+
+    let file_root = tempfile::tempdir().expect("tempdir");
+    std::fs::write(file_root.path().join(".unblock"), b"not a dir").expect("write .unblock file");
+    let file_underscore = file_root.path().join("_unblock");
+    scaffold_report(&init_dir(elsewhere.path(), &file_underscore, &[]));
+    assert!(
+        file_underscore.join("config.toml").exists(),
+        "a .unblock file is no directory, so the _unblock/ receives the scaffold"
+    );
+
+    #[cfg(unix)]
+    {
+        let link_root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(link_root.path().join("X")).expect("mkdir X");
+        std::os::unix::fs::symlink("X", link_root.path().join(".unblock"))
+            .expect("symlink .unblock to X");
+        let link_underscore = link_root.path().join("_unblock");
+        let message = refusal_message(&init_dir(elsewhere.path(), &link_underscore, &[]));
+        assert_eq!(
+            message,
+            binds_first(&link_root.path().join(".unblock"), &link_underscore),
+            "a .unblock symlink to a directory is a directory to discovery"
+        );
+    }
+
+    let export_root = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(export_root.path().join(".unblock")).expect("mkdir .unblock");
+    std::fs::write(
+        export_root.path().join(".unblock").join("issues.jsonl"),
+        b"",
+    )
+    .expect("write issues.jsonl");
+    let export_underscore = export_root.path().join("_unblock");
+    let message = refusal_message(&init_dir(elsewhere.path(), &export_underscore, &[]));
+    assert_eq!(
+        message,
+        binds_first(&export_root.path().join(".unblock"), &export_underscore),
+        "an export alone is no scaffold"
+    );
+}
+
+/// A `.unblock` symlink to the `_unblock/` beside it is the same workspace, so `init --force`
+/// re-scaffolds it through the link.
+#[cfg(unix)]
+#[test]
+fn init_force_through_a_symlinked_sibling_rescaffolds_in_place() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let underscore = root.path().join("_unblock");
+    scaffold_report(&init_dir(
+        elsewhere.path(),
+        &underscore,
+        &["--prefix", "proj"],
+    ));
+    let link = root.path().join(".unblock");
+    std::os::unix::fs::symlink("_unblock", &link).expect("symlink .unblock to _unblock");
+
+    let report = scaffold_report(&init_dir(elsewhere.path(), root.path(), &["--force"]));
+    let config = std::fs::read_to_string(underscore.join("config.toml")).expect("read config.toml");
+    assert!(
+        config.contains("id_prefix = \"ub\""),
+        "the forced scaffold replaces the _unblock/ config: {config}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("stat the .unblock link")
+            .file_type()
+            .is_symlink(),
+        "the .unblock link stays a symlink"
+    );
+    assert_reports_unblock_dir(&report, &underscore);
+}
+
+/// An `_unblock` target beside a `.unblock` symlink to itself proceeds, because the pair is one
+/// directory.
+#[cfg(unix)]
+#[test]
+fn init_underscore_beside_a_dot_unblock_link_to_itself_proceeds() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let underscore = root.path().join("_unblock");
+    std::fs::create_dir(&underscore).expect("mkdir _unblock");
+    std::os::unix::fs::symlink("_unblock", root.path().join(".unblock"))
+        .expect("symlink .unblock to _unblock");
+
+    let report = scaffold_report(&init_dir(elsewhere.path(), &underscore, &[]));
+    assert!(
+        underscore.join("config.toml").exists(),
+        "the scaffold lands in _unblock/"
+    );
+    assert_reports_unblock_dir(&report, &underscore);
+}
+
+/// In layout L, `init --dir <root>/_unblock` meets the binds-first check before the clobber guard,
+/// so it is refused naming the `.unblock/` with or without `--force`.
+#[test]
+fn an_initialized_underscore_beside_an_empty_dot_unblock_is_refused_naming_the_dot_unblock() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+
+    // Every path runs through `sub/..`, so a check that canonicalizes a path it names changes the
+    // message on every host.
+    std::fs::create_dir(root.path().join("sub")).expect("mkdir sub");
+    let via_sub = root.path().join("sub").join("..");
+    let underscore = via_sub.join("_unblock");
+    scaffold_report(&init_dir(elsewhere.path(), &underscore, &[]));
+    let saved = std::fs::read(underscore.join("config.toml")).expect("read config.toml");
+    let dot = via_sub.join(".unblock");
+    std::fs::create_dir(&dot).expect("mkdir .unblock");
+
+    for flags in WITH_AND_WITHOUT_FORCE {
+        let message = refusal_message(&init_dir(elsewhere.path(), &underscore, flags));
+        assert_eq!(message, binds_first(&dot, &underscore), "{flags:?}");
+    }
+    assert_eq!(
+        std::fs::read(underscore.join("config.toml")).expect("re-read config.toml"),
+        saved,
+        "the _unblock/ workspace is untouched"
+    );
+    assert_empty_dir(&dot);
+    assert!(
+        !root.path().join("AGENTS.md").exists(),
+        "a refused init writes no AGENTS.md"
+    );
 }
