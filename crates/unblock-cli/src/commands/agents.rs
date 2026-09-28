@@ -12,7 +12,7 @@
 //! `serde_json` production dependency and stays a plain-string renderer.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use snafu::ResultExt;
 use unblock_config::open_workspace_with_cli;
@@ -36,28 +36,44 @@ const AGENTS_FILENAME: &str = "AGENTS.md";
 pub async fn run(_args: &AgentsArgs, global: &GlobalArgs) -> Result<Option<u8>, CliError> {
     // Resolve-only open (NO DB) to learn the workspace root next to `.unblock/`.
     let ctx = open_workspace_with_cli(&global.to_overrides()).await?;
-    let path = ctx.workspace_dir.join(AGENTS_FILENAME);
-
-    let existing = read_existing(&path)?;
-    let merged = merge_managed_block(existing.as_deref(), &managed_block());
-    std::fs::write(&path, merged).context(IoSnafu)?;
-
-    output::diag(&format!("wrote {}", path.display()));
+    write_managed_block(&agents_path(&ctx.workspace_dir))
+        .await
+        .context(IoSnafu)?;
     Ok(None)
 }
 
+/// Returns the `AGENTS.md` path at the workspace root `workspace_dir`.
+pub(crate) fn agents_path(workspace_dir: &Path) -> PathBuf {
+    workspace_dir.join(AGENTS_FILENAME)
+}
+
+/// Merges the managed block into the `AGENTS.md` at `path`, then notes the write on stderr.
+///
+/// This is the one `AGENTS.md` write. It returns the raw I/O error, so each caller attaches its
+/// own `CliError`.
+///
+/// # Errors
+/// Returns the I/O error if reading or writing `path` fails. A missing file is not an error.
+pub(crate) async fn write_managed_block(path: &Path) -> std::io::Result<()> {
+    let existing = read_existing(path).await?;
+    let merged = merge_managed_block(existing.as_deref(), &managed_block());
+    tokio::fs::write(path, merged).await?;
+    output::diag(&format!("wrote {}", path.display()));
+    Ok(())
+}
+
 /// Read the existing `AGENTS.md` (if any); a missing file is `None` (not an error).
-fn read_existing(path: &Path) -> Result<Option<String>, CliError> {
-    match std::fs::read_to_string(path) {
+async fn read_existing(path: &Path) -> std::io::Result<Option<String>> {
+    match tokio::fs::read_to_string(path).await {
         Ok(contents) => Ok(Some(contents)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(CliError::Io { source: err }),
+        Err(err) => Err(err),
     }
 }
 
 /// The managed block content (between the markers, exclusive): a FULL capabilities table rendered
-/// from the pure typed [`unblock_mcp::agents_digest`] (Option C, D33). Zero-arg — it calls
-/// `agents_digest()` internally so `run`/the merge tests below stay untouched.
+/// from the pure typed [`unblock_mcp::agents_digest`] (Option C, D33). It takes no argument and
+/// calls `agents_digest()` itself, so [`write_managed_block`] and the merge tests below pass none.
 fn managed_block() -> String {
     let digest = unblock_mcp::agents_digest();
     let mut out = String::new();
@@ -290,5 +306,51 @@ mod tests {
         assert!(!updated.contains("OLD CONTENT"));
         assert!(updated.starts_with("intro"));
         assert_eq!(updated.matches(BEGIN_MARKER).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn write_managed_block_creates_then_rewrites_identically() {
+        use super::{agents_path, write_managed_block};
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = agents_path(root.path());
+        assert_eq!(path, root.path().join("AGENTS.md"));
+
+        write_managed_block(&path).await.expect("first write");
+        let first = std::fs::read_to_string(&path).expect("read AGENTS.md");
+        assert_eq!(first.matches(BEGIN_MARKER).count(), 1, "one block: {first}");
+        assert_eq!(first.matches(END_MARKER).count(), 1, "one block: {first}");
+
+        write_managed_block(&path).await.expect("second write");
+        let second = std::fs::read_to_string(&path).expect("re-read AGENTS.md");
+        assert_eq!(first, second, "a second write leaves the bytes identical");
+    }
+
+    /// A read failure other than a missing file stops the write, so hand-written bytes that are not
+    /// UTF-8 survive untouched.
+    #[tokio::test]
+    async fn write_managed_block_propagates_a_read_failure() {
+        use super::write_managed_block;
+
+        let dir_root = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir_root.path().join("AGENTS.md");
+        std::fs::create_dir(&dir_path).expect("mkdir AGENTS.md");
+        let err = write_managed_block(&dir_path)
+            .await
+            .expect_err("a directory is no text file");
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+
+        let bytes_root = tempfile::tempdir().expect("tempdir");
+        let bytes_path = bytes_root.path().join("AGENTS.md");
+        let hand_written = b"# Mine\n\xff\xfe notes\n";
+        std::fs::write(&bytes_path, hand_written).expect("seed AGENTS.md");
+        write_managed_block(&bytes_path)
+            .await
+            .expect_err("invalid UTF-8 is a read failure");
+        assert_eq!(
+            std::fs::read(&bytes_path).expect("re-read AGENTS.md"),
+            hand_written,
+            "the hand-written bytes are untouched"
+        );
     }
 }

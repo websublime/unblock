@@ -395,6 +395,33 @@ fn agents_with_a_broken_stderr_still_exits_0() {
     );
 }
 
+/// An `AGENTS.md` that `agents` cannot read keeps the `Io` error and its message (exit 8).
+#[test]
+fn agents_io_failure_keeps_its_message() {
+    let ws = Workspace::init();
+    std::fs::create_dir(ws.root().join("AGENTS.md")).expect("mkdir AGENTS.md");
+
+    let out = ws
+        .cmd()
+        .args(["agents", "--output", "json"])
+        .output()
+        .expect("run agents");
+    assert_eq!(
+        out.status.code(),
+        Some(8),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let error: Value =
+        serde_json::from_slice(&out.stdout).expect("one JSON error document on stdout");
+    assert_eq!(error["code"], "IO_ERROR", "error: {error}");
+    let message = error["message"].as_str().expect("a string message");
+    assert!(
+        message.starts_with("file operation failed:"),
+        "the agents I/O message: {message}"
+    );
+}
+
 #[test]
 fn agents_requires_a_workspace() {
     // `agents` opens resolve-only — no workspace → NotInitialized (exit 2), so AGENTS.md sits next to
