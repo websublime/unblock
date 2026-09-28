@@ -181,17 +181,47 @@ pub fn pick_cli_format(global: &GlobalArgs) -> OutputFormat {
         .unwrap_or(OutputFormat::Json)
 }
 
-/// Write a terse human note to STDERR (NFR-14) — used by `agents`/`init`/`update` for "wrote X".
+/// Write a terse human note to STDERR (NFR-14). A failing stderr is ignored, so a note never
+/// panics and never changes the exit code.
 pub fn diag(message: &str) {
-    eprintln!("{message}");
+    diag_to(message, &mut std::io::stderr().lock());
+}
+
+/// Writes `message` and one newline to `out`, ignoring a write error.
+fn diag_to(message: &str, out: &mut impl Write) {
+    let _ignored = writeln!(out, "{message}");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{InitReport, MigrateReport, ToDiagnosticReport, VersionReport, pick_cli_format};
+    use super::{
+        InitReport, MigrateReport, ToDiagnosticReport, VersionReport, diag_to, pick_cli_format,
+    };
     use crate::cli::GlobalArgs;
     use unblock_engine::DiagnosticKind;
     use unblock_render::OutputFormat;
+
+    /// A writer whose every write fails, as a stderr whose reader has exited does.
+    struct ClosedWriter;
+
+    impl std::io::Write for ClosedWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[test]
+    fn diag_to_writes_one_line_and_survives_a_failing_writer() {
+        let mut out = Vec::new();
+        diag_to("wrote /ws/AGENTS.md", &mut out);
+        assert_eq!(out, b"wrote /ws/AGENTS.md\n", "one newline-terminated line");
+
+        diag_to("wrote /ws/AGENTS.md", &mut ClosedWriter);
+    }
 
     fn version_report() -> VersionReport {
         VersionReport {
