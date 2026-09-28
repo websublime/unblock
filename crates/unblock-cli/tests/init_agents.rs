@@ -53,6 +53,144 @@ fn init_scaffolds_only_config_and_db() {
     );
 }
 
+/// `-o` reaches `init`'s open, so each human format renders the scaffold report on success. json and
+/// robot render identical compact bytes under default options, so a robot leg would prove nothing.
+/// Markdown escapes the underscore in the `id_prefix` label.
+#[test]
+fn init_honors_the_output_flag() {
+    for (format, opening, prefix_label) in [
+        ("plain", "Diagnostics: ", "id_prefix"),
+        ("markdown", "## Diagnostics: ", r"id\_prefix"),
+        ("csv", "label,detail\n", "id_prefix"),
+    ] {
+        let root = tempfile::tempdir().expect("tempdir");
+        let out = unblock()
+            .current_dir(root.path())
+            .args(["init", "--output", format])
+            .output()
+            .expect("run init");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "init -o {format} must exit 0; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            serde_json::from_slice::<Value>(&out.stdout).is_err(),
+            "init -o {format} must not render JSON: {stdout}"
+        );
+        assert!(
+            stdout.starts_with(opening),
+            "init -o {format} renders its own format: {stdout}"
+        );
+        assert!(
+            stdout.contains(prefix_label),
+            "the report names the prefix: {stdout}"
+        );
+        if format == "csv" {
+            assert_eq!(
+                common::csv_report(&out.stdout).len(),
+                5,
+                "the five scaffold records: {stdout}"
+            );
+        }
+    }
+}
+
+/// `init -o csv` renders the scaffold report as csv, in the adapter's order.
+#[test]
+fn init_csv_reports_the_scaffold() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let out = unblock()
+        .current_dir(root.path())
+        .args(["init", "--output", "csv"])
+        .output()
+        .expect("run init");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "init -o csv must exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let records = common::csv_report(&out.stdout);
+    assert_eq!(
+        common::csv_labels(&records),
+        [
+            "workspace_dir",
+            "unblock_dir",
+            "db_path",
+            "config_path",
+            "id_prefix"
+        ]
+    );
+}
+
+/// `--actor` reaches `init`'s open, so an actor over the length bound fails there with exit 7.
+/// `config.toml` is already written and `unblock.db` is not. A plain re-run then meets the clobber
+/// guard, and `init --force` without the bad actor recovers.
+#[test]
+fn init_rejects_an_invalid_actor_after_writing_config_and_force_recovers() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let unblock_dir = root.path().join(".unblock");
+    let long_actor = "a".repeat(201);
+
+    let rejected = unblock()
+        .current_dir(root.path())
+        .args(["init", "--actor", &long_actor, "--output", "json"])
+        .output()
+        .expect("run init --actor");
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert_eq!(
+        rejected.status.code(),
+        Some(7),
+        "an invalid actor fails the open; stderr: {stderr}"
+    );
+    let error: Value =
+        serde_json::from_slice(&rejected.stdout).expect("a JSON error document on stdout");
+    assert_eq!(error["code"], "CONFIG_ERROR", "error: {error}");
+    assert!(
+        unblock_dir.join("config.toml").exists(),
+        "config.toml is written before the open"
+    );
+    assert!(
+        !unblock_dir.join("unblock.db").exists(),
+        "the open fails before it creates the database"
+    );
+    assert!(
+        !stderr.lines().any(|line| line.starts_with("hint: ")),
+        "a failed init prints no hint: {stderr}"
+    );
+
+    let rerun = unblock()
+        .current_dir(root.path())
+        .arg("init")
+        .output()
+        .expect("run init again");
+    assert_eq!(
+        rerun.status.code(),
+        Some(2),
+        "the clobber guard refuses the half scaffold; stderr: {}",
+        String::from_utf8_lossy(&rerun.stderr)
+    );
+
+    let forced = unblock()
+        .current_dir(root.path())
+        .args(["init", "--force"])
+        .output()
+        .expect("run init --force");
+    assert_eq!(
+        forced.status.code(),
+        Some(0),
+        "init --force recovers; stderr: {}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert!(
+        unblock_dir.join("unblock.db").exists(),
+        "the recovery creates the database"
+    );
+}
+
 /// `UNBLOCK_OUTPUT_FORMAT=csv` reaches `init` through config's env layer, so the scaffold report
 /// renders as csv and the run exits 0.
 #[test]

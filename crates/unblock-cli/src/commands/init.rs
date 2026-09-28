@@ -5,11 +5,15 @@
 //! NO `.gitignore`, NO `metadata.json`, NO seeded `issues.jsonl` (D13/NFR-6/model-B). Clobber guard:
 //! refuse if `config.toml` OR `unblock.db` is already present under the target `.unblock/` without
 //! `--force` → a CLI-local `CliError::AlreadyInitialized` (`ConfigError` has none) → exit 2.
+//!
+//! The open forwards the global flags with the target as its `--dir`, so `-o` and `--actor` reach
+//! config (the spine §5b forwarder rule). An actor that fails validation fails that open (exit 7)
+//! after `config.toml` is written, and `init --force` recovers.
 
 use std::path::PathBuf;
 
 use snafu::{ResultExt, ensure};
-use unblock_config::{CliOverrides, open_with_storage_with_cli};
+use unblock_config::open_with_storage_with_cli;
 use unblock_model::normalize_prefix;
 
 use crate::cli::{GlobalArgs, InitArgs};
@@ -54,8 +58,9 @@ pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, Cli
         .map_or_else(|| DEFAULT_PREFIX.to_string(), normalize_prefix);
     std::fs::write(&config_path, render_config_toml(&prefix)).context(IoSnafu)?;
 
-    // 5. Open+migrate via the facade to create the migrated empty unblock.db (FR-9 no-drift).
-    let overrides = CliOverrides::new().with_dir(&unblock_dir);
+    // 5. Open+migrate via the facade to create the migrated empty unblock.db (FR-9 no-drift). The
+    //    open forwards the global flags, and the target replaces any raw `--dir`.
+    let overrides = global.to_overrides().with_dir(&unblock_dir);
     let ctx = open_with_storage_with_cli(&overrides).await?;
 
     // 6. Report exactly what was scaffolded.
