@@ -27,7 +27,8 @@
 //!   (`migrate`); `exit_2_already_initialized_clobber_guard`,
 //!   `exit_8_io_error_from_init_into_a_file_path` and `robot_mode_error_is_valid_json_on_stdout`
 //!   (`init`); `exit_1_internal_error_from_update_unconfigured` (`update`).
-//! - `init_agents.rs` — `agents_requires_a_workspace` (`agents`; the only cell that asserts an
+//! - `init_agents.rs` — `init_rejects_an_invalid_actor_after_writing_config_and_force_recovers`
+//!   (`init`); `agents_requires_a_workspace` (`agents`; the only cell that asserts an
 //!   ERROR PAYLOAD ON STDOUT for that command — `init_agents.rs` and `help_snapshots.rs` cover
 //!   `agents` in other ways, so the exclusivity is over this list's own predicate, not over the
 //!   command).
