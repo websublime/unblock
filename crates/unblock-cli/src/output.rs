@@ -55,7 +55,8 @@ pub struct MigrateReport {
     pub applied: bool,
 }
 
-/// `unblock init` report — what was scaffolded (AF-3).
+/// The `unblock init` report names what `init` scaffolded (AF-3) and, under `--agents`, the
+/// `AGENTS.md` it wrote.
 #[derive(Debug, Clone, Serialize)]
 pub struct InitReport {
     /// The project root that contains `.unblock/`.
@@ -68,6 +69,8 @@ pub struct InitReport {
     pub id_prefix: String,
     /// The written `config.toml` path.
     pub config_path: PathBuf,
+    /// The `AGENTS.md` path `init --agents` wrote, and `None` for a bare `init` (v1.1).
+    pub agents_path: Option<PathBuf>,
 }
 
 /// Map a CLI-local report onto a `DiagnosticReport` for rendering (D27/AD-2). Each report reuses an
@@ -125,15 +128,19 @@ impl ToDiagnosticReport for MigrateReport {
 
 impl ToDiagnosticReport for InitReport {
     fn to_report(&self) -> DiagnosticReport {
+        let mut findings = vec![
+            finding("workspace_dir", self.workspace_dir.display().to_string()),
+            finding("unblock_dir", self.unblock_dir.display().to_string()),
+            finding("db_path", self.db_path.display().to_string()),
+            finding("config_path", self.config_path.display().to_string()),
+            finding("id_prefix", self.id_prefix.clone()),
+        ];
+        if let Some(agents_path) = &self.agents_path {
+            findings.push(finding("agents_path", agents_path.display().to_string()));
+        }
         DiagnosticReport {
             kind: DiagnosticKind::Info,
-            findings: vec![
-                finding("workspace_dir", self.workspace_dir.display().to_string()),
-                finding("unblock_dir", self.unblock_dir.display().to_string()),
-                finding("db_path", self.db_path.display().to_string()),
-                finding("config_path", self.config_path.display().to_string()),
-                finding("id_prefix", self.id_prefix.clone()),
-            ],
+            findings,
         }
     }
 }
@@ -150,7 +157,8 @@ impl ToDiagnosticReport for InitReport {
 /// scope and is tracked as its own open issue, `ub-c5o` (PRD §4 D48 clause 6(iii)).
 ///
 /// # Errors
-/// - [`CliError::Render`] if the format cannot represent a diagnostic report;
+/// - [`CliError::Render`] if the renderer fails, which only JSON serialization or the
+///   feature-gated TOON placeholder can do;
 /// - [`CliError::Io`] if writing to stdout fails.
 pub fn emit_report(report: &DiagnosticReport, fmt: OutputFormat) -> Result<(), CliError> {
     let opts = RenderOptions::default();
@@ -183,6 +191,10 @@ pub fn pick_cli_format(global: &GlobalArgs) -> OutputFormat {
 
 /// Write a terse human note to STDERR (NFR-14). A failing stderr is ignored, so a note never
 /// panics and never changes the exit code.
+///
+/// Its callers are the "wrote X" note of the shared `AGENTS.md` write (under `agents` and
+/// `init --agents`), the next-step hint of a bare `init` and `update`'s notes. `diag` itself ignores
+/// `-q`, so the "wrote X" note prints even under `-q`. `init` checks `-q` before it prints the hint.
 pub fn diag(message: &str) {
     diag_to(message, &mut std::io::stderr().lock());
 }
@@ -194,11 +206,13 @@ fn diag_to(message: &str, out: &mut impl Write) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{
         InitReport, MigrateReport, ToDiagnosticReport, VersionReport, diag_to, pick_cli_format,
     };
     use crate::cli::GlobalArgs;
-    use unblock_engine::DiagnosticKind;
+    use unblock_engine::{DiagnosticKind, DiagnosticReport};
     use unblock_render::OutputFormat;
 
     /// A writer whose every write fails, as a stderr whose reader has exited does.
@@ -265,6 +279,59 @@ mod tests {
         assert_eq!(applied.detail, "false");
     }
 
+    /// The labels of `report`'s findings, in order.
+    fn labels(report: &DiagnosticReport) -> Vec<&str> {
+        report.findings.iter().map(|f| f.label.as_str()).collect()
+    }
+
+    /// An `InitReport` for the workspace at `/ws`, with `agents_path` as given.
+    fn init_report(agents_path: Option<&str>) -> InitReport {
+        InitReport {
+            workspace_dir: "/ws".into(),
+            unblock_dir: "/ws/.unblock".into(),
+            db_path: "/ws/.unblock/unblock.db".into(),
+            id_prefix: "ub".to_string(),
+            config_path: "/ws/.unblock/config.toml".into(),
+            agents_path: agents_path.map(PathBuf::from),
+        }
+    }
+
+    #[test]
+    fn init_report_without_agents_keeps_its_five_rows() {
+        let report = init_report(None).to_report();
+        assert_eq!(
+            labels(&report),
+            [
+                "workspace_dir",
+                "unblock_dir",
+                "db_path",
+                "config_path",
+                "id_prefix"
+            ]
+        );
+    }
+
+    #[test]
+    fn init_report_with_agents_appends_agents_path_last() {
+        let report = init_report(Some("/ws/AGENTS.md")).to_report();
+        assert_eq!(
+            labels(&report),
+            [
+                "workspace_dir",
+                "unblock_dir",
+                "db_path",
+                "config_path",
+                "id_prefix",
+                "agents_path"
+            ]
+        );
+        assert_eq!(
+            report.findings.last().map(|f| f.detail.as_str()),
+            Some("/ws/AGENTS.md"),
+            "the last row names the AGENTS.md path"
+        );
+    }
+
     #[test]
     fn init_report_maps_to_info_kind() {
         let report = InitReport {
@@ -273,6 +340,7 @@ mod tests {
             db_path: "/ws/.unblock/unblock.db".into(),
             id_prefix: "ub".to_string(),
             config_path: "/ws/.unblock/config.toml".into(),
+            agents_path: None,
         }
         .to_report();
         assert_eq!(report.kind, DiagnosticKind::Info);

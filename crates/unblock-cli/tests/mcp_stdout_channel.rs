@@ -36,9 +36,15 @@
 //!   `init_force_beside_an_initialized_sibling_is_still_refused`,
 //!   `bare_init_on_an_empty_dot_unblock_beside_an_initialized_underscore_is_refused`,
 //!   `a_root_with_two_initialized_workspace_dirs_is_refused_by_each_guard`,
-//!   `init_underscore_beside_an_empty_dot_unblock_is_refused` and
-//!   `an_initialized_underscore_beside_an_empty_dot_unblock_is_refused_naming_the_dot_unblock`
-//!   (`init`);
+//!   `init_underscore_beside_an_empty_dot_unblock_is_refused`,
+//!   `an_initialized_underscore_beside_an_empty_dot_unblock_is_refused_naming_the_dot_unblock`,
+//!   `refused_init_agents_names_the_retry_text_and_writes_nothing`,
+//!   `refused_init_agents_on_an_underscore_root_names_its_canonical_dir`,
+//!   `refused_init_agents_beside_an_initialized_sibling_names_the_sibling`,
+//!   `refused_init_agents_beside_an_empty_dot_unblock_carries_no_retry_text`,
+//!   `refused_init_agents_at_a_root_whose_empty_dot_unblock_binds_first_carries_no_retry_text`,
+//!   `refused_bare_init_prints_no_hint_and_keeps_its_message` and
+//!   `init_agents_write_failure_keeps_the_scaffold_and_exits_8` (`init`);
 //!   `agents_requires_a_workspace` and `agents_io_failure_keeps_its_message` (`agents`).
 //! - `migrate_doctor.rs` — `migrate_on_a_future_schema_db_exits_2_with_schema_mismatch` and
 //!   `a_lying_stamp_exits_2_with_a_hint_that_names_the_repair_and_the_missing_columns` (`migrate`);

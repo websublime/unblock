@@ -168,7 +168,8 @@ pub struct VersionArgs {
     pub short: bool,
 }
 
-/// `unblock init` — scaffold a workspace (AF-3).
+/// `unblock init` — scaffold a workspace (AF-3); `--agents` also writes the managed `AGENTS.md`
+/// block (v1.1).
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// The issue-id prefix to seed `config.toml` with (normalized; default `ub`).
@@ -177,6 +178,10 @@ pub struct InitArgs {
     /// Overwrite an existing `.unblock/` scaffold instead of refusing (clobber guard override).
     #[arg(long)]
     pub force: bool,
+    /// After scaffolding, also write or refresh the managed `AGENTS.md` block (the same merge
+    /// `unblock agents` runs).
+    #[arg(long)]
+    pub agents: bool,
 }
 
 /// `unblock agents` — no v1 flags (writes `<workspace>/AGENTS.md`).
@@ -309,6 +314,19 @@ mod tests {
         }
         #[cfg(feature = "self-update")]
         assert_eq!(role(&["unblock", "update"]), StdoutRole::Reports);
+    }
+
+    #[test]
+    fn init_agents_flag_defaults_off_and_parses_on() {
+        let agents = |args: &[&str]| match Cli::try_parse_from(args)
+            .unwrap_or_else(|e| panic!("parse {args:?}: {e}"))
+            .command
+        {
+            Command::Init(init) => init.agents,
+            other => panic!("expected Init, got {other:?}"),
+        };
+        assert!(!agents(&["unblock", "init"]), "a bare init leaves it off");
+        assert!(agents(&["unblock", "init", "--agents"]), "--agents sets it");
     }
 
     #[test]

@@ -8,8 +8,9 @@
 //! `ErrorCode::InternalError` (exit 1) — an MCP-server run-loop/transport failure is an INTERNAL condition,
 //! not a user `IoError` (exit 8). CLI-local variants: `AlreadyInitialized` (exit 2, the init clobber
 //! guard and sibling guard — `ConfigError` has none), `SiblingBindsFirst` (exit 2 through
-//! `ALREADY_INITIALIZED`, the init binds-first check), scaffold/agents `Io` (exit 8), `Update`
-//! (exit 1).
+//! `ALREADY_INITIALIZED`, the init binds-first check), scaffold/agents `Io` (exit 8),
+//! `InitAgentsWrite` (exit 8, an `init --agents` that scaffolded but could not write `AGENTS.md`),
+//! `Update` (exit 1).
 //!
 //! **NFR-14 + FR-11 stream split:** in `json`/`robot` the structured error renders to the command's
 //! REPORT channel (always valid JSON even on error, FR-11); in `plain`/`csv`/`markdown` a human
@@ -89,10 +90,16 @@ pub enum CliError {
     /// without `--force` or from the sibling guard with or without it (AF-3). Maps to
     /// `ErrorCode::AlreadyInitialized` (exit 2). `ConfigError` has no such variant, so this is
     /// CLI-local.
-    #[snafu(display("workspace already initialized at {}", path.display()))]
+    #[snafu(display(
+        "workspace already initialized at {}{}",
+        path.display(),
+        refusal_suffix(retry.as_deref())
+    ))]
     AlreadyInitialized {
         /// Names the refused directory, the target or its sibling, as `init` formed it.
         path: PathBuf,
+        /// Holds the retry text for `path`. Only `init --agents` sets it (v1.1).
+        retry: Option<String>,
     },
 
     /// `unblock init` refused a target because discovery at its root binds a `.unblock` directory
@@ -108,6 +115,23 @@ pub enum CliError {
         bound: PathBuf,
         /// Names the `_unblock` directory, which that binding hides, as `init` formed it.
         hidden: PathBuf,
+    },
+
+    /// `init --agents` scaffolded the workspace but could not update `AGENTS.md` (v1.1). Maps to
+    /// `ErrorCode::IoError` (exit 8).
+    #[snafu(display(
+        "workspace initialized at {}, but could not update {}: {source}; to finish, run {}",
+        sanitize_inline(&unblock_dir.display().to_string()),
+        sanitize_inline(&path.display().to_string()),
+        crate::commands::init::agents_retry(unblock_dir)
+    ))]
+    InitAgentsWrite {
+        /// Holds the canonical `.unblock` (or `_unblock`) dir the open bound.
+        unblock_dir: PathBuf,
+        /// Holds the `AGENTS.md` path the write targeted.
+        path: PathBuf,
+        /// Holds the underlying I/O error.
+        source: std::io::Error,
     },
 
     /// A CLI-local file-system operation failed (scaffold write / `AGENTS.md` write). Maps to
@@ -142,11 +166,18 @@ impl CliError {
             Self::AlreadyInitialized { .. } | Self::SiblingBindsFirst { .. } => {
                 ErrorCode::AlreadyInitialized
             }
-            Self::Io { .. } => ErrorCode::IoError,
+            Self::Io { .. } | Self::InitAgentsWrite { .. } => ErrorCode::IoError,
             #[cfg(feature = "self-update")]
             Self::Update { .. } => ErrorCode::InternalError,
         }
     }
+}
+
+/// Returns the `AlreadyInitialized` message suffix that ends with `retry`, or nothing without one.
+fn refusal_suffix(retry: Option<&str>) -> String {
+    retry.map_or_else(String::new, |retry| {
+        format!("; to write its AGENTS.md block, run {retry}")
+    })
 }
 
 /// Build the `StructuredError` payload for a `CliError` (spine §2.4). Transparent-`CodedError` arms
@@ -341,6 +372,7 @@ mod tests {
     fn already_initialized_maps_to_exit_2() {
         let err = CliError::AlreadyInitialized {
             path: "/ws/.unblock".into(),
+            retry: None,
         };
         assert_eq!(err.code(), ErrorCode::AlreadyInitialized);
         assert_eq!(err.code().exit_code(), 2);
@@ -380,6 +412,7 @@ mod tests {
     fn to_structured_carries_code_and_message() {
         let err = CliError::AlreadyInitialized {
             path: "/ws/.unblock".into(),
+            retry: None,
         };
         let structured = to_structured(err);
         assert_eq!(structured.code, ErrorCode::AlreadyInitialized);
@@ -528,6 +561,7 @@ mod tests {
     fn already_initialized() -> CliError {
         CliError::AlreadyInitialized {
             path: "/ws/.unblock".into(),
+            retry: None,
         }
     }
 
@@ -844,6 +878,112 @@ mod tests {
         let line = String::from_utf8(err_sink).expect("utf8 diagnostic");
         assert!(
             line.starts_with("error[ALREADY_INITIALIZED]: "),
+            "the NFR-14 line shape: {line:?}"
+        );
+        assert!(
+            line.ends_with('\n') && line.matches('\n').count() == 1,
+            "exactly one newline-terminated line: {line:?}"
+        );
+    }
+
+    /// The `InitAgentsWrite` failure for `unblock_dir` and `path`, whose OS error reads `denied`.
+    fn init_agents_write(unblock_dir: &str, path: &str) -> CliError {
+        CliError::InitAgentsWrite {
+            unblock_dir: unblock_dir.into(),
+            path: path.into(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        }
+    }
+
+    /// The failed `AGENTS.md` write maps to exit 8 and ends with the retry text for the workspace
+    /// dir. Both shell families quote this path the same way, so the cell holds on every host.
+    #[test]
+    fn init_agents_write_maps_to_exit_8_and_ends_with_the_retry_text() {
+        let err = init_agents_write("/ws/proj/.unblock", "/ws/proj/AGENTS.md");
+        assert_eq!(err.code(), ErrorCode::IoError);
+        assert_eq!(err.code().exit_code(), 8);
+        assert_eq!(
+            err.to_string(),
+            "workspace initialized at /ws/proj/.unblock, but could not update \
+             /ws/proj/AGENTS.md: denied; to finish, run unblock agents --dir '/ws/proj/.unblock'"
+        );
+    }
+
+    #[test]
+    fn already_initialized_with_a_retry_keeps_its_code_and_ends_with_it() {
+        let err = CliError::AlreadyInitialized {
+            path: "/ws/proj/.unblock".into(),
+            retry: Some("unblock agents --dir '/ws/proj/.unblock'".to_string()),
+        };
+        assert_eq!(err.code(), ErrorCode::AlreadyInitialized);
+        assert_eq!(err.code().exit_code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "workspace already initialized at /ws/proj/.unblock; to write its AGENTS.md block, \
+             run unblock agents --dir '/ws/proj/.unblock'"
+        );
+    }
+
+    #[test]
+    fn bare_already_initialized_message_is_unchanged() {
+        let err = CliError::AlreadyInitialized {
+            path: "/ws/proj/.unblock".into(),
+            retry: None,
+        };
+        assert_eq!(err.code(), ErrorCode::AlreadyInitialized);
+        assert_eq!(
+            err.to_string(),
+            "workspace already initialized at /ws/proj/.unblock"
+        );
+    }
+
+    /// The retry text rides the message, so neither `init` error publishes a structured hint.
+    #[test]
+    fn init_errors_publish_no_structured_hint() {
+        let errors = [
+            CliError::AlreadyInitialized {
+                path: "/ws/proj/.unblock".into(),
+                retry: Some("unblock agents --dir '/ws/proj/.unblock'".to_string()),
+            },
+            init_agents_write("/ws/proj/.unblock", "/ws/proj/AGENTS.md"),
+        ];
+        for err in errors {
+            let structured = to_structured(err);
+            assert!(
+                structured.hint.is_none(),
+                "{}: {:?}",
+                structured.code.as_str(),
+                structured.hint
+            );
+        }
+    }
+
+    /// A newline in either path becomes the text `\n` in the directory, the `AGENTS.md` path and
+    /// the retry text, so the human arm writes exactly one line.
+    #[test]
+    fn init_agents_write_escapes_control_bytes_in_both_paths() {
+        let with_newlines = || init_agents_write("/ws/a\nb/.unblock", "/ws/a\nb/AGENTS.md");
+        let display = with_newlines().to_string();
+        assert!(!display.contains('\n'), "no raw newline: {display:?}");
+        assert_eq!(
+            display,
+            "workspace initialized at /ws/a\\nb/.unblock, but could not update /ws/a\\nb/AGENTS.md: \
+             denied; to finish, run unblock agents --dir '/ws/a\\nb/.unblock'"
+        );
+
+        let (mut out, mut err_sink) = (Vec::new(), Vec::new());
+        let code = into_exit_to(
+            with_newlines(),
+            OutputFormat::Plain,
+            StdoutRole::Reports,
+            &mut out,
+            &mut err_sink,
+        );
+        assert_eq!(code, 8);
+        assert!(out.is_empty(), "the human arm never uses stdout");
+        let line = String::from_utf8(err_sink).expect("utf8 diagnostic");
+        assert!(
+            line.starts_with("error[IO_ERROR]: "),
             "the NFR-14 line shape: {line:?}"
         );
         assert!(

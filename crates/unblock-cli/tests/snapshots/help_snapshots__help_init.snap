@@ -11,6 +11,7 @@ Options:
       --prefix <PREFIX>  The issue-id prefix to seed `config.toml` with (normalized; default `ub`)
       --actor <ACTOR>    The actor override (`--actor` > `UNBLOCK_ACTOR`, FORK-4) [env: UNBLOCK_ACTOR=]
       --force            Overwrite an existing `.unblock/` scaffold instead of refusing (clobber guard override)
+      --agents           After scaffolding, also write or refresh the managed `AGENTS.md` block (the same merge `unblock agents` runs)
   -o, --output <FORMAT>  The output format for rendered reports (`json|robot|plain|csv|markdown`). NO clap `env` — `UNBLOCK_OUTPUT_FORMAT` is owned by config's strict env layer for workspace commands; the flag still forwards so `--flag > env` holds (spine §5b)
   -v, --verbose...       Increase verbosity (`-v` INFO, `-vv` DEBUG, `-vvv+` TRACE). Logs go to stderr only (NFR-14)
   -q, --quiet            Suppress all but error-level diagnostics (`-q`). Overrides `-v`
