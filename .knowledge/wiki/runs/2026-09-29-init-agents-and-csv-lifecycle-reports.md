@@ -4,7 +4,7 @@ description: Adding init --agents and a next-step hint for unblock agents (track
 type: run
 date: 2026-09-29
 branch: ub-lp9.14-init-agents
-pr: -
+pr: '447'
 issues: [ub-lp9.14, ub-q3k]
 ---
 
