@@ -40,8 +40,7 @@ use crate::tools::{engine_err_json, err_json, ok_json};
 /// attribute below (the live `tools/list` wire) and the `capabilities()` tool descriptor
 /// (`resources/capabilities.rs`) — and no test cross-checks the two. Both sites must carry these
 /// exact bytes.
-pub(crate) const COMMENT_TOOL_DESCRIPTION: &str =
-    "Comment on issues: add, list, update, or delete (soft-redact).";
+pub(crate) const COMMENT_TOOL_DESCRIPTION: &str = "Comment on issues: add, list, update, or delete (soft-redact). Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them.";
 
 /// The `comment` tool input (spine §5.2 — EXACT shape).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -93,7 +92,7 @@ impl UnblockServer {
     /// Comment on issues (FR-6/D37).
     #[tool(
         name = "comment",
-        description = "Comment on issues: add, list, update, or delete (soft-redact)."
+        description = "Comment on issues: add, list, update, or delete (soft-redact). Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     )]
     pub(crate) async fn comment(
         &self,

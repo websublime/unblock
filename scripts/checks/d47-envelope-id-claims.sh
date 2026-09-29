@@ -75,8 +75,9 @@ RANGE_RE='D1\.\.D52'
 RANGE_ALT_RE='D\(52\|51\|'
 
 # The LIVE published contract version. D47 does NOT move it (see the header): this row is the
-# affirmative record of that, so a silent bump riding this decision goes red.
-CONTRACT_RE='unblock\.mcp\.v1\.9'
+# affirmative record of that, so a silent bump riding this decision goes red. It tracks the LIVE id,
+# so a later decision's bump moves it in that decision's implementation commit (D52: v1.9 -> v1.10).
+CONTRACT_RE='unblock\.mcp\.v1\.10'
 
 # The SAME two spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte rather than a regex operator. DERIVED, never hand-written a second time: a second copy of

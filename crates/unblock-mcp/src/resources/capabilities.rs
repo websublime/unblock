@@ -82,14 +82,14 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
     [
         (
             "issue",
-            "Create, show, update, close, reopen, delete, or restore issues.",
+            "Create, show, update, close, reopen, delete, or restore issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them.",
         ),
         // The shared constant — these bytes are contract and ship here AND in the
         // `#[tool(description)]` attribute (the pair-compare in `contract_suite` keeps them equal).
         ("claim", crate::tools::claim::CLAIM_TOOL_DESCRIPTION),
         (
             "defer",
-            "Defer an issue until a future timestamp, or undefer it.",
+            "Defer an issue until a future timestamp, or undefer it. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them.",
         ),
         (
             "query",
@@ -97,7 +97,7 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
         ),
         (
             "dep",
-            "Manage and query dependencies: add, remove, list, tree, cycles, or graph.",
+            "Manage and query dependencies: add, remove, list, tree, cycles, or graph. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them.",
         ),
         (
             "sync",

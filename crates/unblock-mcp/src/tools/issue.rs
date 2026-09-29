@@ -198,7 +198,7 @@ pub(crate) struct CreateInput {
     /// Quick-create: the output is the minted id only.
     #[serde(default)]
     pub quick: bool,
-    /// Capture-only attribution (never enforced).
+    /// Optional attribution, accepted and discarded (D52).
     #[serde(flatten)]
     pub attribution: Attribution,
 }
@@ -345,7 +345,7 @@ impl UnblockServer {
     /// Create, inspect, or mutate issues (the 7-action issue lifecycle, FR-1a/1b/1c).
     #[tool(
         name = "issue",
-        description = "Create, show, update, close, reopen, delete, or restore issues."
+        description = "Create, show, update, close, reopen, delete, or restore issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     )]
     pub(crate) async fn issue(&self, Parameters(raw, _): Parameters<IssueInput>) -> CallToolResult {
         // D42 PROLOGUE: the ONLY deserialization of tool arguments. The NFR-18 quota already

@@ -384,7 +384,7 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   D52 does not bind them. It keeps them accepted and makes both published copies say they are discarded, the
   three field descriptions and the five affected tool descriptions. That is an additive bump to
   `unblock.mcp.v1.10` with a `CONTRACT_HASH` re-pin. Its behaviour-bearing change is confined to `unblock-mcp`;
-  elsewhere it corrects one `Storage` trait comment and re-blesses the CLI's managed-block snapshot. Removing
+  elsewhere it corrects two storage doc comments (`trait_def.rs`, `events.rs`) and re-blesses the CLI's managed-block snapshot. Removing
   the fields was rejected, because `deny_unknown_fields` would then refuse calls that work today, a 2.0.0 event.
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA

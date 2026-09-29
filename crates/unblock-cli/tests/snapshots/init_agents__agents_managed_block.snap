@@ -9,7 +9,7 @@ This workspace is tracked by **unblock**. Issue-data operations are exposed over
 `unblock` CLI is lifecycle/ops only.
 
 - Start the server: `unblock mcp` (MCP over stdio).
-- Contract: `unblock.mcp.v1.9`.
+- Contract: `unblock.mcp.v1.10`.
 - Machine-readable discovery: read `unblock://capabilities` (the source of these tables) and
 `unblock://schema` (the full JsonSchema bundle for every tool I/O).
 
@@ -19,14 +19,14 @@ Descriptors (from `unblock://capabilities`):
 
 | Tool | Description |
 |---|---|
-| `issue` | Create, show, update, close, reopen, delete, or restore issues. |
-| `claim` | Atomically claim an issue for an assignee; the loser of a race is reported. |
-| `defer` | Defer an issue until a future timestamp, or undefer it. |
+| `issue` | Create, show, update, close, reopen, delete, or restore issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
+| `claim` | Atomically claim an issue for an assignee; the loser of a race is reported. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
+| `defer` | Defer an issue until a future timestamp, or undefer it. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
 | `query` | Query issues: list, ready, blocked, search, count, or stale. |
-| `dep` | Manage and query dependencies: add, remove, list, tree, cycles, or graph. |
+| `dep` | Manage and query dependencies: add, remove, list, tree, cycles, or graph. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
 | `sync` | Export/import the issue store as JSONL, or one-shot import a bd export. |
 | `diagnostics` | Diagnostics: stats, info, where, version, lint, changelog, orphans, or dangling. |
-| `comment` | Comment on issues: add, list, update, or delete (soft-redact). |
+| `comment` | Comment on issues: add, list, update, or delete (soft-redact). Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
 
 Actions (structural — derived from the `unblock://schema` `oneOf` discriminants; each row
 lists an action's FULL parameter surface, required AND optional):

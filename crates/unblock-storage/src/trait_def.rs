@@ -203,7 +203,8 @@ pub trait Storage: Send + Sync {
     async fn acquire_write_lock(&self) -> Result<Option<WriteLockGuard>, StorageError>;
 
     // ---------------------------------------------------------------------------------------------
-    // issue CRUD (mutations carry the actor + optional Tier-1 attribution; write Event(s) in-tx)
+    // issue CRUD (mutations carry the actor only and write Event(s) in-tx; Tier-1 attribution is
+    // discarded at the L7 wire until FR-22 [v1.1], PRD §4 D52)
     // ---------------------------------------------------------------------------------------------
 
     /// Create an issue **and its seeded relations**, returning its allocated id.

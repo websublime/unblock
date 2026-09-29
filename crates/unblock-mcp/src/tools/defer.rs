@@ -51,7 +51,7 @@ impl UnblockServer {
     /// Defer or undefer an issue (FR-3).
     #[tool(
         name = "defer",
-        description = "Defer an issue until a future timestamp, or undefer it."
+        description = "Defer an issue until a future timestamp, or undefer it. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     )]
     pub(crate) async fn defer(&self, Parameters(raw, _): Parameters<DeferInput>) -> CallToolResult {
         // D42 PROLOGUE: the ONLY deserialization of tool arguments. The NFR-18 quota already
