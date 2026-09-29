@@ -4,7 +4,7 @@ description: Publishing that the MCP wire discards Tier-1 attribution instead of
 type: run
 date: 2026-09-29
 branch: ub-lp9.22-attribution-discard
-pr: '-'
+pr: '448'
 issues: [ub-lp9.22]
 ---
 
@@ -19,8 +19,8 @@ and no tool description mentioned them.
 
 The run went off `main` at 586ff0f on branch `ub-lp9.22-attribution-discard`, in the worktree
 `../unblock-lp9.22`. The branch carries three gated commits, c67428c (spec), eb95233 (code) and
-c79bb7c (claim gate), and this Track commit sits on top of them. No pull request exists at the time of
-writing, so the `pr` field holds `-`.
+c79bb7c (claim gate), and the Track commits sit on top of them. The pull request is #448, and merging
+it is a human gate.
 
 Understand ran as three read-only scouts, and the code graph answered at 586ff0f. Decide ran with
 Miguel. A first Spec/Plan agent was lost when the computer crashed. After the restart, Miguel reported
