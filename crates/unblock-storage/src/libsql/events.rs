@@ -2,7 +2,7 @@
 //!
 //! Events are **append-only**: there is no update/delete path. The Tier-1 attribution columns
 //! (`agent_name`/`harness`/`model`) are capture-only and never enforced — every writer here passes
-//! `NULL` for them in v1 (the attribution capture surface is wired at the L7 boundary later).
+//! `NULL` for them in v1. Recording them is FR-22 (v1.1); until then the MCP wire discards them (D52).
 
 use chrono::Utc;
 use libsql::{Connection, Value};
@@ -17,7 +17,7 @@ use super::mappers::event_from_row;
 ///
 /// `old_value`/`new_value`/`comment` are optional change context. The `created_at` is set to the
 /// current instant in RFC3339 (the same convention the issue rows use). Tier-1 attribution columns
-/// are left `NULL` (capture-only; wired later).
+/// are left `NULL` until FR-22 (v1.1) records them; the MCP wire discards them meanwhile (D52).
 pub(super) async fn append_event_in_tx(
     tx: &libsql::Transaction,
     issue_id: &str,

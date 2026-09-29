@@ -125,7 +125,7 @@ impl UnblockServer {
     /// Dependency edges and graph queries (FR-5).
     #[tool(
         name = "dep",
-        description = "Manage and query dependencies: add, remove, list, tree, cycles, or graph."
+        description = "Manage and query dependencies: add, remove, list, tree, cycles, or graph. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     )]
     pub(crate) async fn dep(&self, Parameters(raw, _): Parameters<DepToolInput>) -> CallToolResult {
         // D42 PROLOGUE: the ONLY deserialization of tool arguments. The NFR-18 quota already

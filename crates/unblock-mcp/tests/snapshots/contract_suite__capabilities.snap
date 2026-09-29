@@ -3,19 +3,19 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: capabilities()
 ---
 {
-  "contract_version": "unblock.mcp.v1.9",
+  "contract_version": "unblock.mcp.v1.10",
   "tools": [
     {
       "name": "issue",
-      "description": "Create, show, update, close, reopen, delete, or restore issues."
+      "description": "Create, show, update, close, reopen, delete, or restore issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     },
     {
       "name": "claim",
-      "description": "Atomically claim an issue for an assignee; the loser of a race is reported."
+      "description": "Atomically claim an issue for an assignee; the loser of a race is reported. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     },
     {
       "name": "defer",
-      "description": "Defer an issue until a future timestamp, or undefer it."
+      "description": "Defer an issue until a future timestamp, or undefer it. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     },
     {
       "name": "query",
@@ -23,7 +23,7 @@ expression: capabilities()
     },
     {
       "name": "dep",
-      "description": "Manage and query dependencies: add, remove, list, tree, cycles, or graph."
+      "description": "Manage and query dependencies: add, remove, list, tree, cycles, or graph. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     },
     {
       "name": "sync",
@@ -35,7 +35,7 @@ expression: capabilities()
     },
     {
       "name": "comment",
-      "description": "Comment on issues: add, list, update, or delete (soft-redact)."
+      "description": "Comment on issues: add, list, update, or delete (soft-redact). Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     }
   ],
   "resources": [

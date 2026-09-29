@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.9",
+  "contract_version": "unblock.mcp.v1.10",
   "issue": {
     "input": {
       "$defs": {
@@ -111,7 +111,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -178,7 +178,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -204,7 +204,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -306,7 +306,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -365,7 +365,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -415,7 +415,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -488,7 +488,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -496,7 +496,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -508,7 +508,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -543,7 +543,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -551,7 +551,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -563,7 +563,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -586,7 +586,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -594,7 +594,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -613,7 +613,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -636,7 +636,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -644,7 +644,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -656,7 +656,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -1206,7 +1206,7 @@ expression: schema_bundle()
       "properties": {
         "agent_name": {
           "default": null,
-          "description": "Self-reported agent name (capture-only).",
+          "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
           "type": [
             "string",
             "null"
@@ -1218,7 +1218,7 @@ expression: schema_bundle()
         },
         "harness": {
           "default": null,
-          "description": "Self-reported harness identifier (capture-only).",
+          "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
           "type": [
             "string",
             "null"
@@ -1230,7 +1230,7 @@ expression: schema_bundle()
         },
         "model": {
           "default": null,
-          "description": "Self-reported model identifier (capture-only).",
+          "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
           "type": [
             "string",
             "null"
@@ -1655,7 +1655,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -1663,7 +1663,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -1675,7 +1675,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -1704,7 +1704,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -1712,7 +1712,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -1724,7 +1724,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -3389,7 +3389,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -3405,7 +3405,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -3425,7 +3425,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -3450,7 +3450,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -3466,7 +3466,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -3478,7 +3478,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -4172,7 +4172,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -4184,7 +4184,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -4196,7 +4196,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -4239,7 +4239,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -4256,7 +4256,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -4264,7 +4264,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -4288,7 +4288,7 @@ expression: schema_bundle()
             },
             "agent_name": {
               "default": null,
-              "description": "Self-reported agent name (capture-only).",
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -4301,7 +4301,7 @@ expression: schema_bundle()
             },
             "harness": {
               "default": null,
-              "description": "Self-reported harness identifier (capture-only).",
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"
@@ -4309,7 +4309,7 @@ expression: schema_bundle()
             },
             "model": {
               "default": null,
-              "description": "Self-reported model identifier (capture-only).",
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
               "type": [
                 "string",
                 "null"

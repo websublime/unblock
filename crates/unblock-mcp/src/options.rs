@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 /// too, not merely a new pair) → `unblock.mcp.v1.6` (v1.0.1/D42 — see the clause below) →
 /// `unblock.mcp.v1.7` (v1.0.1/D44 — see the second clause below) → `unblock.mcp.v1.8`
 /// (v1.0.1/D45 — see the third clause below) → `unblock.mcp.v1.9` (v1.0.1/D46 — see the fourth
-/// clause below).
+/// clause below) → `unblock.mcp.v1.10` (v1.0.1/D52 — see the fifth clause below).
 /// The `unblock.mcp.vN[.M]` family preserves the contract-id convention while the `.M` revision
 /// marks an additive contract change within the v1 product.
 ///
@@ -104,7 +104,17 @@ use tokio_util::sync::CancellationToken;
 /// sits outside the contract surface (spine §5.4), so the hint shape is D46's ONLY published
 /// movement. Per D35 an additive `.M` bump inside 1.x is NON-breaking, so this too ships in the
 /// v1.0.1 patch — it is not a 2.0.0 event, and it is the FOURTH such bump in this same slot).
-pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.9";
+///
+/// `unblock.mcp.v1.10` (v1.0.1/D52 — the wire DISCLOSES that Tier-1 attribution is discarded. The
+/// three `Attribution` field doc-comments, published as schema descriptions at every site that
+/// flattens the type, now say the value is accepted but neither stored nor returned; and the five
+/// tool descriptions that carry it (`issue`, `claim`, `defer`, `dep`, `comment`) gain the matching
+/// sentence in both copies. So `schema_bundle()` and `capabilities()` both move, and
+/// `agents_digest()` moves with the tool descriptions it copies. The fields stay on the wire because
+/// `deny_unknown_fields` would otherwise reject calls that succeed today. D52 mints NO `ErrorCode`,
+/// adds NO tool and changes no schema SHAPE. Per D35 an additive `.M` bump inside 1.x is NON-breaking,
+/// so this ships in the v1.0.1 patch — the FIFTH such bump in this slot).
+pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.10";
 
 /// The pinned SHA-256 digest of the ordered two-document tuple `(capabilities(), schema_bundle())` —
 /// the HASH-COUPLED half of the FR-12 drift gate (D22 widened by D25, `tests/contract_suite.rs`).
@@ -120,13 +130,11 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.9";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-// D46 (v1.0.1) re-pin: `ErrorCode::SchemaMismatch` moved off `HintShape::None` onto
-// `ContextualText`, so its `capabilities().error_codes` descriptor changed — one axis on
-// `capabilities()` plus the `contract_version` line both documents embed. The gate fired BY DESIGN
-// and this pin moved WITH the `unblock.mcp.v1.9` bump and the two re-blessed goldens, never alone.
-// (D45 moved it last: the `diagnostics` INPUT gained a `{"kind":"dangling"}` `oneOf` arm, its
-// OUTPUT's `$defs/DiagnosticKind` gained an enum member and the tool DESCRIPTION was rewritten.)
-pub const CONTRACT_HASH: &str = "e1c71cd356c0da5f211794cafde45e84b5c95e2df328c0c96e9a5c9d73204d78";
+// D52 (v1.0.1) re-pin: the three `Attribution` field descriptions and five tool descriptions now
+// state the discard, moving both documents. The gate fired BY DESIGN and this pin moved WITH the
+// `unblock.mcp.v1.10` bump and the two re-blessed goldens, never alone. (D46 moved it last:
+// `ErrorCode::SchemaMismatch` moved off `HintShape::None` onto `ContextualText`.)
+pub const CONTRACT_HASH: &str = "cad3b6452eb16b59eb734cad04c8d9c932ae2999fbc9843094897ba7e10ff56f";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
@@ -230,12 +238,10 @@ mod tests {
 
     #[test]
     fn contract_version_is_the_bumped_v1_id() {
-        // v1.0.1/D46: `ErrorCode::SchemaMismatch` moves off `HintShape::None` onto
-        // `ContextualText` (the stale-schema self-correction hint), which is a published byte in
-        // `capabilities().error_codes` — so `capabilities()` moves and `schema_bundle()` moves by
-        // the `contract_version` line → v1.9 (additive, D35; it follows v1.8, which D45's
-        // `dangling` diagnostics kind earned).
-        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.9");
+        // v1.0.1/D52: the `Attribution` field descriptions and five tool descriptions now state that
+        // the values are discarded, moving both discovery documents → v1.10 (additive, D35; it
+        // follows v1.9, which D46's stale-schema hint earned).
+        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.10");
     }
 
     #[test]

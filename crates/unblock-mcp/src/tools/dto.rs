@@ -1,7 +1,7 @@
 //! Shared input DTOs that flatten across tools + the input→model conversion glue (spine §5.2/§1.10).
 //!
-//! - [`Attribution`] — capture-only Tier-1 metadata on the wire (spine §5.2). It is **never
-//!   enforced** here (the policy gate type is the distinct `AttributionPolicy`, G-23e).
+//! - [`Attribution`] — optional Tier-1 metadata on the wire (spine §5.2). It is **never enforced**
+//!   (the policy gate type is the distinct `AttributionPolicy`, G-23e) and currently discarded (D52).
 //! - [`FilterInput`] — mirrors `ListFilters` (spine §1.10); [`FilterInput::into_list_filters`] is the
 //!   total conversion into the engine-facing [`unblock_model::ListFilters`].
 //! - [`DepInput`] — the create-arm edge input: an element of the `issue` tool's `create.deps` array,
@@ -19,35 +19,31 @@ use serde::{Deserialize, Serialize};
 use unblock_engine::NewDep;
 use unblock_model::{DependencyType, IssueType, ListFilters, Priority, Status};
 
-/// MCP wire attribution — capture-only Tier-1 metadata (spine §5.2).
+/// MCP wire attribution — optional Tier-1 metadata (spine §5.2).
 ///
 /// Distinct from the policy enforcement type (`AttributionPolicy`, G-23e): this `Attribution` is
 /// mcp-owned and **never enforced**. It flattens into mutating tool inputs so an agent can
 /// self-report `agent_name`/`harness`/`model`.
 ///
-/// # ⚠️ It is NOT persisted — capture-only means capture-only
+/// # Accepted and discarded (PRD §4 D52)
 ///
-/// Every tool arm destructures this as `attribution: _`. Nothing downstream consumes it: the L2
-/// event writer `crates/unblock-storage/src/libsql/events.rs:31` INSERTs **7** columns
-/// (`issue_id`, `event_type`, `actor`, `old_value`, `new_value`, `comment`, `created_at`) and binds
-/// **none** of `agent_name`/`harness`/`model`, while the read at `:62` DOES select them — so they
-/// read back `NULL`. Accepting it on the wire and dropping it is a **deliberate v1 deferral**, to be
-/// wired at L7 with **FR-22 [v1.1]**; tracked as `ub-lp9.22` and carved out at `docs/PRD.md` FR-20
-/// (i). Do not restate this field as "recorded best-effort via the audit event" — that claim was
-/// live here and false.
+/// Every tool arm drops this value, and no engine or storage signature carries it, so the `events`
+/// attribution columns read back `NULL`. Recording it is FR-22 (v1.1, `ub-lp9.7`). The field
+/// doc-comments below are published as the schema descriptions, and they state the discard; the
+/// five tool descriptions that carry this type state it too. Their text is normative in spine §5.2.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 // D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
 // instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
 // container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
 #[serde(deny_unknown_fields)]
 pub(crate) struct Attribution {
-    /// Self-reported agent name (capture-only).
+    /// Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.
     #[serde(default)]
     pub agent_name: Option<String>,
-    /// Self-reported harness identifier (capture-only).
+    /// Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.
     #[serde(default)]
     pub harness: Option<String>,
-    /// Self-reported model identifier (capture-only).
+    /// Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.
     #[serde(default)]
     pub model: Option<String>,
 }

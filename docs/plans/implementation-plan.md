@@ -433,7 +433,7 @@
   `CONTRACT_RE` knob of every shipped script that carries one — `d44`, `ub-lp9.25`, `d47`, `d48`,
   `d49` and `d50` — whose no-bump rows still hold because each names its own decision; **(5)** the
   false storage-trait comment in `crates/unblock-storage/src/trait_def.rs` that says mutations carry
-  attribution; **(6) GATE** — `scripts/checks/d52-attribution-discard-claims.sh` lands in the D43 shape
+  attribution, and the `events.rs` doc comments that point at FR-22 and D52; **(6) GATE** — `scripts/checks/d52-attribution-discard-claims.sh` lands in the D43 shape
   specified at ci-cd §2.1 and is wired as a required `doc-lint` step in `.github/workflows/ci.yml`; it
   carries no live-range and no contract knob, so `docs/PROCESS.md` section 3 does not list it. **(7)
   NOT MOVED** — no storage schema, migration, engine or `Storage` signature; no `ErrorCode`
