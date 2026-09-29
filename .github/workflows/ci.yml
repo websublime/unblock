@@ -383,6 +383,14 @@ jobs:
       # UNMOVED, since `-32600` is rmcp's own transport-level code and not our taxonomy. Positive-only
       # by design. Specified in ci-cd-and-distribution.md §2.1 (the D50 sub-check).
       - run: scripts/checks/d50-pre-handshake-gate-claims.sh
+      # D52 (`ub-lp9.22`) zero-live-hits sweep: the MCP wire keeps accepting the optional
+      # `agent_name`/`harness`/`model` attribution and publishes that it discards it until FR-22.
+      # The published texts are contract bytes the contract suite already pins, so this step guards
+      # the other direction. It blocks the retired field description, the retired storage claim that
+      # mutations carry attribution, and any new line claiming the self-report is kept without a
+      # qualifier. The allow-list is self-tested. Specified in ci-cd-and-distribution.md §2.1 (the
+      # D52 sub-check).
+      - run: scripts/checks/d52-attribution-discard-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
