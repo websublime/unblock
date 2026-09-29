@@ -411,6 +411,37 @@
   `cargo xtask knowledge-lint` and every `scripts/checks/*.sh`. Both gates >=3 agents; Claude opens the
   PR, a human merges.)*
 
+- **T3.14 — the wire DISCLOSES that Tier-1 attribution is discarded (v1.0.1, additive contract bump
+  `unblock.mcp.v1.9`→`unblock.mcp.v1.10`). Implements D52.** *(Next free top-level M3 id — a peer of
+  T3.13, not a sub-task.)* The design is normative in the **D52 PRD §4 row** plus spine §5.2 (the
+  `Attribution` texts) and the spine §5.4 ledger — **read those before implementing; this bullet is a
+  checklist of touched sites and never the spec.** Tracked as `ub-lp9.22`. ONE PR. The spec cascade
+  lands in its own commit, so the implementation commit carries the code, the re-blessed goldens, the
+  gate script and its wiring. Scope: **(1)** the three field doc-comments in
+  `crates/unblock-mcp/src/tools/dto.rs`, which are the only source of the published field descriptions,
+  plus that file's module and type doc-comments and the unpublished "capture-only" doc-comments on the
+  flatten fields in `tools/claim.rs` and `tools/issue.rs`, all restated against D52; **(2)** the five tool
+  descriptions — `issue`, `claim`, `defer`, `dep`, `comment` — in BOTH copies: the live
+  `#[tool(description)]` literal, and the `capabilities()` descriptor, which is a literal in
+  `crates/unblock-mcp/src/resources/capabilities.rs` for `issue`, `defer` and `dep` and the shared
+  `CLAIM_TOOL_DESCRIPTION` / `COMMENT_TOOL_DESCRIPTION` const in `tools/claim.rs` / `tools/comment.rs` for
+  the other two; **(3)** `CONTRACT_VERSION` → `unblock.mcp.v1.10` and a `CONTRACT_HASH` re-pin in
+  `crates/unblock-mcp/src/options.rs`, with that file's in-module version test and its version and hash
+  history comments, the `public_api.rs` assert, the `capabilities` and `schema_bundle` goldens, the
+  regenerated `AGENTS.md` and its `init_agents__agents_managed_block.snap` twin, every `README.md`
+  contract mention and the `unblock-mcp.md` declaring row; **(4)** the
+  `CONTRACT_RE` knob of every shipped script that carries one — `d44`, `ub-lp9.25`, `d47`, `d48`,
+  `d49` and `d50` — whose no-bump rows still hold because each names its own decision; **(5)** the
+  false storage-trait comment in `crates/unblock-storage/src/trait_def.rs` that says mutations carry
+  attribution; **(6) GATE** — `scripts/checks/d52-attribution-discard-claims.sh` lands in the D43 shape
+  specified at ci-cd §2.1 and is wired as a required `doc-lint` step in `.github/workflows/ci.yml`; it
+  carries no live-range and no contract knob, so `docs/PROCESS.md` section 3 does not list it. **(7)
+  NOT MOVED** — no storage schema, migration, engine or `Storage` signature; no `ErrorCode`
+  (`ErrorCode::ALL` stays 36); the 0–8 table byte-unchanged; no layer edge. **(8) PROBE** —
+  `cargo fmt --check`, clippy pedantic, `cargo test` for `unblock-mcp`, `unblock-cli` and
+  `unblock-storage`, `cargo insta test --check`, `cargo xtask doc-lint`, `cargo xtask knowledge-lint`
+  and every `scripts/checks/*.sh`. Both gates >=3 agents; Claude opens the PR, a human merges.
+
 ## 6. MCP surface — concrete v1 taxonomy (closes PRD §12.2)
 
 Consolidated to keep the client tool list small (target **≤ 8 tools**); read-heavy state is exposed as resources.

@@ -234,7 +234,8 @@ pub struct Event {                         // append-only audit; written transac
     #[serde(default, skip_serializing_if = "Option::is_none")] pub new_value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub comment: Option<String>,
     pub created_at: DateTime<Utc>,
-    // Tier-1 attribution (capture-only, NEVER enforced)
+    // Tier-1 attribution (capture-only, NEVER enforced). Declared but not bound, so NULL until
+    // FR-22 [v1.1] records it (PRD §4 D52).
     #[serde(default, skip_serializing_if = "Option::is_none")] pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub model: Option<String>,
@@ -1000,7 +1001,8 @@ pub trait Storage: Send + Sync {
     //  timeout=0 (fail-fast) for the WHOLE command, UNCONDITIONALLY — acquired before the version check, and it
     //  bypasses `with_immediate_tx` (§3.3).
 
-    // --- issue CRUD (mutations carry actor + optional Tier-1 attribution; write Event(s) transactionally) ---
+    // --- issue CRUD (mutations carry the actor only and write Event(s) transactionally; Tier-1 attribution
+    //     stays at the L7 wire and is discarded there until FR-22 [v1.1] — PRD §4 D52) ---
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError>; // returns id
     //  ONE `BEGIN IMMEDIATE` tx: the row + `Event(Created)` + the child-counter bump + the SEEDED
     //  relations — labels, `Issue.dependencies` and comments — with their per-relation events. The
@@ -2597,7 +2599,7 @@ pub enum IssueInput {
         #[serde(default)] agent_context: Option<String>,     // D22 — `### Agent Context`/`agent-context`/`agent_context`
         #[serde(default)] ephemeral: bool,
         #[serde(default)] quick: bool,                  // quick-create -> output is id only
-        #[serde(flatten)] attribution: Attribution,     // agent_name/harness/model (capture-only)
+        #[serde(flatten)] attribution: Attribution,     // agent_name/harness/model — accepted, discarded (D52)
     },
     // D21 mapping: the `issue`-tool adapter maps `Create` → the engine-owned `NewIssue` (§4.1) and calls the
     // MINTING `Session::create_issue(NewIssue)` (the ENGINE mints `ub-<hash>` / `ub-<slug>-<hash>` / `parent.N`
@@ -2880,9 +2882,21 @@ pub enum DiagnosticsInput {
 // "Diagnostics: stats, info, where, version, lint, changelog, orphans, or dangling." Both copies move
 // together, with the `capabilities`/`schema_bundle` goldens and the live (name, description) assert.
 
-// MCP WIRE attribution (capture-only Tier-1 metadata on the wire). Distinct from the
-// policy gate type (G-23e): unblock-policy's enforcement type is named `AttributionPolicy`
-// (NOT `Attribution`) so the two never collide. This `Attribution` is mcp-owned, never enforced.
+// MCP WIRE attribution (Tier-1 metadata on the wire). Distinct from the policy gate type (G-23e):
+// unblock-policy's enforcement type is named `AttributionPolicy` (NOT `Attribution`) so the two never
+// collide. This `Attribution` is mcp-owned and never enforced. D52: it flattens into every mutating arm,
+// every arm discards it, and no engine or storage signature carries it until FR-22 [v1.1]. The discard is
+// PUBLISHED, and the texts are NORMATIVE contract bytes. Each field's doc-comment, which becomes its
+// schema description, reads
+//   "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it."
+//   "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it."
+//   "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it."
+// and each of the five tool descriptions that carry it — `issue`, `claim`, `defer`, `dep`, `comment` —
+// ends with the sentence "Where an action accepts the optional agent_name, harness and model fields,
+// unblock currently discards them." in BOTH copies (the `#[tool(description)]` wire literal and the
+// `capabilities()` descriptor). The sentence is conditional because not every action flattens
+// `Attribution` — the read actions and `issue create_bulk` do not, and `deny_unknown_fields` rejects the
+// fields there — and the per-action schema says which ones do.
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct Attribution { #[serde(default)] pub agent_name: Option<String>,
                          #[serde(default)] pub harness: Option<String>, #[serde(default)] pub model: Option<String> }
@@ -2935,7 +2949,7 @@ pub enum CommentToolInput {
 
 The tool body runs `self.preflight(&input)?` (NFR-18 quota) → match arm → the `Session` method (§4.1) →
 `ok_json`/`engine_err_json`. Author over MCP is `self.session.actor()` (no per-comment author — FORK-M1b). The
-`Attribution` flatten (capture-only `agent_name`/`harness`/`model`) mirrors the other mutating inputs. Body
+`Attribution` flatten (`agent_name`/`harness`/`model`, accepted and discarded — D52) mirrors the other mutating inputs. Body
 validation (non-empty trimmed / NUL-rejected) runs in the engine before the mutation (→ `ValidationFailed`).
 
 ### 5.3 Output shapes (D25/FORK-1B — per-tool, MATERIALIZED, NORMATIVE)
@@ -3344,6 +3358,26 @@ there). **The ratified behavioural change is stated openly:** a client that met 
 carrying a hint that names what happened and what to run — and, in the other direction, a build meeting a
 database stamped ABOVE it refuses with the same code and a hint telling it to upgrade the binary (§3.2
 clause (vi); PRD §4 D46 records that this direction is NOT a D35 break).
+
+**D52 (v1.0.1) — the contract bumps to `unblock.mcp.v1.10`.** A SIBLING entry appended to this ledger; the
+D42–D46 entries above record what shipped before and are NOT renumbered. D52 is a DISCLOSURE decision
+(PRD §4 D52, tracked as `ub-lp9.22`). The flattened wire `Attribution` stays accepted on every mutating arm,
+and every arm still discards it until FR-22 [v1.1]. What changes is that both discovery documents now say
+so, in the normative texts at §5.2. `schema_bundle()` moves by the three `Attribution` field descriptions at
+every site that flattens the type and by its own `contract_version` line, and `capabilities()` moves by the
+five tool descriptions that gain the discard sentence (`issue`, `claim`, `defer`, `dep`, `comment`). So
+`CONTRACT_HASH` is re-pinned and `CONTRACT_VERSION` bumps to `unblock.mcp.v1.10` (unblock-mcp `options.rs`),
+with the `capabilities` and `schema_bundle` goldens re-blessed. `agents_digest()` moves too, as in D45,
+because it copies each tool description verbatim. The managed `AGENTS.md` tool table therefore changes in
+five rows beside the derived contract line, and `unblock agents` is re-run with its snapshot twin
+re-blessed. Its parameter rows do not change, because they carry names only. D52 mints **no** `ErrorCode`
+(`ErrorCode::ALL` stays 36), leaves the 0–8 exit table (§2.3) untouched, adds **no** tool, resource or
+prompt, and changes no model DTO, storage schema, migration, engine or `Storage` signature. Per D35 an
+additive `.M` bump inside 1.x is NON-breaking, so this ships in a PATCH release, and the bump rides the
+IMPLEMENTATION commit with the code constant and the re-blessed goldens, never a spec-only commit ahead of
+them (the D45 precedent). The fields stay on the wire because `deny_unknown_fields` (D42) would otherwise
+reject calls that succeed today, which is a D35 break. When FR-22 records attribution, the discard
+sentences are withdrawn under a further additive bump.
 
 **`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
 exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the
