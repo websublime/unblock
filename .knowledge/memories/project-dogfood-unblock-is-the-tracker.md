@@ -48,8 +48,10 @@ this memory does not carry a point-in-time snapshot.
 1. ⚠️ **migration-edit-drift** — T3.9 changed the schema "NO migration", so a `unblock.db` created BEFORE
    comments breaks on the GA binary (`no such column: updated_at`). Fresh installs fine; NO upgrade path for
    old DBs → v1.0.1/v1.1 candidate. (Cousin of [[feedback-migration-edit-drift]].)
-2. 💡 **init/agents two-step DX** — `init` does NOT create AGENTS.md (by design, D27/AF-3: `agents` is a
-   SEPARATE command). Whether `init` should hint/offer `--agents` is a v1.1 DX candidate.
+2. **init/agents two-step DX — RESOLVED for v1.1** by `ub-lp9.14`, an inline amendment on D27.
+   `unblock init --agents` writes the managed AGENTS.md block right after the scaffold, and a
+   successful bare `init` prints one stderr hint naming `unblock agents --dir '<canonical .unblock dir>'`
+   (`-q` silences it). `agents` stays a SEPARATE command underneath (D27/AF-3).
 3. ⚠️ **silent no-op on malformed `comment add`** — sending `content` instead of the required `body` returned
    **`OK` + empty structuredContent and persisted NOTHING** (list=[]), instead of a VALIDATION_FAILED error.
    Silent data-loss risk for an agent-first tracker → confirm (rmcp arg-leniency vs unblock handling) → v1.0.1/v1.1.
