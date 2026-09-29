@@ -4,7 +4,7 @@ description: Measuring whether PRAGMA integrity_check survives the move to remot
 type: run
 date: 2026-09-29
 branch: ub-rjq-integrity-check-remote-spike
-pr: '-'
+pr: '449'
 issues: [ub-rjq, ub-wmr, ub-gaf, ub-iw4]
 ---
 
@@ -17,7 +17,8 @@ Verify gate on ub-b07 found the gap, and ub-b07 is the cascade that landed decis
 The issue text asks for the same measurement treatment the ub-w3a spike gave the write path, and it forbids
 answering the question in a documentation pass. Miguel chose a measurement spike on that basis.
 
-The run went off main at f521d63 on branch `ub-rjq-integrity-check-remote-spike`. The orchestrator worked
+The run went off main at f521d63 on branch `ub-rjq-integrity-check-remote-spike`, and pull request 449
+carries this report and the tracker re-export. The orchestrator worked
 solo, with two read-only scouts in the Understand phase. One mapped the code and the normative text. The
 other gathered dated vendor evidence. No normative document changed, so no design or Verify gate ran. The
 ub-w3a spike ran the same way.
