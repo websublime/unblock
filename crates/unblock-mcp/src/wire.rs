@@ -65,18 +65,38 @@
 //! DISCLOSED and deliberately left open (tracked as `ub-788`): the `-32700` arm omits a readable id
 //! unconditionally, so a duplicated `method`/`jsonrpc` frame still leaves an rmcp client pending.
 //!
-//! ALSO DISCLOSED and deliberately left open (tracked as `ub-nbz`): **the reply is written INSIDE
-//! `receive()`, and rmcp polls `receive()` as one arm of an UNBIASED `tokio::select!`**
-//! (`src/service.rs:805`, the arm at `:813`) — so a poll that loses the race is DROPPED, taking with
-//! it the reply that had not yet been written AND the frame itself, since the loop clears
-//! `line_buf` at the top of the next iteration. Measured by the Verify gate's attack lens over a
-//! deterministic sentinel-follow, 40 repetitions per cell, from ONE harness and unreplicated:
-//! 0 of 40 lost with the connection idle, 25 of 40 with four requests in flight, 39 of 40 with
-//! eight. This is a property of the seam and NOT of D47 — the `-32700` arm below has the same
-//! write-inside-a-cancellable-future shape and the same harness measured main losing at the same
-//! rate (35 of 40 at eight) — and the pre-handshake case this arm exists for runs with nothing in
-//! flight, the regime measured at 0 of 40. Closing it means moving the write off the cancellable
-//! path.
+//! # AN OUT-OF-BAND REPLY SURVIVES A DROPPED `receive()` (normative — D47 clause 8(v), closed by `ub-nbz`)
+//!
+//! rmcp polls `receive()` as one arm of an UNBIASED `tokio::select!` (`src/service.rs:805`, the arm
+//! at `:813`) and DROPS it whenever another arm wins, most often a handler response. A reply written
+//! inside `receive()` was dropped with it.
+//!
+//! **An out-of-band reply is never written inside `receive()`.** Both out-of-band arms, D47's
+//! `-32600` and the `-32700`, hand their reply to a `tokio::spawn`ed task. The task runs the SAME
+//! `'static` write future `send()` builds, and its `JoinHandle` is PARKED on the transport. The
+//! handle is awaited at the top of EVERY loop iteration, so the reply is on the wire before the
+//! next frame is read, which is the order an inline write gave. It is also awaited in `close()`
+//! before the write half is taken. `close()` waits for it exactly as it waits for any rmcp send
+//! holding the write lock, so a peer that has stopped reading holds a signalled teardown until it
+//! reads or a second signal escalates (D38 clause (2)). A write that fails, or a task that panics,
+//! ends that SAME `receive()` call with `None` (or, if that call was dropped, the NEXT one), which
+//! is the contract the inline write shipped and what D40's teardown reads. A dropped `receive()`
+//! drops only its borrow of the handle. The task keeps running, and the next call or `close()`
+//! settles it. The pre-handshake EOF path drops the whole transport without `close()`, but it reads
+//! that EOF only after the loop head has settled the reply, so the reply is still written. On the
+//! pre-handshake SIGNAL path rmcp drops the transport without `close()`; a parked reply's task is
+//! detached, keeps the write half, and finishes the reply unless the process exits first.
+//!
+//! The frame being answered was already read in full and is dropped by design, so a lost reply
+//! never took its frame with it.
+//!
+//! `tokio::spawn` makes a TOKIO RUNTIME a precondition of `receive()`, because it panics outside one.
+//! Every driver already is one: rmcp spawns its own response writes (`src/service.rs:892`), and the
+//! stdio pair is tokio's.
+//!
+//! The write mutex still buys only BYTE-ATOMICITY between concurrent writers. Cancellation-safety
+//! comes from the task owning the write, which a dropped `receive()` cannot reach. A RUNTIME shutdown
+//! can still abort that task mid-frame, exactly as it can any rmcp send task.
 //!
 //! ONE EFFECT IS REMOVED, deliberately: a `notifications/cancelled` frame carrying an un-decodable
 //! `id` is DELIVERED today, and rmcp's serve loop cancels the matching in-flight request through it
@@ -112,6 +132,13 @@
 //!
 //! The WRITE half does not fork anything: it encodes through rmcp's own public
 //! [`JsonRpcMessageCodec`], so the emitted bytes are identical by construction rather than by test.
+//!
+//! The spawn-and-park reply path (`ub-nbz`) is not a divergence from `AsyncRwTransport`. In a run
+//! that is never cancelled it changes no byte and no order; it changes only whether an out-of-band
+//! reply survives a dropped `receive()`. rmcp awaits its own `-32700` inside `receive()` too
+//! (`rmcp-1.7.0/src/transport/async_rw.rs:145-153`) and loses it the same way, so under
+//! cancellation the fork writes a reply that rmcp would lose. That is recorded as the close of D47
+//! clause 8(v), not as a framing divergence.
 
 use std::sync::Arc;
 
@@ -199,6 +226,11 @@ pub(crate) struct DupScanningTransport<R, W> {
     /// `+ Send + 'static` return bound (the future must not borrow `self`), and `Option` is what
     /// makes a post-`close()` `send` fail with `NotConnected` instead of writing to a dead pipe.
     write: Arc<Mutex<Option<W>>>,
+    /// The out-of-band reply in flight, if any. [`Self::park_reply`] spawns it so that a dropped
+    /// `receive()` cannot take it along (`ub-nbz`). It is `None` whenever `read_until` is entered and
+    /// whenever `receive()` returns: the loop head settles it before every read, and every arm that
+    /// parks one loops back to that head.
+    parked_reply: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
 }
 
 impl<R, W> DupScanningTransport<R, W>
@@ -212,52 +244,56 @@ where
             read: BufReader::new(read),
             line_buf: Vec::new(),
             write: Arc::new(Mutex::new(Some(write))),
+            parked_reply: None,
         }
     }
 
-    /// Write ONE out-of-band error reply and report whether the connection is still usable.
+    /// Hand ONE out-of-band error reply to its own task and park the handle; the next loop head
+    /// ([`Self::settle_parked_reply`]) awaits it (`ub-nbz`).
     ///
-    /// `None` ⇒ the caller must `return None` from `receive()` — the SAME two conditions the shipped
-    /// `-32700` arm returns `None` on: the write half was taken by `close()` (⇒ `NotConnected`, the
-    /// D40 teardown path), or the write itself failed.
+    /// Both out-of-band arms, `-32700` and D47's `-32600`, go through here, so they are identical
+    /// **by construction** rather than by review.
     ///
-    /// **Takes the WRITE HALF, not `&self` — and that is a `Send` requirement, not a preference.**
-    /// `receive()` holds `line`, an immutable borrow of `self.line_buf`, so an `&mut self` helper
-    /// would conflict with it; but `&self` does not work either, because `Transport::receive`
-    /// requires its future to be `Send` and `&Self` is `Send` only if `Self: Sync` — which this
-    /// transport is not (`BufReader<R>` is not `Sync` for a merely-`Send` `R`). Borrowing the ONE
-    /// field that is touched satisfies both: `Arc<Mutex<Option<W>>>` is `Send + Sync` for `W: Send`,
-    /// and a shared borrow of `self.write` is disjoint from the shared borrow of `self.line_buf`.
+    /// **Takes two FIELDS, not `&mut self`.** `receive()` still holds `line`, an immutable borrow of
+    /// `self.line_buf`, at every call site. Borrowing only `parked_reply` (mutably) and `write`
+    /// (shared) keeps the borrows disjoint.
     ///
-    /// The guard is scoped to this function, so it is released before `receive()` parks in the next
-    /// `read_until`. Holding it across that read would block every `send()` for the whole idle
-    /// period.
-    ///
-    /// **WHAT THE MUTEX BUYS, AND WHAT IT DOES NOT.** It buys BYTE-ATOMICITY: `write_frame` writes a
-    /// whole frame under one guard, so a concurrent `send()` can never interleave bytes into the
-    /// middle of this reply. It buys NOTHING about CANCELLATION — this future runs inside
-    /// `receive()`, which rmcp may drop mid-poll, in which case the reply is simply never written.
-    /// The two are separate hazards and only the first is closed here; the second is the module
-    /// doc's second disclosed residual.
-    ///
-    /// Both out-of-band arms (`-32700` and D47's `-32600`) go through here so they are identical
-    /// **by construction** rather than by review, and both encode through rmcp's own
-    /// [`JsonRpcMessageCodec`] — there is no hand-rolled byte path.
-    ///
-    /// Since **D50** this helper is no longer the only emitter. The gate in
-    /// [`crate::pre_handshake`] writes its own `-32600` through `self.inner.send(..)`, which is this
-    /// transport's `send`, so that reply is byte-atomic under the same write mutex. It cannot route
-    /// through here, because a decorator generic over `T: Transport` cannot reach this private
-    /// function.
-    async fn answer_error(
+    /// Since **D50** the scanner is not the only emitter. The gate in [`crate::pre_handshake`] writes
+    /// its own `-32600` through `self.inner.send(..)`, which is this transport's `send`, so that reply
+    /// is byte-atomic under the same write mutex. It cannot route through here, because a decorator
+    /// generic over `T: Transport` cannot reach this private function.
+    fn park_reply(
+        slot: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
         write: &Arc<Mutex<Option<W>>>,
         error: ErrorData,
         id: Option<RequestId>,
-    ) -> Option<()> {
-        let mut guard = write.lock().await;
-        let writer = guard.as_mut()?;
-        let response = TxJsonRpcMessage::<RoleServer>::error(error, id);
-        write_frame(writer, response).await.ok()
+    ) {
+        debug_assert!(
+            slot.is_none(),
+            "a reply is parked only after the loop head settled the previous one"
+        );
+        let item = TxJsonRpcMessage::<RoleServer>::error(error, id);
+        *slot = Some(tokio::spawn(write_owned(Arc::clone(write), item)));
+    }
+
+    /// Await the parked reply, if any, and clear the slot.
+    ///
+    /// `None` ⇒ the caller must end the read with `None`. That happens when the write failed, when
+    /// the write half was taken by `close()` (`NotConnected`), or when the task panicked (a
+    /// `JoinError`). These are the conditions the inline write returned `None` on, plus the panic.
+    ///
+    /// The handle is awaited through `&mut`, so a `receive()` dropped here leaves it parked. The task
+    /// runs on regardless, and the next call settles it.
+    async fn settle_parked_reply(&mut self) -> Option<()> {
+        let Some(handle) = self.parked_reply.as_mut() else {
+            return Some(());
+        };
+        let joined = handle.await;
+        self.parked_reply = None;
+        match joined {
+            Ok(Ok(())) => Some(()),
+            Ok(Err(_)) | Err(_) => None,
+        }
     }
 }
 
@@ -272,21 +308,14 @@ where
         &mut self,
         item: TxJsonRpcMessage<RoleServer>,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
-        let lock = self.write.clone();
-        async move {
-            let mut guard = lock.lock().await;
-            match guard.as_mut() {
-                Some(writer) => write_frame(writer, item).await,
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::NotConnected,
-                    "Transport is closed",
-                )),
-            }
-        }
+        write_owned(self.write.clone(), item)
     }
 
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
         loop {
+            // ub-nbz: the previous frame's reply is on the wire, or has ended the read, before the next
+            // frame is read. That is the order an inline write gave.
+            self.settle_parked_reply().await?;
             self.line_buf.clear();
             match self.read.read_until(b'\n', &mut self.line_buf).await {
                 Ok(0) => return None,
@@ -350,24 +379,24 @@ where
                                 tracing::debug!(
                                     "un-decodable envelope id; answering -32600 on the recovered id"
                                 );
-                                Self::answer_error(
+                                Self::park_reply(
+                                    &mut self.parked_reply,
                                     &self.write,
                                     ErrorData::invalid_request(INVALID_REQUEST_ID_MESSAGE, None),
                                     Some(id),
-                                )
-                                .await?;
+                                );
                                 continue; // ANSWER AND DROP — never delivered.
                             }
                             EnvelopeId::Unusable => {
                                 tracing::debug!(
                                     "un-decodable envelope id, unrecoverable; answering -32600 with the id omitted"
                                 );
-                                Self::answer_error(
+                                Self::park_reply(
+                                    &mut self.parked_reply,
                                     &self.write,
                                     ErrorData::invalid_request(INVALID_REQUEST_ID_MESSAGE, None),
                                     None,
-                                )
-                                .await?;
+                                );
                                 continue;
                             }
                         }
@@ -381,12 +410,12 @@ where
                 Ok(None) => {}
                 Err(e) => {
                     tracing::debug!("Parse error on incoming message: {e}");
-                    Self::answer_error(
+                    Self::park_reply(
+                        &mut self.parked_reply,
                         &self.write,
                         ErrorData::parse_error("Parse error", None),
                         None,
-                    )
-                    .await?;
+                    );
                     // Recover: loop to the next line. This deliberately does NOT return.
                 }
             }
@@ -394,9 +423,45 @@ where
     }
 
     async fn close(&mut self) -> Result<(), Self::Error> {
+        // A parked reply is written BEFORE the write half is taken. Its own failure is moot here,
+        // because the connection is closing either way. It waits as a response send holding the
+        // lock does: a stalled peer holds the teardown here until it reads or a second signal
+        // escalates.
+        let _ = self.settle_parked_reply().await;
         let mut guard = self.write.lock().await;
         drop(guard.take());
         Ok(())
+    }
+}
+
+/// The ONE write path of [`DupScanningTransport`]: lock the write half, encode through rmcp's own
+/// [`JsonRpcMessageCodec`], write and flush.
+///
+/// The future is `Send + 'static` because it owns what it touches, a clone of the `Arc` and the
+/// message. That is what lets `send()` return it and lets `DupScanningTransport::park_reply` SPAWN
+/// it. `send()` and both out-of-band arms therefore write through the same future, so their bytes are
+/// identical **by construction** rather than by review. It is a FREE function on purpose: an
+/// `async fn` inside the `impl<R, W>` block would capture `R` too, and its future would then not be
+/// `'static` for a merely-`Send` `R`.
+///
+/// The mutex buys BYTE-ATOMICITY: `write_frame` writes a whole frame under one guard, so no concurrent
+/// writer can interleave bytes into it. The guard lives only inside this future, never across a
+/// `read_until`. A write half already taken by `close()` fails with `NotConnected` instead of writing
+/// to a dead pipe (the D40 teardown path).
+async fn write_owned<W>(
+    lock: Arc<Mutex<Option<W>>>,
+    item: TxJsonRpcMessage<RoleServer>,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut guard = lock.lock().await;
+    match guard.as_mut() {
+        Some(writer) => write_frame(writer, item).await,
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "Transport is closed",
+        )),
     }
 }
 
@@ -1466,5 +1531,315 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 2, "both frames must be delivered");
+    }
+    use std::sync::Arc;
+
+    // =============================================================================================
+    // [ub-nbz] CANCELLATION CELLS — `receive()` dropped mid-poll, exactly as rmcp's unbiased
+    // serve-loop `select!` drops a losing arm (`rmcp-1.7.0/src/service.rs:805`, the arm at `:813`).
+    //
+    // Every cell here runs on the CURRENT-THREAD runtime `#[tokio::test]` builds by default, and that
+    // is load-bearing: a task spawned inside `receive()` cannot be polled until the test itself
+    // yields, so "polled once, then dropped" is ONE deterministic interleaving and never a race.
+    // =============================================================================================
+
+    /// Poll `receive()` EXACTLY ONCE, assert it is still pending, and drop it — the losing arm of
+    /// rmcp's serve-loop `select!`. `biased` makes the poll order fixed: `receive()` first, then the
+    /// always-ready arm that wins.
+    async fn poll_once_and_drop<R, W>(transport: &mut DupScanningTransport<R, W>)
+    where
+        R: tokio::io::AsyncRead + Send + Unpin,
+        W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        tokio::select! {
+            biased;
+            delivered = transport.receive() => panic!(
+                "the first poll must be PENDING for this cell to model a cancellation; got {delivered:?}"
+            ),
+            () = std::future::ready(()) => {}
+        }
+    }
+
+    /// The exact bytes of the `-32700` reply, encoded through the transport's own write path.
+    async fn parse_error_bytes() -> Vec<u8> {
+        let mut out = Vec::new();
+        super::write_frame(
+            &mut out,
+            TxJsonRpcMessage::<RoleServer>::error(
+                rmcp::model::ErrorData::parse_error("Parse error", None),
+                None,
+            ),
+        )
+        .await
+        .expect("encode into a Vec");
+        out
+    }
+
+    const PING_7: &[u8] = br#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#;
+
+    /// **ub-nbz cell (i)** — an out-of-band reply SURVIVES the drop of the `receive()` that produced
+    /// it, on ALL THREE arms: `-32600` on a recovered id, `-32600` with the id omitted, and `-32700`.
+    ///
+    /// The write lock is held for the first poll, standing in for a handler response mid-write — the
+    /// production precondition. The frame after the bad one is delivered, proving the connection
+    /// survives, and the reply bytes are EXACTLY one reply.
+    ///
+    /// Mutants: the reply awaited inline again (the pre-fix shape) · the reply future built but never
+    /// spawned or parked · the parked handle discarded by a `receive()` drop.
+    #[tokio::test]
+    async fn an_out_of_band_reply_survives_a_dropped_receive() {
+        let corpus = divergence_corpus();
+        let recovered = corpus.iter().find(|f| f.id == "D01").expect("D01 missing");
+        let omitted = corpus.iter().find(|f| f.id == "D04").expect("D04 missing");
+        assert!(
+            matches!(recovered.expect, Expect::RecoveredNum(_)),
+            "D01 must recover an id"
+        );
+        assert!(
+            matches!(omitted.expect, Expect::Omitted),
+            "D04 must omit the id"
+        );
+
+        let arms: [(&str, Vec<u8>, Vec<u8>); 3] = [
+            (
+                "-32600 recovered id",
+                recovered.frame.clone(),
+                expected_bytes(&recovered.expect),
+            ),
+            (
+                "-32600 id omitted",
+                omitted.frame.clone(),
+                expected_bytes(&omitted.expect),
+            ),
+            (
+                "-32700",
+                b"this is not json".to_vec(),
+                parse_error_bytes().await,
+            ),
+        ];
+        let mut lost = Vec::new();
+        for (arm, frame, expected) in arms {
+            let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+            let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
+            let mut bytes = frame;
+            bytes.push(b'\n');
+            bytes.extend_from_slice(PING_7);
+            bytes.push(b'\n');
+            in_w.write_all(&bytes).await.expect("write frames");
+            in_w.shutdown().await.expect("close writer");
+
+            let mut transport = DupScanningTransport::new(in_r, out_w);
+            let held = Arc::clone(&transport.write).lock_owned().await;
+            poll_once_and_drop(&mut transport).await;
+            drop(held);
+
+            let next = transport.receive().await.expect("the connection survives");
+            assert!(
+                render(&next).contains(r#""id":7"#),
+                "{arm}: the following frame is delivered"
+            );
+            assert!(transport.receive().await.is_none(), "{arm}: then EOF");
+            let _ = transport.close().await;
+            drop(transport);
+            let written = read_to_end(&mut out_r).await;
+            if written != expected {
+                lost.push(format!(
+                    "{arm}: wrote {:?}",
+                    String::from_utf8_lossy(&written)
+                ));
+            }
+        }
+        assert!(
+            lost.is_empty(),
+            "every arm's reply must be written exactly once although its receive() was dropped: {lost:#?}"
+        );
+    }
+
+    /// A reply that CANNOT be written still ends the SAME `receive()` call with `None` — the
+    /// contract the inline write shipped and D40's teardown relies on. The following ping is
+    /// buffered and readable, so a `receive()` that ignored the failure would deliver it.
+    ///
+    /// Mutants: the parked write's `Err` mapped to success · the loop-head settle removed.
+    #[tokio::test]
+    async fn a_reply_that_cannot_be_written_ends_the_same_receive() {
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, out_r) = tokio::io::duplex(1024 * 1024);
+        drop(out_r); // every write to `out_w` now fails with BrokenPipe
+        let mut bytes = b"this is not json\n".to_vec();
+        bytes.extend_from_slice(PING_7);
+        bytes.push(b'\n');
+        in_w.write_all(&bytes).await.expect("write frames");
+        let mut transport = DupScanningTransport::new(in_r, out_w);
+        assert!(
+            transport.receive().await.is_none(),
+            "a failed reply write must end the read, never deliver the next frame"
+        );
+    }
+
+    /// A reply that fails AFTER the `receive()` that parked it was dropped still ends the NEXT
+    /// `receive()` with `None`, before it reads the frame behind it. This is what makes the settle
+    /// await the handle IN PLACE: a settle that took the handle out of the slot before awaiting it
+    /// loses the handle, and with it the failure, when that await is dropped.
+    ///
+    /// Mutants: the handle taken out of the slot before it is awaited · the failure ignored.
+    #[tokio::test]
+    async fn a_reply_failing_after_a_dropped_receive_ends_the_next_receive() {
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, out_r) = tokio::io::duplex(1024 * 1024);
+        drop(out_r);
+        let mut bytes = b"this is not json\n".to_vec();
+        bytes.extend_from_slice(PING_7);
+        bytes.push(b'\n');
+        in_w.write_all(&bytes).await.expect("write frames");
+        let mut transport = DupScanningTransport::new(in_r, out_w);
+        let held = Arc::clone(&transport.write).lock_owned().await;
+        poll_once_and_drop(&mut transport).await;
+        drop(held);
+        assert!(
+            transport.receive().await.is_none(),
+            "the parked reply's failure must end the read, never deliver the next frame"
+        );
+    }
+
+    /// A writer that PANICS inside the write — so the spawned reply task ends in a `JoinError`.
+    struct PanickingWriter;
+    impl tokio::io::AsyncWrite for PanickingWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            panic!("injected writer panic (expected by this cell)")
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A reply task that PANICS ends the read with `None`, like any other failed reply.
+    ///
+    /// Mutant: a `JoinError` mapped to success.
+    #[tokio::test]
+    async fn a_panicked_reply_task_ends_the_receive() {
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let mut bytes = b"this is not json\n".to_vec();
+        bytes.extend_from_slice(PING_7);
+        bytes.push(b'\n');
+        in_w.write_all(&bytes).await.expect("write frames");
+        let mut transport = DupScanningTransport::new(in_r, PanickingWriter);
+        let outcome = tokio::spawn(async move { transport.receive().await.is_none() }).await;
+        assert!(
+            matches!(outcome, Ok(true)),
+            "a panicked reply write must end the read with None, not deliver the next frame and not \
+             unwind through receive(): {outcome:?}"
+        );
+    }
+
+    /// Two consecutive bad frames are answered in ARRIVAL order, each exactly once, and the reply to
+    /// the first is on the wire before the second is read — with the write lock held for the first
+    /// poll, so both replies go through the parked path.
+    ///
+    /// Mutants: the parked slot overwritten without settling (the loop-head settle removed) · a
+    /// second slot / queue that lets the replies race.
+    #[tokio::test]
+    async fn consecutive_bad_frames_are_answered_in_arrival_order() {
+        let corpus = divergence_corpus();
+        let recovered = corpus.iter().find(|f| f.id == "D01").expect("D01 missing");
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
+        let mut bytes = recovered.frame.clone();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(b"this is not json\n");
+        in_w.write_all(&bytes).await.expect("write frames");
+        in_w.shutdown().await.expect("close writer");
+
+        let mut transport = DupScanningTransport::new(in_r, out_w);
+        let held = Arc::clone(&transport.write).lock_owned().await;
+        poll_once_and_drop(&mut transport).await;
+        drop(held);
+        assert!(
+            transport.receive().await.is_none(),
+            "nothing is delivered, then EOF"
+        );
+        let _ = transport.close().await;
+        drop(transport);
+
+        let mut expected = expected_bytes(&recovered.expect);
+        expected.extend_from_slice(&parse_error_bytes().await);
+        assert_eq!(
+            String::from_utf8_lossy(&read_to_end(&mut out_r).await),
+            String::from_utf8_lossy(&expected),
+            "the -32600 then the -32700, each once, in arrival order"
+        );
+    }
+
+    /// `close()` takes the write half EVEN WHEN the parked reply it settles has failed: a `send`
+    /// after `close()` is `NotConnected`, never a write attempt on the dead pipe.
+    ///
+    /// Mutant: `close()` returns early when the settled reply failed, leaving the write half in place.
+    #[tokio::test]
+    async fn a_send_after_close_is_not_connected_even_when_the_parked_reply_failed() {
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, out_r) = tokio::io::duplex(1024 * 1024);
+        drop(out_r); // the reply's write fails with BrokenPipe
+        in_w.write_all(b"this is not json\n")
+            .await
+            .expect("write frame");
+
+        let mut transport = DupScanningTransport::new(in_r, out_w);
+        // Hold the write lock so the parked reply cannot run before `close()` settles it.
+        let held = transport.write.clone().lock_owned().await;
+        poll_once_and_drop(&mut transport).await;
+        drop(held);
+        let _ = transport.close().await;
+        let post_close = transport
+            .send(TxJsonRpcMessage::<RoleServer>::error(
+                rmcp::model::ErrorData::parse_error("Parse error", None),
+                None,
+            ))
+            .await;
+        assert_eq!(
+            post_close
+                .expect_err("a send after close() must fail")
+                .kind(),
+            std::io::ErrorKind::NotConnected,
+            "close() must take the write half even when the parked reply failed"
+        );
+        drop(in_w);
+    }
+
+    /// `close()` WAITS for a parked reply before it takes the write half. The reply task is spawned
+    /// but — on this current-thread runtime — not yet polled when `close()` runs, so a `close()` that
+    /// took the writer first would turn the reply into a `NotConnected` and write nothing.
+    ///
+    /// Mutant: `close()` does not settle the parked handle.
+    #[tokio::test]
+    async fn close_waits_for_a_parked_reply() {
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
+        // The writer stays OPEN: after the reply the read pends, so the poll is pending either way.
+        in_w.write_all(b"this is not json\n")
+            .await
+            .expect("write frame");
+
+        let mut transport = DupScanningTransport::new(in_r, out_w);
+        poll_once_and_drop(&mut transport).await;
+        let _ = transport.close().await;
+        drop(transport);
+        assert_eq!(
+            String::from_utf8_lossy(&read_to_end(&mut out_r).await),
+            String::from_utf8_lossy(&parse_error_bytes().await),
+            "the reply parked before close() must still be written, exactly once"
+        );
+        drop(in_w);
     }
 }

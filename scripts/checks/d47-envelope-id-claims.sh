@@ -129,9 +129,10 @@ RECOVERED_ID_RE='Some\(id\),$'
 # P14   is the count-free LIST in PROCESS.md §3 naming this script. No sibling has this row and nothing
 #       else pins that line — which is precisely why the enumeration can rot silently, and this is the
 #       first cascade that would notice.
-# P15   is `ub-nbz`, the SECOND residual the PRD row names — the -32600 lost whenever rmcp cancels the
-#       receive() future. It mirrors P10 for the same reason and is a SEPARATE row rather than a widened
-#       one: a single row matching either id would go green with the other id dangling.
+# P15   is `ub-nbz`, the id clause 8(v) cites — the -32600 once lost to a cancelled receive(), CLOSED by
+#       the clause 8(v) amendment that moved the reply onto a spawned, parked task. It mirrors P10 for the
+#       same reason and is a SEPARATE row rather than a widened one: a single row matching either id would
+#       go green with the other id dangling.
 # =================================================================================================
 REQUIRE="
 P1@crates/unblock-mcp/src/envelope_id.rs@pub\(crate\) fn scan@the D47 predicate module still exists and still exposes its scan entry point
@@ -146,7 +147,7 @@ P11@docs/roadmap.html@D47@the RENDERED roadmap lists D47 in its v1.0.1 card — 
 P12@docs/plans/ci-cd-and-distribution.md@d47-envelope-id-claims@this gate is SPECIFIED, not merely wired
 P13@.github/workflows/ci.yml@d47-envelope-id-claims@this gate actually RUNS in the required doc-lint job
 P14@docs/PROCESS.md@d47-envelope-id-claims@the count-free LIST that IS the rule names this script, so the enumeration cannot rot silently
-P15@.unblock/issues.jsonl@ub-nbz@the SECOND residual the PRD row names — the -32600 lost to a cancelled receive() — has a REAL issue, so that id does not dangle either
+P15@.unblock/issues.jsonl@ub-nbz@the id clause 8(v) cites — the -32600 once lost to a cancelled receive(), CLOSED by the D47 clause 8(v) amendment that moved the reply onto a spawned, parked task — has a REAL issue, so that id does not dangle either
 "
 
 # =================================================================================================
@@ -266,5 +267,5 @@ check_table_floor 'required-landing (P)' "$p_count" 13 || blocked=1
 check_table_floor 'row-anchored (Q)' "$q_count" 12 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
-say "OK — the D47 predicate, its exhaustive-match guard, its decoded-key rule and its recovered-id arm are all still in the tree, the store-effect oracle and the disclosed -32700 residual are still pinned, the tracker names ub-cnv and both residual ids the PRD row cites (ub-788 and ub-nbz), the rendered roadmap lists the decision, this gate is both specified and wired, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates while the contract version stands unmoved."
+say "OK — the D47 predicate, its exhaustive-match guard, its decoded-key rule and its recovered-id arm are all still in the tree, the store-effect oracle and the disclosed -32700 residual are still pinned, the tracker names ub-cnv and both ids the PRD row's residual clause cites (ub-788, still open, and ub-nbz, closed by the clause 8(v) amendment), the rendered roadmap lists the decision, this gate is both specified and wired, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates while the contract version stands unmoved."
 exit 0
