@@ -265,11 +265,14 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   is `ub-og3`, CLOSED in this same cut by **D48** (the payload moves whole to stderr; exit codes unmoved), and the
   `Debug`-rendering half is `ub-b1a`, CLOSED one decision later by **D49** — moving a stream sanitised nothing, so
   the repair had to land at the message's origin, where a bounded structural summary of the refused frame now
-  replaces the `Debug` blob; and the `-32600` itself is LOST whenever rmcp cancels the `receive()` future, since
-  the reply is written inside that future and rmcp polls it as one arm of an unbiased `select!` — measured from
-  one unreplicated harness at 0 of 40 with the connection idle, 25 of 40 with four requests in flight and 39 of
-  40 with eight, a pre-existing property of the seam that the shipped `-32700` arm shares (scoped out by Miguel;
-  tracked as `ub-nbz`).
+  replaces the `Debug` blob; and the `-32600` itself was LOST whenever rmcp cancelled the `receive()` future,
+  since the reply was written inside that future and rmcp polls it as one arm of an unbiased `select!` — a
+  pre-existing property of the seam that the shipped `-32700` arm shared, CLOSED in this same cut by an
+  amendment riding D47 (tracked as `ub-nbz`; no new D-id): every out-of-band reply is now written by a spawned
+  task parked on the transport, so a dropped `receive()` cannot take it along. Two harnesses independent of the
+  one that first measured it replicated the loss in its regime — none on an idle connection, growing with fast
+  requests in flight to most of them at eight (83–95 % in the Understand runs, 65–93 % on re-measure), the same for both arms wherever both were driven — while the rate at
+  four in flight proved unstable from run to run.
 - **The mcp startup-failure report lands on the JSON-RPC FRAMING channel** (P1, tracker `ub-og3`, PRD §4
   **D48**) — the residual D47 clause 8(iii) named and did not design, now closed in the same cut and minting its
   own D-id because it REVERSES a shipped D38 clause (`docs/PROCESS.md` section 3). When `unblock mcp` fails, the
@@ -366,10 +369,13 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   to exit 0 and is RENAMED, and the D38 witness `a_no_signal_run_loop_error_exits_1_and_never_hangs` is REPOINTED at
   a broken pipe on the pre-handshake `ping` reply, keeping its exit-1 and stderr-payload halves and losing its
   frame-free-stdout half by construction. **What it does NOT close is named here rather than implied.** The gate's own
-  reply and read path inherit open residuals of their own — the `-32600` is lost whenever rmcp cancels the `receive()`
-  future (`ub-nbz`), the `-32700` arm still omits a readable id so a duplicated `method` or `jsonrpc` still leaves a
-  client pending (`ub-788`), and the stdio read still carries no maximum accepted line length, so an oversized
-  premature frame is read and scanned before the gate drops it (`ub-o8s`). The sibling rows' residuals are UNMOVED
+  reply and read path inherit open residuals of their own — the `-32700` arm still omits a readable id so a
+  duplicated `method` or `jsonrpc` still leaves a client pending (`ub-788`), and the stdio read still carries no
+  maximum accepted line length, so an oversized premature frame is read and scanned before the gate drops it
+  (`ub-o8s`). The gate's own `-32600` is still written inside its `receive()`, and that is not among them: before
+  the handshake only the signal path can drop that future, and it discards the whole transport, while the traffic
+  cancellation that lost the scanner's replies (`ub-nbz`, closed by the D47 amendment above) exists only after the
+  latch has opened. The sibling rows' residuals are UNMOVED
   by this decision and are named so none reads as closed by omission — `output::emit_report` still writes to stdout
   unconditionally with no classification (`ub-c5o`), an oversized response can still leave a TRUNCATED frame on the
   framing channel (`ub-5v5`), and rmcp's post-handshake tracing still `Debug`-dumps frames at a single `-v`
@@ -386,6 +392,22 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   `unblock.mcp.v1.10` with a `CONTRACT_HASH` re-pin. Its behaviour-bearing change is confined to `unblock-mcp`;
   elsewhere it corrects two storage doc comments (`trait_def.rs`, `events.rs`) and re-blesses the CLI's managed-block snapshot. Removing
   the fields was rejected, because `deny_unknown_fields` would then refuse calls that work today, a 2.0.0 event.
+- **A well-formed request was destroyed when rmcp cancelled the read mid-line** (P2, tracker `ub-zja`, PRD §4
+  **D53**) — found by the `ub-nbz` Understand phase, closed in the same cut, and minting its own D-id because it is
+  a separately motivated decision about REQUEST INTEGRITY that deliberately departs from rmcp's own transport. The
+  transport cleared its line buffer at the top of every read, while tokio's line read keeps the bytes a cancelled
+  call already consumed for the call that resumes it; so when rmcp dropped `receive()` mid-line — which its
+  unbiased serve-loop select does whenever a handler response wins — the head of the frame was thrown away and
+  its tail answered with an id-less `-32700`, leaving the caller waiting. A frame larger than the 8 KiB read
+  buffer, or one written in more than one client write, was exposed whenever a response landed during the read:
+  a 20 KB request with eight pings in flight, or a request split across two writes with eight creates in flight,
+  was lost in most runs. **D53 clears the buffer only after a complete line**, and an
+  unterminated final line at EOF is still processed as before. rmcp's own transport keeps the loss; ours now
+  diverges from it only under cancellation, so the differential harness, which never cancels, stays
+  byte-identical with its corpus unmodified. **`unblock-mcp` (L7) is the only crate that gains code.** It mints no
+  `ErrorCode`, moves no published byte, and carries **no `contract_version` bump and no `CONTRACT_HASH` re-pin** —
+  `unblock.mcp.v1.10` stands. **What it does NOT close:** the stdio read still accepts a line of any length
+  (`ub-o8s`).
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
   self-update promise is exercised, not just unit-asserted.
