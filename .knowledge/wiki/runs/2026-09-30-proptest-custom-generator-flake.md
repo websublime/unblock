@@ -4,7 +4,7 @@ description: Fixing a model round-trip property test that flaked a required CI j
 type: run
 date: 2026-09-30
 branch: ub-3yk-proptest-custom-generator
-pr: '-'
+pr: '450'
 issues: [ub-3yk]
 ---
 
@@ -14,9 +14,10 @@ issues: [ub-3yk]
 
 Issue ub-3yk tracks a flaky property test in `unblock-model`. The required `snapshots (insta --check)` job
 failed on pull request 449, which carries only a wiki run-report and the tracker re-export for ub-rjq and
-changes no code. The run went off main at f521d63 on branch `ub-3yk-proptest-custom-generator`. The
-orchestrator implemented solo, because the change is test-only in one crate. One reviewer agent ran the
-Verify gate and passed it with no findings.
+changes no code. The run went off main at f521d63 on branch `ub-3yk-proptest-custom-generator`, stacked on
+pull request 449's branch so the wiki index and the tracker re-export do not conflict. Pull request 450
+carries it. The orchestrator implemented solo, because the change is test-only in one crate. One reviewer
+agent ran the Verify gate and passed it with no findings.
 
 ## What & why
 
