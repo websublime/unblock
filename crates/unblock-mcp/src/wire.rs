@@ -65,30 +65,42 @@
 //! DISCLOSED and deliberately left open (tracked as `ub-788`): the `-32700` arm omits a readable id
 //! unconditionally, so a duplicated `method`/`jsonrpc` frame still leaves an rmcp client pending.
 //!
-//! # AN OUT-OF-BAND REPLY SURVIVES A DROPPED `receive()` (normative — D47 clause 8(v), closed by `ub-nbz`)
+//! # `receive()` IS CANCEL-SAFE (normative — D47 clause 8(v), closed by `ub-nbz`; D53)
 //!
 //! rmcp polls `receive()` as one arm of an UNBIASED `tokio::select!` (`src/service.rs:805`, the arm
-//! at `:813`) and DROPS it whenever another arm wins, most often a handler response. A reply written
-//! inside `receive()` was dropped with it.
+//! at `:813`) and DROPS it whenever another arm wins, most often a handler response. So two kinds of
+//! state must not live only inside the `receive()` future, and neither does.
 //!
-//! **An out-of-band reply is never written inside `receive()`.** Both out-of-band arms, D47's
-//! `-32600` and the `-32700`, hand their reply to a `tokio::spawn`ed task. The task runs the SAME
-//! `'static` write future `send()` builds, and its `JoinHandle` is PARKED on the transport. The
-//! handle is awaited at the top of EVERY loop iteration, so the reply is on the wire before the
-//! next frame is read, which is the order an inline write gave. It is also awaited in `close()`
-//! before the write half is taken. `close()` waits for it exactly as it waits for any rmcp send
-//! holding the write lock, so a peer that has stopped reading holds a signalled teardown until it
-//! reads or a second signal escalates (D38 clause (2)). A write that fails, or a task that panics,
-//! ends that SAME `receive()` call with `None` (or, if that call was dropped, the NEXT one), which
-//! is the contract the inline write shipped and what D40's teardown reads. A dropped `receive()`
-//! drops only its borrow of the handle. The task keeps running, and the next call or `close()`
-//! settles it. The pre-handshake EOF path drops the whole transport without `close()`, but it reads
-//! that EOF only after the loop head has settled the reply, so the reply is still written. On the
-//! pre-handshake SIGNAL path rmcp drops the transport without `close()`; a parked reply's task is
-//! detached, keeps the write half, and finishes the reply unless the process exits first.
+//! 1. **An out-of-band reply is never written inside `receive()`.** Both out-of-band arms, D47's
+//!    `-32600` and the `-32700`, hand their reply to a `tokio::spawn`ed task. The task runs the
+//!    SAME `'static` write future `send()` builds, and its `JoinHandle` is PARKED on the transport.
+//!    The handle is awaited at the top of EVERY loop iteration, so the reply is on the wire before
+//!    the next frame is read, which is the order an inline write gave. It is also awaited in
+//!    `close()` before the write half is taken. `close()` waits for it exactly as it waits for any
+//!    rmcp send holding the write lock, so a peer that has stopped reading holds a signalled
+//!    teardown until it reads or a second signal escalates (D38 clause (2)). A write that fails, or
+//!    a task that panics, ends that SAME `receive()` call with `None` (or, if that call was dropped,
+//!    the NEXT one), which is the contract the inline write shipped and what D40's teardown reads. A
+//!    dropped `receive()` drops only its borrow of the handle. The task keeps running, and the next
+//!    call or `close()` settles it. The pre-handshake EOF path drops the whole transport without
+//!    `close()`, but it reads that EOF only after the loop head has settled the reply, so the reply
+//!    is still written. On the pre-handshake SIGNAL path rmcp drops the transport without
+//!    `close()`; a parked reply's task is detached, keeps the write half, and finishes the reply
+//!    unless the process exits first.
+//! 2. **A dropped `receive()` never discards a partially read line** (D53). tokio's `read_until`
+//!    leaves the bytes it consumed in the buffer when it is dropped, and documents calling it again
+//!    as the recovery. So `line_buf` is cleared only after a COMPLETE line has been read and
+//!    processed (or after a read error, below), never at the top of an iteration that a dropped
+//!    call may have left half-filled. `Ok(0)` with a non-empty buffer is therefore the
+//!    unterminated final line. Clearing first would destroy the head of a well-formed request
+//!    split across reads, which happens to any frame larger than one 8 KiB `BufReader` fill, and
+//!    to one a client writes in pieces. The tail would then be answered `-32700` on its own or,
+//!    when the split falls on the terminator, skipped as an empty line with no reply at all;
+//!    either way the request was never served. A read ERROR is different: it ends `receive()` with
+//!    `None` and discards the half-read line, as rmcp does, so a call after it starts a fresh line.
 //!
-//! The frame being answered was already read in full and is dropped by design, so a lost reply
-//! never took its frame with it.
+//! The two hazards are independent: the out-of-band frame was already read in full and is dropped
+//! by design, so only the read side ever lost a frame.
 //!
 //! `tokio::spawn` makes a TOKIO RUNTIME a precondition of `receive()`, because it panics outside one.
 //! Every driver already is one: rmcp spawns its own response writes (`src/service.rs:892`), and the
@@ -133,9 +145,23 @@
 //! The WRITE half does not fork anything: it encodes through rmcp's own public
 //! [`JsonRpcMessageCodec`], so the emitted bytes are identical by construction rather than by test.
 //!
-//! The spawn-and-park reply path (`ub-nbz`) is not a divergence from `AsyncRwTransport`. In a run
-//! that is never cancelled it changes no byte and no order; it changes only whether an out-of-band
-//! reply survives a dropped `receive()`. rmcp awaits its own `-32700` inside `receive()` too
+//! **THE FORK CARRIES TWO DELIBERATE DIVERGENCES FROM `AsyncRwTransport`, AND ONLY TWO.**
+//!
+//! 1. **D47, answer and drop.** A frame of the un-decodable-envelope-`id` class is answered `-32600`
+//!    and never delivered, where rmcp delivers it as a Notification. The divergence corpus and its
+//!    per-entry differential tier pin it (`the_diverging_entries_are_exactly_the_declared_ones`).
+//! 2. **D53, a partial line survives a dropped `receive()`.** Under CANCELLATION the fork keeps a
+//!    partially read line, where `AsyncRwTransport::receive` clears its buffer at the top of every
+//!    iteration (`rmcp-1.7.0/src/transport/async_rw.rs:127-128`) and so loses a well-formed request
+//!    split across reads. In a run that is never cancelled, every `read_until` completes and the two
+//!    framings are byte-identical, and that is all the differential harness can observe. So the
+//!    harness cannot see this divergence. It is pinned instead by
+//!    `a_line_split_by_a_dropped_receive_is_delivered_whole` and
+//!    `an_unterminated_line_split_by_a_dropped_receive_is_delivered_at_eof`.
+//!
+//! The spawn-and-park reply path (`ub-nbz`) is not counted as a third divergence. In a run that is
+//! never cancelled it changes no byte and no order; it changes only whether an out-of-band reply
+//! survives a dropped `receive()`. rmcp awaits its own `-32700` inside `receive()` too
 //! (`rmcp-1.7.0/src/transport/async_rw.rs:145-153`) and loses it the same way, so under
 //! cancellation the fork writes a reply that rmcp would lose. That is recorded as the close of D47
 //! clause 8(v), not as a framing divergence.
@@ -214,14 +240,22 @@ impl From<DupScan> for ParamsScan {
     }
 }
 
-/// An owned `Transport<RoleServer>` over a byte stream pair, reproducing `AsyncRwTransport`'s read
-/// framing exactly and adding the D43 duplicate-key scan between the read and the parse.
+/// An owned `Transport<RoleServer>` over a byte stream pair. It reproduces `AsyncRwTransport`'s read
+/// framing exactly in any run that is never cancelled, adds the D43 duplicate-key scan between the
+/// read and the parse, and keeps a partially read line across a dropped `receive()` where rmcp loses
+/// it (D53, the CD-7 section).
 pub(crate) struct DupScanningTransport<R, W> {
     /// The buffered read half. `read_until(b'\n', ..)` — there is deliberately no line-length bound
     /// here, exactly as rmcp has none (`max_length: usize::MAX`).
     read: BufReader<R>,
-    /// The reusable line buffer (cleared per frame), mirroring rmcp's `line_buf`.
+    /// The reusable line buffer, mirroring rmcp's `line_buf`. It is cleared only once the line in it
+    /// was COMPLETELY read (`line_complete`) or abandoned by a read error, never at the top of an
+    /// iteration that a dropped `read_until` may have left half-filled (D53).
     line_buf: Vec<u8>,
+    /// `true` when the next iteration must clear `line_buf`: the line in it was read to its end, or
+    /// a read error ended the call and abandoned it, as rmcp does. `false` while the bytes of a
+    /// `read_until` interrupted by a dropped `receive()` are still waiting to be resumed.
+    line_complete: bool,
     /// The write half. The `Arc<Mutex<Option<W>>>` shape is what satisfies `Transport::send`'s
     /// `+ Send + 'static` return bound (the future must not borrow `self`), and `Option` is what
     /// makes a post-`close()` `send` fail with `NotConnected` instead of writing to a dead pipe.
@@ -245,6 +279,7 @@ where
             line_buf: Vec::new(),
             write: Arc::new(Mutex::new(Some(write))),
             parked_reply: None,
+            line_complete: false,
         }
     }
 
@@ -316,14 +351,24 @@ where
             // ub-nbz: the previous frame's reply is on the wire, or has ended the read, before the next
             // frame is read. That is the order an inline write gave.
             self.settle_parked_reply().await?;
-            self.line_buf.clear();
+            // D53: clear only a line that was read to its END, or one a read error abandoned
+            // (below). A `read_until` interrupted by a dropped `receive()` left the frame's head in
+            // `line_buf`, and this call resumes it.
+            if self.line_complete {
+                self.line_buf.clear();
+                self.line_complete = false;
+            }
             match self.read.read_until(b'\n', &mut self.line_buf).await {
-                Ok(0) => return None,
-                Ok(_) => {}
+                // EOF with nothing pending. EOF with a NON-EMPTY buffer is the unterminated final line,
+                // possibly begun by a dropped call, and it is processed like any other line.
+                Ok(0) if self.line_buf.is_empty() => return None,
+                Ok(_) => self.line_complete = true,
                 Err(e) => {
                     // Nothing is swallowed here: the EOF/error shape is what the D40 pre-handshake
                     // teardown depends on.
                     tracing::error!("Error reading from stream: {}", e);
+                    // rmcp clears at the loop head, so a re-call after an error starts a fresh line.
+                    self.line_complete = true;
                     return None;
                 }
             }
@@ -1535,7 +1580,7 @@ mod tests {
     use std::sync::Arc;
 
     // =============================================================================================
-    // [ub-nbz] CANCELLATION CELLS — `receive()` dropped mid-poll, exactly as rmcp's unbiased
+    // [ub-nbz / ub-zja] CANCELLATION CELLS — `receive()` dropped mid-poll, exactly as rmcp's unbiased
     // serve-loop `select!` drops a losing arm (`rmcp-1.7.0/src/service.rs:805`, the arm at `:813`).
     //
     // Every cell here runs on the CURRENT-THREAD runtime `#[tokio::test]` builds by default, and that
@@ -1841,5 +1886,149 @@ mod tests {
             "the reply parked before close() must still be written, exactly once"
         );
         drop(in_w);
+    }
+
+    /// **ub-zja** — a WELL-FORMED frame whose bytes are split across two reads, with the `receive()`
+    /// that consumed the first half DROPPED, is still delivered WHOLE, and nothing is written.
+    ///
+    /// Mutants: `line_buf` cleared at the loop head unconditionally again (the pre-fix shape) · the
+    /// completion flag never reset after a clear.
+    #[tokio::test]
+    async fn a_line_split_by_a_dropped_receive_is_delivered_whole() {
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
+        // A COMPLETE line first, so the split line is not the transport's first: a clear keyed on
+        // "some line was ever completed" rather than on THIS line must fail here too.
+        in_w.write_all(br#"{"jsonrpc":"2.0","id":6,"method":"ping"}"#)
+            .await
+            .expect("write");
+        in_w.write_all(b"\n").await.expect("terminate");
+        let (head, tail) = PING_7.split_at(20);
+        in_w.write_all(head).await.expect("write the head");
+
+        let mut transport = DupScanningTransport::new(in_r, out_w);
+        let first = transport.receive().await;
+        assert!(
+            first
+                .as_ref()
+                .is_some_and(|m| render(m).contains(r#""id":6"#)),
+            "the complete line is delivered first: {first:?}"
+        );
+        poll_once_and_drop(&mut transport).await; // `read_until` consumed the head, then pended
+
+        in_w.write_all(tail).await.expect("write the tail");
+        in_w.write_all(b"\n").await.expect("terminate");
+        in_w.shutdown().await.expect("close writer");
+        let delivered = transport.receive().await;
+        assert!(
+            delivered
+                .as_ref()
+                .is_some_and(|m| render(m).contains(r#""id":7"#)),
+            "the split frame must be delivered whole: {delivered:?}"
+        );
+        assert!(transport.receive().await.is_none(), "then EOF");
+        let _ = transport.close().await;
+        drop(transport);
+        assert!(
+            read_to_end(&mut out_r).await.is_empty(),
+            "nothing is written — in particular no -32700 for a tail parsed alone"
+        );
+    }
+
+    /// **ub-zja** — an UNTERMINATED final line whose bytes were consumed by a DROPPED `receive()`
+    /// is still processed at EOF: `read_until` then returns `Ok(0)` with a NON-EMPTY buffer.
+    ///
+    /// Mutant: `Ok(0)` returns `None` regardless of the buffer.
+    #[tokio::test]
+    async fn an_unterminated_line_split_by_a_dropped_receive_is_delivered_at_eof() {
+        let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, _out_r) = tokio::io::duplex(1024 * 1024);
+        in_w.write_all(PING_7)
+            .await
+            .expect("write the unterminated frame");
+
+        let mut transport = DupScanningTransport::new(in_r, out_w);
+        poll_once_and_drop(&mut transport).await; // consumed the whole frame, no `\n` yet
+
+        in_w.shutdown().await.expect("EOF with no newline");
+        let delivered = transport.receive().await;
+        assert!(
+            delivered
+                .as_ref()
+                .is_some_and(|m| render(m).contains(r#""id":7"#)),
+            "an unterminated final line is still a frame: {delivered:?}"
+        );
+        assert!(
+            transport.receive().await.is_none(),
+            "then EOF, exactly once"
+        );
+    }
+
+    /// A reader that serves its chunks in order, one per `poll_read`: `Ok` bytes or an `Err`, then EOF.
+    struct Scripted(std::collections::VecDeque<std::io::Result<Vec<u8>>>);
+
+    impl tokio::io::AsyncRead for Scripted {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(match self.0.pop_front() {
+                Some(Ok(bytes)) => {
+                    buf.put_slice(&bytes);
+                    Ok(())
+                }
+                Some(Err(e)) => Err(e),
+                None => Ok(()),
+            })
+        }
+    }
+
+    /// Run `head`, a read error, then `tail` through one transport: the first `receive()` ends
+    /// with the error, and what matters is what the RE-CALL yields and what gets written.
+    async fn recall_after_read_error<T>(
+        make: impl FnOnce(Scripted, tokio::io::DuplexStream) -> T,
+    ) -> (Option<String>, Vec<u8>)
+    where
+        T: Transport<RoleServer>,
+    {
+        let (head, tail) = PING_1.split_at(10);
+        let mut tail = tail.to_vec();
+        tail.push(b'\n');
+        let reader = Scripted(
+            [
+                Ok(head.to_vec()),
+                Err(std::io::Error::other("injected read error")),
+                Ok(tail),
+            ]
+            .into(),
+        );
+        let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
+        let mut transport = make(reader, out_w);
+        assert!(
+            transport.receive().await.is_none(),
+            "the read error ends the first call"
+        );
+        let recalled = transport.receive().await.as_ref().map(render);
+        let _ = transport.close().await;
+        drop(transport);
+        (recalled, read_to_end(&mut out_r).await)
+    }
+
+    const PING_1: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+
+    /// A `receive()` re-called after a READ ERROR discards the half-read line, exactly as rmcp's
+    /// `AsyncRwTransport` does (it clears at every loop head): same result, same bytes written.
+    ///
+    /// Mutant: the `Err` arm leaves `line_complete` false, so the re-call resumes the partial line.
+    #[tokio::test]
+    async fn a_read_error_discards_the_partial_line_like_rmcp() {
+        let rmcp = recall_after_read_error(AsyncRwTransport::new_server).await;
+        let ours = recall_after_read_error(DupScanningTransport::new).await;
+        assert_eq!(
+            (ours.0, String::from_utf8_lossy(&ours.1)),
+            (rmcp.0, String::from_utf8_lossy(&rmcp.1)),
+            "after a read error the re-call must match rmcp (result, bytes written)"
+        );
     }
 }
