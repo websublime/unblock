@@ -60,9 +60,10 @@
 #         GENERATED export `.unblock/issues.jsonl`, which carries no commentary about this decision at
 #         all. The three wiring files each do — MEASURED, each one with the mutation that a bare token
 #         would have to catch. A commented-out `- run:` line in `.github/workflows/ci.yml` still
-#         carries the filename; `docs/PROCESS.md` names this script twice, so dropping it from the
-#         count-free LIST leaves the other mention standing; and `docs/plans/ci-cd-and-distribution.md`
-#         names it in §2.1(a) as well as in its specification paragraph.
+#         carries the filename; `docs/PROCESS.md` named this script twice until D53's gate took the
+#         NEWEST pointer, so dropping it from the count-free LIST left the other mention standing;
+#         and `docs/plans/ci-cd-and-distribution.md` names it in §2.1(a) as well as in its
+#         specification paragraph.
 #   Q-n   ROW-ANCHORED landing — at least ONE line must match the anchor, and EVERY line matching the
 #         anchor must ALSO match the requirement. A vanished anchor is a FAILURE and never a pass,
 #         because an anchor that proves nothing while looking green is how a pin rots.
@@ -213,10 +214,10 @@ P7@.unblock/issues.jsonl@ub-wx3@sibling residual, unmoved by D50 — rmcp's post
 #      `path:lineno:text` prefix makes expressible.
 # Q43  is the count-free LIST in `docs/PROCESS.md` §3 naming this script — the enumeration that makes
 #      the whole D-range cascade self-checking. It anchors on the LIST's own entry, the line pairing
-#      this filename with `RANGE_RE`, and requires the `RANGE_ALT_RE` half beside it. A bare token is
-#      satisfied by §3's other mention of this script, so dropping the entry leaves it green —
-#      MEASURED. Anchoring on the entry rather than on the list's last line keeps the row correct the
-#      day a D54 entry is appended after it.
+#      this filename with `RANGE_RE`, and requires the `RANGE_ALT_RE` half beside it. A bare token was
+#      satisfied by §3's other mention of this script (the NEWEST pointer, until D53's gate took it),
+#      so dropping the entry left it green — MEASURED then. Anchoring on the entry rather than on
+#      the list's last line keeps the row correct the day a D54 entry is appended after it.
 # Q44  is the `d48` HALF of the SIBLING ROW TEXT clause (14) corrects, and it is the only executable
 #      pin that clause has. `d48`'s `P9` reason string said the premature frame still kills the
 #      server, which this decision makes false; nothing else in the tree would notice a later edit

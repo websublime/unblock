@@ -391,6 +391,17 @@ jobs:
       # qualifier. The allow-list is self-tested. Specified in ci-cd-and-distribution.md §2.1 (the
       # D52 sub-check).
       - run: scripts/checks/d52-attribution-discard-claims.sh
+      # D53 (`ub-zja`) and the D47 clause 8(v) amendment (`ub-nbz`) required-landing gate: every
+      # out-of-band reply is written by a spawned task parked on the transport, and the line buffer is
+      # cleared only after a complete line. This step asserts the positive: both mechanisms on their
+      # production lines, every cell and the small-capacity harness on their own declarations, the
+      # tracker ids, the PRD rows and reciprocal notes, the rendered roadmap's three bullets, the
+      # corrected sibling reason strings, this gate's own wiring, and the live D-range at every prose
+      # site and every SIBLING script's knob the count-free `docs/PROCESS.md` §3 enumeration names —
+      # including `d50`'s two, which nothing pinned until this step — plus the contract version
+      # standing UNMOVED. Positive-only by design. Specified in ci-cd-and-distribution.md §2.1 (the
+      # D53 sub-check).
+      - run: scripts/checks/d53-request-integrity-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
