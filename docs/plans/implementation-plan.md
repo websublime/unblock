@@ -344,7 +344,7 @@
   `ClientRequest::InitializeRequest(_)` and `ClientRequest::PingRequest(_)` BY VARIANT and never
   `ClientRequest::method()`; **(4)** the `-32600` reply through `self.inner.send(..)`,
   byte-atomic under the scanner's write mutex, with a failed write returning `None` from `receive()`
-  exactly as D47's `answer_error` contract does; **(5)** the send-side latch keyed on
+  exactly as the scanner's own out-of-band replies do (D47); **(5)** the send-side latch keyed on
   `ServerResult::InitializeResult`, with `EmptyResult` leaving it shut; **(6)** the compile-time reply
   constant `the server has not completed the initialize handshake and accepts only initialize and ping until it has` with `data: None`; **(7)** a new stdout-closing method beside `close_stdin` at
   `crates/unblock-cli/tests/common/mod.rs:538` that DROPS the child's stdout handle —
@@ -356,8 +356,9 @@
   server in rmcp's initialize slot" because the frame it delivers meets the gate above the scanner,
   so that docstring restates the mutant's consequence as the gate's second drop, with no reply and
   no recovered id;
-  `crates/unblock-mcp/src/wire.rs:239-241`, which says both out-of-band arms go through `answer_error`
-  "by construction rather than by review" and gains one sentence naming the gate's own `-32600` as a
+  the `write_owned` doc in `crates/unblock-mcp/src/wire.rs`, which says both out-of-band arms go through ONE reply helper
+  "by construction rather than by review" (a helper T3.15 later replaced with a spawned, parked reply path
+  that keeps the one-path property) and gains one sentence naming the gate's own `-32600` as a
   third emitter writing through `self.inner.send(..)`, so a reader at that helper learns the emitter
   is no longer unique; and `mcp_server_duplex_unclamped_for_test`
   (`crates/unblock-mcp/src/server.rs:614-630`) KEEPING its bypass with one doc sentence saying it now
@@ -441,6 +442,53 @@
   `cargo fmt --check`, clippy pedantic, `cargo test` for `unblock-mcp`, `unblock-cli` and
   `unblock-storage`, `cargo insta test --check`, `cargo xtask doc-lint`, `cargo xtask knowledge-lint`
   and every `scripts/checks/*.sh`. Both gates >=3 agents; Claude opens the PR, a human merges.
+
+- **T3.15 — the MCP transport keeps its out-of-band replies and its partial lines when rmcp cancels
+  `receive()` (v1.0.1, additive/non-semver). Implements D53 and the D47 clause 8(v) amendment.**
+  *(Next free top-level M3 id — a peer of T3.14, not a sub-task.)* The design is normative in the
+  **D53 PRD §4 row**, the **D47 row's clause 8(v) amendment**, the D50 row's clauses (5) and (9), and
+  `unblock-mcp.md` (the D43 framing bullet and the `src/wire.rs` and `src/pre_handshake.rs` rows) —
+  **read those before implementing; this bullet is a checklist of touched sites and never the spec.**
+  Tracked as `ub-nbz` (the amendment) and `ub-zja` (D53), ONE PR. Depends on **T3.13** (D50's gate,
+  whose disclosure this task rewrites) and on the shipped D47 transport. The branch opens with a
+  tracker re-export (`ub-zja` postdates the last export on `main`), then the spec cascade in its own
+  commit; the implementation commits carry the code, the tests and the doc-comment rewrites, and a
+  final `ci` commit mints the gate script with its wiring and both enumeration edits. Scope: **(1)**
+  `crates/unblock-mcp/src/wire.rs` — every out-of-band reply (`-32700`, and D47's recovered-id and
+  id-omitted `-32600`) spawned on the same owned write future `send()` uses, its handle parked on the
+  transport and settled at the top of every `receive()` loop and in `close()`, a failed write or an
+  abnormal task ending the SAME `receive()` with `None` (the next one, if that call was dropped), and
+  the in-place reply helper removed;
+  **(2)** the same file's read loop — the line buffer cleared only after a complete line, `Ok(0)` with
+  a non-empty buffer processed as the unterminated final line; **(3)** that module's doc — the
+  `ub-nbz` disclosure rewritten as closed, with the corrected attribution and the regime-qualified
+  replication, and the CD-7 section stating BOTH deliberate divergences; **(4)**
+  `crates/unblock-mcp/src/pre_handshake.rs` — CODE UNCHANGED, its `ub-nbz` module-doc section
+  rewritten per D50 clause (5) and the comments naming the removed helper restated; **(5)** a
+  small-capacity connect helper and a raw partial-write method in `crates/unblock-mcp/tests/common/mod.rs`
+  beside `connect_raw`, which hard-codes 1 MiB; **(6)** the sibling reason strings — `d47`'s `P15`,
+  its comment and its OK message, and `d50`'s `P2`, its header comment and `Q19`.
+  *(AC: **(1) REPLY** — the deterministic cell that holds the write lock, polls `receive()` once,
+  drops it and releases the lock sees the reply reach the output, for the `-32700` arm and both
+  `-32600` arms; the serve-loop cell with `ping`s in flight over a small-capacity duplex sees every
+  reply; both FAIL on the pre-fix tree; a failed parked write and an abnormal task each end the same
+  `receive()` with `None`; consecutive bad frames are answered in arrival order; `close()` waits for a
+  parked reply. **(2) REQUEST** — the deterministic cell that drops `receive()` mid-line sees the
+  WHOLE frame delivered, and its unterminated-final-line twin sees it delivered at EOF, both failing
+  on the pre-fix tree; the serve-loop cell drives a frame larger than 8 KiB with requests in flight.
+  **(3) PARITY** — the CD-7 tiers green with the corpus UNMODIFIED; the D47-then-EOF and D40 teardown
+  cells unchanged. **(4) HARNESS** — the Understand subprocess harnesses re-run on the patched binary
+  (both reply arms, the stalled-client regime and the split-frame probe) and recorded in the Verify
+  comment. **(5) CONTRACT AND EXIT TABLE UNMOVED** — no new `ErrorCode` (`ErrorCode::ALL` stays 36),
+  the 0–8 table byte-unchanged, `CONTRACT_HASH`/`CONTRACT_VERSION` unmoved (`unblock.mcp.v1.10`
+  stands), no golden and no `insta` re-bless, no layer edge. **(6) GATE** —
+  `scripts/checks/d53-request-integrity-claims.sh` lands EXECUTABLE, is wired as a required
+  `doc-lint` step, carries the LIVE D-range, pins every older sibling's knobs — `d50`'s two included —
+  while carrying NO row for its own, and every row asserting a NEW landing has ZERO matches on the
+  PRE-FIX TREE, `main` at `3dcbf03`. **(7) PROBE** — `cargo fmt --check`, clippy pedantic,
+  `cargo test --workspace`, `cargo insta test --check`, `cargo xtask doc-lint`,
+  `cargo xtask check-layering`, `cargo xtask knowledge-lint` and every `scripts/checks/*.sh`, on EVERY
+  commit of the branch. Both gates >=3 agents; Claude opens the PR, a human merges.)*
 
 ## 6. MCP surface — concrete v1 taxonomy (closes PRD §12.2)
 
