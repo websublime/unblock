@@ -349,8 +349,28 @@ pub async fn connect_raw(
     RunningService<RoleServer, UnblockServer>,
     CancellationToken,
 ) {
-    let (server_io, client_io) = tokio::io::duplex(1024 * 1024);
-    let (server_read, server_write) = tokio::io::split(server_io);
+    connect_raw_with_outbound_capacity(session, quotas, 1024 * 1024).await
+}
+
+/// **[ub-nbz]** Like [`connect_raw`], but the SERVER→CLIENT pipe holds only `outbound_capacity`
+/// bytes; the client→server pipe keeps 1 MiB.
+///
+/// A small outbound pipe makes every response `send()` hold the transport's write mutex across
+/// several polls, so an out-of-band reply asking for it is PENDING when the next handler response
+/// wins rmcp's serve-loop `select!` — the loss `ub-nbz` names, made the common case instead of a
+/// scheduling accident. The inbound side stays large so a whole burst lands in one write and the
+/// client never blocks writing while the server blocks writing back.
+pub async fn connect_raw_with_outbound_capacity(
+    session: Arc<Session>,
+    quotas: Quotas,
+    outbound_capacity: usize,
+) -> (
+    RawDuplexClient,
+    RunningService<RoleServer, UnblockServer>,
+    CancellationToken,
+) {
+    let (client_to_server, server_read) = tokio::io::duplex(1024 * 1024);
+    let (server_write, server_to_client) = tokio::io::duplex(outbound_capacity);
     let cancel = CancellationToken::new();
     let server_task = tokio::spawn(mcp_server_duplex_for_test(
         session,
@@ -360,7 +380,15 @@ pub async fn connect_raw(
         server_write,
         cancel.clone(),
     ));
-    let mut client = raw_client(client_io);
+    let (_, client_write) = tokio::io::split(client_to_server);
+    let (client_read, _) = tokio::io::split(server_to_client);
+    let mut client = RawDuplexClient {
+        writer: client_write,
+        reader: tokio::io::BufReader::new(client_read),
+        next_id: 1,
+        seen_ids: Vec::new(),
+        seen_lines: Vec::new(),
+    };
     client.initialize().await;
     let server = server_task
         .await

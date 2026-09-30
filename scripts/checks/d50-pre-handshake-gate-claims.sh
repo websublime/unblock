@@ -122,15 +122,16 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 # P1..P7 are the WORK's own id plus every residual id the PRD row names. One row EACH and named
 #      rather than numbered, so a failure says WHICH id vanished — a single row matching any of them
 #      would go green with the rest dangling, and an "n of m" description rots at the next mint as
-#      the d48 sibling's P9 row did. P2..P4 are the residuals the gate's own reply and read path
-#      INHERIT; P5..P7 are the sibling rows' residuals, unmoved by D50 and rowed so none reads as
+#      the d48 sibling's P9 row did. P2 is the reply-loss id clause (5) once named as inherited, since
+#      CLOSED by the D47 clause 8(v) amendment; P3..P4 are the residuals the gate's own reply and read
+#      path INHERIT; P5..P7 are the sibling rows' residuals, unmoved by D50 and rowed so none reads as
 #      closed by omission.
 #
 # Every CODE landing and every WIRING landing is a Q row.
 # =================================================================================================
 REQUIRE="
 P1@.unblock/issues.jsonl@ub-kp7@the tracker record names the work this implements (PROCESS.md §6 — re-export in the SAME PR as the work). The export keeps closed rows, so the row survives the state flip that closes it
-P2@.unblock/issues.jsonl@ub-nbz@inherited residual — the -32600 is LOST whenever rmcp cancels the receive() future, the seam the gate writes its reply inside. OPEN, and the PRD row names it
+P2@.unblock/issues.jsonl@ub-nbz@the reply-loss id clause (5) once named as inherited — CLOSED by the D47 clause 8(v) amendment for the scanner's replies, with clause (5) now stating why no traffic select reaches the gate's own. The PRD row still names the id
 P3@.unblock/issues.jsonl@ub-788@inherited residual — the -32700 arm still omits a readable id, so a duplicated method or jsonrpc member still leaves an rmcp client pending. OPEN, and the PRD row names it
 P4@.unblock/issues.jsonl@ub-o8s@inherited residual — the stdio read still carries no maximum line length, so an oversized premature frame is read and scanned before the gate drops it. OPEN, and the PRD row names it
 P5@.unblock/issues.jsonl@ub-c5o@sibling residual, unmoved by D50 — output emit_report still writes to stdout unconditionally with no classification. OPEN, and the PRD row names it
@@ -244,7 +245,7 @@ Q15@crates/unblock-mcp/src/pre_handshake.rs@^ +async fn a_supported_non_latest_i
 Q16@crates/unblock-mcp/src/pre_handshake.rs@^ +async fn the_ping_reply_leaves_the_latch_shut@async fn the_ping_reply_leaves_the_latch_shut\(\)@the EmptyResult cell is still declared under its own name — the pre-handshake ping reply must leave the gate shut, or a ping-first client opens it for the whole class
 Q17@crates/unblock-mcp/src/pre_handshake.rs@^ +async fn a_request_arriving_before_the_initialized_notification@async fn a_request_arriving_before_the_initialized_notification_is_served\(\)@the post-response cell is still declared under its own name — it pins that the gate never waits for notifications initialized, which rmcp does not wait for either
 Q18@crates/unblock-mcp/src/pre_handshake.rs@^ +async fn a_method_initialize_frame_with_untypeable_params@async fn a_method_initialize_frame_with_untypeable_params_is_answered_and_dropped\(\)@the untypeable-params cell is still declared under its own name — it is what tells a variant-matched classifier from a method-string one, since rmcp decodes that frame as CustomRequest
-Q19@crates/unblock-mcp/src/pre_handshake.rs@^ +async fn a_failed_reply_write_ends_the_receive@async fn a_failed_reply_write_ends_the_receive\(\)@the failed-write cell is still declared under its own name — a reply that cannot be written ends the read with None, which is D47's answer_error contract and reaches D40's teardown delegation
+Q19@crates/unblock-mcp/src/pre_handshake.rs@^ +async fn a_failed_reply_write_ends_the_receive@async fn a_failed_reply_write_ends_the_receive\(\)@the failed-write cell is still declared under its own name — a reply that cannot be written ends the read with None, which is the contract the scanner's own out-of-band replies keep, and reaches D40's teardown delegation
 Q20@crates/unblock-mcp/src/server.rs@^ +async fn a_d47_frame_before_the_handshake@async fn a_d47_frame_before_the_handshake_still_gets_its_recovered_id_answer\(\)@the composition cell is still declared under its own name — it drives a real duplex through the server entry point and is the only cell that proves the gate runs ABOVE the scanner, which D50 clause 3 makes a correctness requirement
 Q21@crates/unblock-cli/tests/mcp_lifecycle.rs@^fn an_id_less_notification_before_initialize@fn an_id_less_notification_before_initialize_is_dropped_and_the_handshake_still_completes\(\)@the INVERTED cell carries its new name. It asserted the fatality as correct and now asserts the handshake completing, so the old name surviving here would mean the inversion never landed
 Q22@crates/unblock-cli/tests/mcp_lifecycle.rs@^fn a_no_signal_run_loop_error@fn a_no_signal_run_loop_error_exits_1_and_never_hangs\(\)@the REPOINTED cell keeps the name it shipped with, the one row here that also matched the pre-fix tree. It is the witness for the last unsignalled run-loop error still reachable from the wire, a broken pipe on the pre-handshake ping reply

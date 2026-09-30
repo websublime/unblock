@@ -52,8 +52,10 @@
 //!
 //! The reply travels through `self.inner.send(..)`, which is the scanner's `send`, so it is written
 //! under the SAME write mutex and is byte-atomic by inheritance. The cost is stated rather than
-//! hidden — the single-emission-helper property becomes two sites, because a decorator generic over
-//! `T: Transport` cannot reach the scanner's private `answer_error`.
+//! hidden: the scanner's single out-of-band emission path becomes two sites, because a decorator
+//! generic over `T: Transport` cannot reach the scanner's private `park_reply`. The gate's reply is
+//! AWAITED inside this `receive()` rather than spawned and parked. The next section says why that is
+//! sound.
 //!
 //! # THE LATCH opens on the server's OWN outbound `InitializeResult`
 //!
@@ -85,15 +87,17 @@
 //! chosen because it stays correct if a future rmcp reads ahead, and because it is the completion
 //! edge by construction.
 //!
-//! # THE `ub-nbz` RESIDUAL IS INHERITED AND NOT WIDENED IN THE REGIME THAT MATTERS
+//! # THE GATE'S REPLY IS AWAITED INSIDE `receive()`, AND NO DROPPER OF IT STRANDS A PEER
 //!
-//! The reply is written INSIDE `receive()`, the shape [`crate::wire`] already discloses, so rmcp may
-//! drop that future mid-poll and take the unwritten reply with it. Pre-handshake the only dropper is
-//! the cancellation select at `rmcp-1.7.0/src/service/server.rs:150-155`, so a lost reply coincides
-//! with a signal, where it is irrelevant. The unbiased request-traffic select
-//! (`rmcp-1.7.0/src/service.rs:805-813`) exists only after the handshake, which is after the latch has
-//! opened and the gate no longer writes. Pre-handshake is the regime the `ub-nbz` harness measured at
-//! 0 of 40 losses. `ub-nbz` stays OPEN.
+//! `ub-nbz` moved the scanner's out-of-band replies off the cancellable path by spawning and parking
+//! them ([`crate::wire`]). This gate's `-32600` deliberately stays an awaited `self.inner.send(..)`,
+//! because nothing that can drop it here leaves a peer waiting. Pre-handshake, the only dropper of
+//! `receive()` is the cancellation select at `rmcp-1.7.0/src/service/server.rs:150-155`. That is the
+//! signal path, and it discards the WHOLE transport without `close()`, so the session the reply was
+//! for is ending. The unbiased request-traffic select that dropped replies under load
+//! (`rmcp-1.7.0/src/service.rs:805-813`) is never reached while this gate can write. The latch opens on
+//! the server's `InitializeResult` before that serve loop starts, and from then on the gate passes
+//! every frame through and writes nothing.
 //!
 //! # THE `ub-o8s` OVERSIZED-FRAME RESIDUAL CHANGES SHAPE, and the new shape is disclosed here
 //!
@@ -233,8 +237,8 @@ where
                         ErrorData::invalid_request(PRE_HANDSHAKE_REJECTION_MESSAGE, None),
                         Some(id),
                     );
-                    // A failed write ends the read with `None` from `receive()`, which is D47's
-                    // `answer_error` contract and reaches D40's teardown delegation.
+                    // A failed write ends the read with `None` from `receive()`, the same contract
+                    // the scanner's out-of-band replies keep, and reaches D40's teardown delegation.
                     self.inner.send(reply).await.ok()?;
                 }
                 Disposition::Drop => {
@@ -712,10 +716,10 @@ mod tests {
 
     /// **A failed reply write ends the read.**
     ///
-    /// `receive()` returns `None` on a write failure, which is D47's `answer_error` contract and what
-    /// routes the process into D40's teardown delegation. The `initialize` behind the refused frame is
-    /// what gives the cell teeth — swallowing the failure hands that request upward on a dead pipe,
-    /// and the `is_none()` assertion turns red on it.
+    /// `receive()` returns `None` on a write failure, the same contract the scanner's out-of-band
+    /// replies keep, and that is what routes the process into D40's teardown delegation. The
+    /// `initialize` behind the refused frame is what gives the cell teeth — swallowing the failure
+    /// hands that request upward on a dead pipe, and the `is_none()` assertion turns red on it.
     #[tokio::test]
     async fn a_failed_reply_write_ends_the_receive() {
         let inner = MockInner {
