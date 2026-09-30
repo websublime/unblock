@@ -128,11 +128,11 @@ P4@crates/unblock-cli/src/exit.rs@fn into_exit_to@the sink-injected core survive
 P5@crates/unblock-cli/tests/mcp_stdout_channel.rs@assert_diagnostic_on_stderr@the spawning regression file still drives its shared oracle — the layer that covers the call site no unit cell can see
 P6@crates/unblock-cli/tests/common/mod.rs@fn is_jsonrpc_framing@the hardened stdout guard still requires FRAMING, not merely valid JSON — the blob IS valid JSON, which is how it passed for the life of the suite
 P7@crates/unblock-cli/tests/common/mod.rs@env_remove\(\"UNBLOCK_OUTPUT_FORMAT\"\)@the format env is still scrubbed at the ONE spawn root: inherited, it makes every frame-only assertion vacuous
-P8@.unblock/issues.jsonl@ub-og3@the tracker record names the work this implements (PROCESS.md §6: re-export in the SAME commit as the work)
-P9@.unblock/issues.jsonl@ub-kp7@residual 1 of 4: a first frame that is neither initialize NOR ping killed the server — CLOSED by D50, and the export keeps closed rows, so this row still pins that the id the PRD row cites exists
-P10@.unblock/issues.jsonl@ub-b1a@residual 2 of 4: the relocated message still embeds an unbounded Debug rendering of attacker-controlled bytes — OPEN
-P11@.unblock/issues.jsonl@ub-c5o@residual 3 of 4: output::emit_report still writes to stdout unconditionally with no classification — OPEN
-P12@.unblock/issues.jsonl@ub-5v5@residual 4 of 4: an oversized response could leave a TRUNCATED frame on the same channel — reasoned from source, never reproduced, OPEN
+P8@.unblock/issues.jsonl@\"id\":\"ub-og3\"@the tracker record names the work this implements (PROCESS.md §6: re-export in the SAME commit as the work)
+P9@.unblock/issues.jsonl@\"id\":\"ub-kp7\"@residual 1 of 4: a first frame that is neither initialize NOR ping killed the server — CLOSED by D50, and the export keeps closed rows, so this row still pins that the id the PRD row cites exists
+P10@.unblock/issues.jsonl@\"id\":\"ub-b1a\"@residual 2 of 4: the relocated message still embeds an unbounded Debug rendering of attacker-controlled bytes — OPEN
+P11@.unblock/issues.jsonl@\"id\":\"ub-c5o\"@residual 3 of 4: output::emit_report still writes to stdout unconditionally with no classification — OPEN
+P12@.unblock/issues.jsonl@\"id\":\"ub-5v5\"@residual 4 of 4: an oversized response could leave a TRUNCATED frame on the same channel — reasoned from source, never reproduced, OPEN
 P13@docs/roadmap.html@D48@the RENDERED roadmap lists D48 in its v1.0.1 card — it is OUTSIDE the 19-file doc-lint corpus, so nothing else in CI can catch its absence
 P14@docs/plans/ci-cd-and-distribution.md@d48-stdout-channel-claims@this gate is SPECIFIED, not merely wired
 P15@.github/workflows/ci.yml@d48-stdout-channel-claims@this gate actually RUNS in the required doc-lint job

@@ -92,10 +92,10 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 # rather than numbered, so a failure says WHICH id vanished.
 # =================================================================================================
 REQUIRE="
-P1@.unblock/issues.jsonl@ub-zja@the tracker record names the work D53 implements (PROCESS.md §6). The export keeps closed rows, so the row survives the state flip that closes it
-P2@.unblock/issues.jsonl@ub-nbz@the tracker record names the work the D47 clause 8(v) amendment implements, the id that amendment cites
-P3@.unblock/issues.jsonl@ub-o8s@residual D53 names — the stdio read still accepts a line of any length, which keeping a partial line across a dropped receive() neither widens nor closes
-P4@.unblock/issues.jsonl@ub-5v5@residual the D47 clause 8(v) amendment names as NOT reached — rmcp's own response sends aborted at its drain timeout are unchanged
+P1@.unblock/issues.jsonl@\"id\":\"ub-zja\"@the tracker record names the work D53 implements (PROCESS.md §6). The export keeps closed rows, so the row survives the state flip that closes it
+P2@.unblock/issues.jsonl@\"id\":\"ub-nbz\"@the tracker record names the work the D47 clause 8(v) amendment implements, the id that amendment cites
+P3@.unblock/issues.jsonl@\"id\":\"ub-o8s\"@residual D53 names — the stdio read still accepts a line of any length, which keeping a partial line across a dropped receive() neither widens nor closes
+P4@.unblock/issues.jsonl@\"id\":\"ub-5v5\"@residual the D47 clause 8(v) amendment names as NOT reached — rmcp's own response sends aborted at its drain timeout are unchanged
 "
 
 # =================================================================================================

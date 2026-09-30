@@ -141,13 +141,13 @@ P3@crates/unblock-mcp/src/wire.rs@JsonRpcMessage::Response\(_\)@the variant matc
 P6@crates/unblock-mcp/src/lib.rs@cfg\(any\(test, feature = \"test-util\"\)\)@the shared corpus is gated so the in-lib cells cannot silently compile away — a non-compiled cell is a vacuous pass
 P7@crates/unblock-mcp/tests/envelope_id_duplex.rs@store_fingerprint@the store-EFFECT oracle survives: the one assertion that kills a rebuild-as-a-Request-and-deliver-it implementation
 P8@crates/unblock-mcp/src/wire.rs@ub-788@the DISCLOSED -32700 residual is still named at the transport, so it stays tracked rather than quietly assumed closed
-P9@.unblock/issues.jsonl@ub-cnv@the tracker record names the work this implements (PROCESS.md §6: re-export in the SAME commit as the work)
-P10@.unblock/issues.jsonl@ub-788@the residual the PRD row names has a REAL issue, so the top document of the hierarchy carries no dangling id
+P9@.unblock/issues.jsonl@\"id\":\"ub-cnv\"@the tracker record names the work this implements (PROCESS.md §6: re-export in the SAME commit as the work)
+P10@.unblock/issues.jsonl@\"id\":\"ub-788\"@the residual the PRD row names has a REAL issue, so the top document of the hierarchy carries no dangling id
 P11@docs/roadmap.html@D47@the RENDERED roadmap lists D47 in its v1.0.1 card — it is OUTSIDE the 19-file doc-lint corpus, so nothing else in CI can catch its absence
 P12@docs/plans/ci-cd-and-distribution.md@d47-envelope-id-claims@this gate is SPECIFIED, not merely wired
 P13@.github/workflows/ci.yml@d47-envelope-id-claims@this gate actually RUNS in the required doc-lint job
 P14@docs/PROCESS.md@d47-envelope-id-claims@the count-free LIST that IS the rule names this script, so the enumeration cannot rot silently
-P15@.unblock/issues.jsonl@ub-nbz@the id clause 8(v) cites — the -32600 once lost to a cancelled receive(), CLOSED by the D47 clause 8(v) amendment that moved the reply onto a spawned, parked task — has a REAL issue, so that id does not dangle either
+P15@.unblock/issues.jsonl@\"id\":\"ub-nbz\"@the id clause 8(v) cites — the -32600 once lost to a cancelled receive(), CLOSED by the D47 clause 8(v) amendment that moved the reply onto a spawned, parked task — has a REAL issue, so that id does not dangle either
 "
 
 # =================================================================================================
@@ -176,9 +176,10 @@ P15@.unblock/issues.jsonl@ub-nbz@the id clause 8(v) cites — the -32600 once lo
 #       there still answers, still recovers the connection, and still passes every cell that does not
 #       correlate by id — while releasing no waiting peer at all, which is the whole point of D47.
 #       The anchor is the argument's OWN production line (indentation + the value + a comma, whole
-#       line), which no doc comment and no test body can spell; the named mutant rewrites that line to
-#       `None,`, the anchor then matches NOTHING, and a vanished anchor is a failure. So on this row it
-#       is the anchor half that kills the mutant and the requirement half that is nearly a restatement
+#       line), which no `///`/`//!` doc line can spell (a `/* */` block or `#[cfg(test)]` text still
+#       can — ub-0il); the named mutant rewrites that line to `None,`, the anchor then matches
+#       NOTHING, and a vanished anchor is a failure. So on this row it is the anchor half that
+#       kills the mutant and the requirement half that is nearly a restatement
 #       — said plainly rather than dressed up, because a row whose reason overstates its own reach is
 #       the exact defect this pair of rows was rewritten to remove.
 # =================================================================================================

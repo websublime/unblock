@@ -204,7 +204,7 @@ R24@crates/unblock-storage/src/libsql/crud.rs@D44@the create-specific guard bloc
 R25@crates/unblock-mcp/tests/dep_metadata.rs@VALIDATION_FAILED@the end-to-end JSON-RPC test was REWRITTEN, not deleted: it now pins the rejection CODE (zero matches pre-D44, where the test asserted only is_error)
 R26@crates/unblock-mcp/tests/dep_metadata.rs@\[.dependencies.\]@the same test asserts the CREATED issue hydrated edge set, the half that proves the edge landed on the MINTED id (zero matches pre-D44)
 R27@crates/unblock-sync/tests/contract.rs@import leg (routes|enters).{0,60}create_issues@the import-leg pin names the ACTUAL entry point (import.rs:279 calls create_issues, NOT create_issue) instead of being cleared by a bare D44 token
-R28@.unblock/issues.jsonl@ub-lp9\.25@the co-shipped dangling-blocker issue EXISTS in the committed tracker record: PRD/spine/roadmap all cite it as a 1.0.1 co-requisite (Miguel ruling), and a cited-but-nonexistent id is how a co-ship commitment evaporates
+R28@.unblock/issues.jsonl@\"id\":\"ub-lp9\.25\"@the co-shipped dangling-blocker issue EXISTS in the committed tracker record: PRD/spine/roadmap all cite it as a 1.0.1 co-requisite (Miguel ruling), and a cited-but-nonexistent id is how a co-ship commitment evaporates
 R29@crates/unblock-engine/tests/create_bulk.rs@D44@the bulk-create test file NAMES D44 — the SPELLING-INDEPENDENT pin (obligation 3 in the header above) over the one file where the retired D22 clause is dense and WRAPS across a line break; zero matches pre-D44, so it cannot pass vacuously
 "
 
