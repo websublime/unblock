@@ -1,4 +1,4 @@
-//! **[ub-nbz] `receive()` CANCELLATION over the REAL serve path.**
+//! **[ub-nbz / ub-zja] `receive()` CANCELLATION over the REAL serve path.**
 //!
 //! rmcp polls the transport's `receive()` as one arm of an UNBIASED `tokio::select!`
 //! (`rmcp-1.7.0/src/service.rs:805`, the arm at `:813`) and DROPS it whenever another arm — a handler
@@ -94,5 +94,66 @@ async fn an_out_of_band_reply_survives_pings_in_flight() {
     assert!(
         lost.is_empty(),
         "every out-of-band reply must reach the client ahead of the sentinel's response; lost: {lost:?}"
+    );
+}
+
+/// **ub-zja** — a WELL-FORMED request larger than one 8 KiB `BufReader` fill, arriving in two writes
+/// while ping responses land, is served whole. Pre-fix, the `receive()` pending mid-line is dropped
+/// by the serve loop, the loop head clears the consumed head, and the tail is answered `-32700` alone.
+///
+/// Mutant: `line_buf` cleared at the loop head unconditionally again.
+#[tokio::test(flavor = "current_thread")]
+async fn a_frame_larger_than_one_read_survives_pings_in_flight() {
+    let (mut client, _server, _cancel) = common::connect_raw_with_outbound_capacity(
+        common::session().await,
+        Quotas::default(),
+        1024 * 1024,
+    )
+    .await;
+
+    let big_id = 9_000;
+    let padding = "x".repeat(20 * 1024);
+    let big = format!(
+        r#"{{"jsonrpc":"2.0","id":{big_id},"method":"tools/list","params":{{"_meta":{{"pad":"{padding}"}}}}}}"#
+    );
+    let (head, tail) = big.split_at(12 * 1024);
+
+    // Burst 1: pings, then the HEAD of the big frame. Reading every ping's response guarantees the
+    // server read the head and pended mid-line while those responses were being written.
+    let mut burst = String::new();
+    let mut last_ping = 0;
+    for _ in 0..IN_FLIGHT {
+        last_ping = client.next_request_id();
+        writeln!(
+            burst,
+            r#"{{"jsonrpc":"2.0","id":{last_ping},"method":"ping"}}"#
+        )
+        .expect("write to a String");
+    }
+    burst.push_str(head);
+    client.write_raw_bytes(burst.as_bytes()).await;
+    client.read_response(last_ping).await;
+
+    // Burst 2: the TAIL, then a sentinel.
+    let sentinel = client.next_request_id();
+    client
+        .write_raw_line(&format!(
+            "{tail}\n{{\"jsonrpc\":\"2.0\",\"id\":{sentinel},\"method\":\"ping\"}}"
+        ))
+        .await;
+    client.read_response(sentinel).await;
+
+    assert!(
+        client.saw_response_for(big_id),
+        "the split request must be served whole; lines seen: {:?}",
+        client
+            .seen_lines
+            .iter()
+            .map(|l| l.chars().take(120).collect::<String>())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !client.saw_line_containing(r#""code":-32700"#),
+        "no fragment of the split request may be answered as a parse error"
     );
 }

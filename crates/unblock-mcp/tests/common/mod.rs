@@ -245,6 +245,14 @@ impl RawDuplexClient {
         self.writer.flush().await.expect("flush");
     }
 
+    /// **[ub-zja]** Write EXACT bytes with NO newline appended — the half of a frame split across
+    /// two client writes, which [`RawDuplexClient::write_raw_line`] cannot produce.
+    pub async fn write_raw_bytes(&mut self, bytes: &[u8]) {
+        use tokio::io::AsyncWriteExt as _;
+        self.writer.write_all(bytes).await.expect("write bytes");
+        self.writer.flush().await.expect("flush");
+    }
+
     /// Read newline-delimited lines until the response with `id` arrives.
     ///
     /// Every line read must be valid JSON (the NFR-14 stdout-framing guard).
