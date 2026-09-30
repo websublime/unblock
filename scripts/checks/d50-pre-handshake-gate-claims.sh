@@ -131,13 +131,13 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 # Every CODE landing and every WIRING landing is a Q row.
 # =================================================================================================
 REQUIRE="
-P1@.unblock/issues.jsonl@ub-kp7@the tracker record names the work this implements (PROCESS.md §6 — re-export in the SAME PR as the work). The export keeps closed rows, so the row survives the state flip that closes it
-P2@.unblock/issues.jsonl@ub-nbz@the reply-loss id clause (5) once named as inherited — CLOSED by the D47 clause 8(v) amendment for the scanner's replies, with clause (5) now stating why no traffic select reaches the gate's own. The PRD row still names the id
-P3@.unblock/issues.jsonl@ub-788@inherited residual — the -32700 arm still omits a readable id, so a duplicated method or jsonrpc member still leaves an rmcp client pending. OPEN, and the PRD row names it
-P4@.unblock/issues.jsonl@ub-o8s@inherited residual — the stdio read still carries no maximum line length, so an oversized premature frame is read and scanned before the gate drops it. OPEN, and the PRD row names it
-P5@.unblock/issues.jsonl@ub-c5o@sibling residual, unmoved by D50 — output emit_report still writes to stdout unconditionally with no classification. OPEN, and the PRD row names it
-P6@.unblock/issues.jsonl@ub-5v5@sibling residual, unmoved by D50 — an oversized response can still leave a TRUNCATED frame on the framing channel. OPEN, and the PRD row names it
-P7@.unblock/issues.jsonl@ub-wx3@sibling residual, unmoved by D50 — rmcp's post-handshake tracing still Debug-dumps frames at a single -v. OPEN, and the PRD row names it
+P1@.unblock/issues.jsonl@\"id\":\"ub-kp7\"@the tracker record names the work this implements (PROCESS.md §6 — re-export in the SAME PR as the work). The export keeps closed rows, so the row survives the state flip that closes it
+P2@.unblock/issues.jsonl@\"id\":\"ub-nbz\"@the reply-loss id clause (5) once named as inherited — CLOSED by the D47 clause 8(v) amendment for the scanner's replies, with clause (5) now stating why no traffic select reaches the gate's own. The PRD row still names the id
+P3@.unblock/issues.jsonl@\"id\":\"ub-788\"@inherited residual — the -32700 arm still omits a readable id, so a duplicated method or jsonrpc member still leaves an rmcp client pending. OPEN, and the PRD row names it
+P4@.unblock/issues.jsonl@\"id\":\"ub-o8s\"@inherited residual — the stdio read still carries no maximum line length, so an oversized premature frame is read and scanned before the gate drops it. OPEN, and the PRD row names it
+P5@.unblock/issues.jsonl@\"id\":\"ub-c5o\"@sibling residual, unmoved by D50 — output emit_report still writes to stdout unconditionally with no classification. OPEN, and the PRD row names it
+P6@.unblock/issues.jsonl@\"id\":\"ub-5v5\"@sibling residual, unmoved by D50 — an oversized response can still leave a TRUNCATED frame on the framing channel. OPEN, and the PRD row names it
+P7@.unblock/issues.jsonl@\"id\":\"ub-wx3\"@sibling residual, unmoved by D50 — rmcp's post-handshake tracing still Debug-dumps frames at a single -v. OPEN, and the PRD row names it
 "
 
 # =================================================================================================

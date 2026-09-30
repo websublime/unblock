@@ -119,9 +119,9 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 # Every CODE landing is a Q row.
 # =================================================================================================
 REQUIRE="
-P1@.unblock/issues.jsonl@ub-b1a@the tracker record names the work this implements (PROCESS.md §6 — re-export in the SAME PR as the work)
-P2@.unblock/issues.jsonl@ub-o8s@residual (ii) of the PRD row's three — the stdio transport still reads an unbounded line, so the multi-megabyte frame is parsed before a short message describes it. OPEN, and the PRD row names it
-P3@.unblock/issues.jsonl@ub-wx3@residual (iii) of the PRD row's three — rmcp still Debug-dumps POST-handshake frames under its own tracing, live at a single -v. OPEN, and the PRD row names it
+P1@.unblock/issues.jsonl@\"id\":\"ub-b1a\"@the tracker record names the work this implements (PROCESS.md §6 — re-export in the SAME PR as the work)
+P2@.unblock/issues.jsonl@\"id\":\"ub-o8s\"@residual (ii) of the PRD row's three — the stdio transport still reads an unbounded line, so the multi-megabyte frame is parsed before a short message describes it. OPEN, and the PRD row names it
+P3@.unblock/issues.jsonl@\"id\":\"ub-wx3\"@residual (iii) of the PRD row's three — rmcp still Debug-dumps POST-handshake frames under its own tracing, live at a single -v. OPEN, and the PRD row names it
 P4@.github/workflows/ci.yml@d49-startup-failure-render-claims@this gate actually RUNS in the required doc-lint job
 P5@docs/PROCESS.md@d49-startup-failure-render-claims@the count-free LIST that IS the rule names this script, so the enumeration cannot rot silently
 "
