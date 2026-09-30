@@ -3,6 +3,8 @@
 //! `Issue` → `to_value` → `from_value` == original (modulo the `#[serde(skip)] content_hash`, which
 //! is always `None` on load); enums round-trip; `Dependency.metadata` `""` → `None` coercion holds.
 
+use std::str::FromStr;
+
 use chrono::{TimeZone, Utc};
 use proptest::prelude::*;
 use unblock_model::{DependencyType, EventType, Issue, IssueType, Priority, Status};
@@ -11,13 +13,17 @@ fn ts() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
 }
 
+// The open-enum string arms go through `FromStr`, so a generated string that names a known variant in
+// any case (e.g. "BuG") becomes that variant. A raw `Custom("BuG")` is unreachable from any parse and
+// cannot round-trip.
+
 fn arb_status() -> impl Strategy<Value = Status> {
     prop_oneof![
         Just(Status::Open),
         Just(Status::InProgress),
         Just(Status::Blocked),
         Just(Status::Closed),
-        "[a-zA-Z]{1,12}".prop_map(Status::Custom),
+        "[a-zA-Z]{1,12}".prop_map(|s| Status::from_str(&s).unwrap()),
     ]
 }
 
@@ -26,7 +32,7 @@ fn arb_issue_type() -> impl Strategy<Value = IssueType> {
         Just(IssueType::Task),
         Just(IssueType::Bug),
         Just(IssueType::Epic),
-        "[a-zA-Z]{1,12}".prop_map(IssueType::Custom),
+        "[a-zA-Z]{1,12}".prop_map(|s| IssueType::from_str(&s).unwrap()),
     ]
 }
 
