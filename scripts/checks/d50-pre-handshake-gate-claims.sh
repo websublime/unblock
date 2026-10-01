@@ -124,8 +124,8 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 #      rather than numbered, so a failure says WHICH id vanished — a single row matching any of them
 #      would go green with the rest dangling, and an "n of m" description rots at the next mint as
 #      the d48 sibling's P9 row did. P2 is the reply-loss id clause (5) once named as inherited, since
-#      CLOSED by the D47 clause 8(v) amendment; P3..P4 are the residuals the gate's own reply and read
-#      path INHERIT; P5..P7 are the sibling rows' residuals, unmoved by D50 and rowed so none reads as
+#      CLOSED by the D47 clause 8(v) amendment; P3 is the parse-error id clause (9) once named as
+#      inherited, since CLOSED by D54; P4 is the residual the gate's read path still INHERITS; P5..P7 are the sibling rows' residuals, unmoved by D50 and rowed so none reads as
 #      closed by omission.
 #
 # Every CODE landing and every WIRING landing is a Q row.
@@ -133,7 +133,7 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 REQUIRE="
 P1@.unblock/issues.jsonl@\"id\":\"ub-kp7\"@the tracker record names the work this implements (PROCESS.md §6 — re-export in the SAME PR as the work). The export keeps closed rows, so the row survives the state flip that closes it
 P2@.unblock/issues.jsonl@\"id\":\"ub-nbz\"@the reply-loss id clause (5) once named as inherited — CLOSED by the D47 clause 8(v) amendment for the scanner's replies, with clause (5) now stating why no traffic select reaches the gate's own. The PRD row still names the id
-P3@.unblock/issues.jsonl@\"id\":\"ub-788\"@inherited residual — the -32700 arm still omits a readable id, so a duplicated method or jsonrpc member still leaves an rmcp client pending. OPEN, and the PRD row names it
+P3@.unblock/issues.jsonl@\"id\":\"ub-788\"@the parse-error residual clause (9) once named as inherited — CLOSED by D54 for every strict-JSON line whose id is readable. The PRD row still names the id
 P4@.unblock/issues.jsonl@\"id\":\"ub-o8s\"@inherited residual — the stdio read still carries no maximum line length, so an oversized premature frame is read and scanned before the gate drops it. OPEN, and the PRD row names it
 P5@.unblock/issues.jsonl@\"id\":\"ub-c5o\"@sibling residual, unmoved by D50 — output emit_report still writes to stdout unconditionally with no classification. OPEN, and the PRD row names it
 P6@.unblock/issues.jsonl@\"id\":\"ub-5v5\"@sibling residual, unmoved by D50 — an oversized response can still leave a TRUNCATED frame on the framing channel. OPEN, and the PRD row names it

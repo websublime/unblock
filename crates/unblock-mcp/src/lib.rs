@@ -42,7 +42,7 @@ mod wire;
 #[doc(hidden)]
 pub mod duplicate_key_corpus;
 
-// The D47 un-decodable-envelope-id frame corpus, declared ONCE and consumed by this crate's OWN
+// The D47 un-decodable-envelope-id and D54 parse-error-id frame corpora, declared ONCE and consumed by this crate's OWN
 // in-module cells, its duplex suite, and `unblock-cli`'s raw-stdio suite. `any(test, ...)` and not
 // `test-util` alone: the in-lib cells must see it in every build that compiles them, and a silently
 // non-compiled cell is a vacuous pass.

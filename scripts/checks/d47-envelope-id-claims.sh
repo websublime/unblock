@@ -116,11 +116,11 @@ RECOVERED_ID_RE='Some\(id\),$'
 #       compile away — this project's canonical vacuity failure.
 # P7    is the store-EFFECT oracle, the only assertion that kills a "rebuild it as a Request and
 #       deliver it" implementation.
-# P8    is the DISCLOSED residual staying measured rather than prose: the -32700 arm still omits a
-#       readable id. Closing it is a deliberate future change that turns that cell red.
+# P8    is the -32700 residual the PRD row disclosed, now CLOSED by D54: the row pins the transport
+#       line that records the closure beside the id, so the id neither dangles nor reads as open.
 # P9    is the tracker record. Satisfy it by updating the issue over the issue tool and re-exporting in
 #       the same commit — NEVER by hand-editing the generated file (D5 model B).
-# P10   is `ub-788`, the residual the PRD row NAMES. Without it the top document of the hierarchy
+# P10   is `ub-788`, the residual the PRD row NAMES, CLOSED by D54. Without it the top document of the hierarchy
 #       carries a DANGLING id, which is worse than the vagueness it replaced.
 # P11   is the RENDERED roadmap. It sits OUTSIDE the 19-file doc-lint corpus, so this row is the only
 #       thing in CI that can notice the published v1.0.1 card listing a fix set that is missing a fix.
@@ -140,7 +140,7 @@ P2@crates/unblock-mcp/src/wire.rs@INVALID_REQUEST_ID_MESSAGE@the transport's -32
 P3@crates/unblock-mcp/src/wire.rs@JsonRpcMessage::Response\(_\)@the variant match is still EXHAUSTIVE (no wildcard arm): a fifth rmcp variant that could carry a stray id must be a COMPILE error, not a silent hole
 P6@crates/unblock-mcp/src/lib.rs@cfg\(any\(test, feature = \"test-util\"\)\)@the shared corpus is gated so the in-lib cells cannot silently compile away — a non-compiled cell is a vacuous pass
 P7@crates/unblock-mcp/tests/envelope_id_duplex.rs@store_fingerprint@the store-EFFECT oracle survives: the one assertion that kills a rebuild-as-a-Request-and-deliver-it implementation
-P8@crates/unblock-mcp/src/wire.rs@ub-788@the DISCLOSED -32700 residual is still named at the transport, so it stays tracked rather than quietly assumed closed
+P8@crates/unblock-mcp/src/wire.rs@(ub-788.*D54|D54.*ub-788)@the -32700 residual D47 disclosed is recorded at the transport as CLOSED by D54, on the line that names its id, so the record neither dangles nor reads it as open
 P9@.unblock/issues.jsonl@\"id\":\"ub-cnv\"@the tracker record names the work this implements (PROCESS.md §6: re-export in the SAME commit as the work)
 P10@.unblock/issues.jsonl@\"id\":\"ub-788\"@the residual the PRD row names has a REAL issue, so the top document of the hierarchy carries no dangling id
 P11@docs/roadmap.html@D47@the RENDERED roadmap lists D47 in its v1.0.1 card — it is OUTSIDE the 19-file doc-lint corpus, so nothing else in CI can catch its absence
@@ -268,5 +268,5 @@ check_table_floor 'required-landing (P)' "$p_count" 13 || blocked=1
 check_table_floor 'row-anchored (Q)' "$q_count" 12 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
-say "OK — the D47 predicate, its exhaustive-match guard, its decoded-key rule and its recovered-id arm are all still in the tree, the store-effect oracle and the disclosed -32700 residual are still pinned, the tracker names ub-cnv and both ids the PRD row's residual clause cites (ub-788, still open, and ub-nbz, closed by the clause 8(v) amendment), the rendered roadmap lists the decision, this gate is both specified and wired, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates while the contract version stands unmoved."
+say "OK — the D47 predicate, its exhaustive-match guard, its decoded-key rule and its recovered-id arm are all still in the tree, the store-effect oracle is still pinned and the -32700 residual's closure by D54 is recorded at the transport, the tracker names ub-cnv and both ids the PRD row's residual clause cites (ub-788, closed by D54, and ub-nbz, closed by the clause 8(v) amendment), the rendered roadmap lists the decision, this gate is both specified and wired, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates while the contract version stands unmoved."
 exit 0
