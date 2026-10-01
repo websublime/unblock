@@ -1608,6 +1608,188 @@ mod tests {
         }
     }
 
+    /// **W-E1** — every D54 parse-error entry is answered BYTE FOR BYTE, and never delivered.
+    ///
+    /// Exact hand-written bytes (`parse_error_bytes`), never the production encoder: a mutant that
+    /// answers on a wrong id, a stringified id, `-32600`, another message or `"id":null` satisfies
+    /// "differs from rmcp" and cannot satisfy this. It needs no rmcp, and it is the only check of the
+    /// out-of-class entries against a hand literal rather than against rmcp's live bytes.
+    ///
+    /// Mutants: the recovered arm answering `None` (every E entry); the strict-JSON gate removed or
+    /// weakened (X01, X03, X04, X05, X12, F11 in CD-7); a non-UTF-8 line classed `NotAMessage` (X03
+    /// alone); a byte prefilter on the literal `"id"` (E16 alone); numeric ids only (E04, E14, E15);
+    /// a gate stricter than `Value` (E18, E24); answer AND deliver (every E entry).
+    #[tokio::test]
+    async fn the_parse_error_corpus_is_answered_byte_for_byte() {
+        for entry in parse_error_corpus() {
+            let (received, written) = run_ours(&entry.frame).await;
+            assert_eq!(
+                String::from_utf8_lossy(&written),
+                String::from_utf8_lossy(&parse_error_bytes(&entry.expect)),
+                "{}: wrong reply bytes — {}",
+                entry.id,
+                entry.why
+            );
+            assert!(
+                received.is_empty(),
+                "{}: a line that fails the typed parse is never delivered",
+                entry.id
+            );
+        }
+    }
+
+    /// **W-G5′** — parse-error corpus non-vacuity: every entry still REACHES what its role says.
+    ///
+    /// The byte cells stay green on a "tidied" entry that grades nothing — X03's bad byte moved into
+    /// a key (where `scan` finds no id at all), or an E entry rewritten so the typed parse succeeds.
+    /// This is the ub-cnv failure mode, and this cell is what catches it.
+    #[test]
+    fn the_parse_error_corpus_is_not_vacuous() {
+        use crate::envelope_id::{EnvelopeId, scan};
+        use crate::envelope_id_corpus::{GateHalf, ParseRole};
+        use rmcp::model::NumberOrString;
+
+        fn parse(line: &[u8]) -> Result<Option<RxJsonRpcMessage<RoleServer>>, super::ParseFailure> {
+            super::try_parse_with_compatibility::<RxJsonRpcMessage<RoleServer>>(line)
+        }
+
+        for entry in parse_error_corpus() {
+            let id = entry.id;
+            let verdict = scan(&entry.frame);
+            let scan_recovers = matches!(verdict, EnvelopeId::Recovered(_));
+            let parsed = parse(&entry.frame);
+            let body = entry
+                .frame
+                .strip_prefix(super::UTF8_BOM.as_slice())
+                .unwrap_or(&entry.frame);
+            match entry.role {
+                ParseRole::InClass => {
+                    assert!(
+                        matches!(parsed, Err(super::ParseFailure::NotAMessage(_))),
+                        "{id}: an in-class entry must fail the typed parse AND pass the gate"
+                    );
+                    let declared = match (&verdict, &entry.expect) {
+                        (
+                            EnvelopeId::Recovered(NumberOrString::Number(got)),
+                            ParseExpect::RecoveredNum(want),
+                        ) => got == want,
+                        (
+                            EnvelopeId::Recovered(NumberOrString::String(got)),
+                            ParseExpect::RecoveredStr(want),
+                        ) => &**got == *want,
+                        _ => false,
+                    };
+                    assert!(declared, "{id}: scan must recover EXACTLY the declared id");
+                }
+                ParseRole::GateWitness(half) => {
+                    assert!(
+                        matches!(parsed, Err(super::ParseFailure::NotJson(_))),
+                        "{id}: a gate witness must fail the gate"
+                    );
+                    assert!(
+                        scan_recovers,
+                        "{id}: a gate witness must be a line scan ALONE would answer on an id"
+                    );
+                    assert_eq!(
+                        std::str::from_utf8(body).is_err(),
+                        half == GateHalf::Utf8,
+                        "{id}: the entry must witness the gate half it declares"
+                    );
+                }
+                ParseRole::ScanWitness => {
+                    assert!(
+                        matches!(parsed, Err(super::ParseFailure::NotAMessage(_))),
+                        "{id}: a scan witness must pass the gate and fail the typed parse"
+                    );
+                    assert!(!scan_recovers, "{id}: a scan witness must recover no id");
+                }
+                ParseRole::CompatDropped => {
+                    assert!(
+                        matches!(parsed, Ok(None)),
+                        "{id}: the compatibility filter must drop it"
+                    );
+                }
+                ParseRole::ParityOnly => {
+                    assert!(
+                        matches!(parsed, Err(super::ParseFailure::NotJson(_))) && !scan_recovers,
+                        "{id}: a parity-only entry fails the gate and recovers nothing"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **W-G4′** — parse-error reply kinds AND gate halves as SETS, never counts.
+    ///
+    /// Mutant (a corpus edit): deleting every string-id entry, or deleting X03 — after which no
+    /// entry sees a non-UTF-8 line classed as JSON — or deleting (or reshaping) a witness required
+    /// by id. X01, X03, X10, E16 and E24 are each the only entry that kills its mutant. E15 and E17
+    /// are each the only PARSE-ERROR-corpus entry that kills its mutant, which `envelope_id`'s own
+    /// cells and D47's divergence corpus (D23, D19) also kill. E18 is X01's in-class boundary
+    /// partner, required by id although X06 and X07 also kill its mutant.
+    #[test]
+    fn every_parse_error_kind_is_represented() {
+        use crate::envelope_id_corpus::{GateHalf, ParseExpect, ParseExpectKind, ParseRole};
+        use std::collections::BTreeSet;
+
+        let corpus = parse_error_corpus();
+        let kinds: BTreeSet<ParseExpectKind> = corpus.iter().map(|f| f.expect.kind()).collect();
+        let required: BTreeSet<ParseExpectKind> = [
+            ParseExpectKind::RecoveredNum,
+            ParseExpectKind::RecoveredStr,
+            ParseExpectKind::IdLess,
+            ParseExpectKind::Silent,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            kinds, required,
+            "the corpus must exercise all four reply shapes"
+        );
+
+        let halves: BTreeSet<GateHalf> = corpus
+            .iter()
+            .filter_map(|f| match f.role {
+                ParseRole::GateWitness(half) => Some(half),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            halves,
+            [GateHalf::Utf8, GateHalf::Json].into_iter().collect(),
+            "the corpus must witness BOTH halves of the strict-JSON gate"
+        );
+
+        // The row-unique witnesses, required BY ID with their declared reply and role, so neither
+        // deleting nor reshaping one passes while every other cell stays green.
+        let witnesses: [(&str, ParseExpect, ParseRole); 8] = [
+            (
+                "X01",
+                ParseExpect::IdLess,
+                ParseRole::GateWitness(GateHalf::Json),
+            ),
+            (
+                "X03",
+                ParseExpect::IdLess,
+                ParseRole::GateWitness(GateHalf::Utf8),
+            ),
+            ("X10", ParseExpect::IdLess, ParseRole::ScanWitness),
+            ("E15", ParseExpect::RecoveredStr("a"), ParseRole::InClass),
+            ("E16", ParseExpect::RecoveredNum(54016), ParseRole::InClass),
+            ("E17", ParseExpect::RecoveredNum(54017), ParseRole::InClass),
+            ("E18", ParseExpect::RecoveredNum(54018), ParseRole::InClass),
+            ("E24", ParseExpect::RecoveredNum(54124), ParseRole::InClass),
+        ];
+        for (id, expect, role) in witnesses {
+            assert!(
+                corpus
+                    .iter()
+                    .any(|f| f.id == id && f.expect == expect && f.role == role),
+                "{id}: a row-unique witness must stay in the corpus with its declared reply and role"
+            );
+        }
+    }
+
     /// The verdict is stamped PER FRAME, in order, on one connection — a transport that reused or
     /// shared a verdict across frames would pass every single-frame cell and fail here.
     #[tokio::test]
