@@ -649,7 +649,9 @@ fn unknown_resource(uri: &str) -> StructuredError {
 #[cfg(test)]
 mod tests {
     use super::{ParamsScan, UnblockServer, frame_scan_gate, run_mcp_server_handler};
-    use crate::envelope_id_corpus::{divergence_corpus, expected_bytes};
+    use crate::envelope_id_corpus::{
+        ParseExpect, divergence_corpus, expected_bytes, parse_error_bytes, parse_error_corpus,
+    };
     use crate::options::Quotas;
     use rmcp::model::Extensions;
     use std::sync::Arc;
@@ -746,6 +748,63 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&written).contains(r#""id":90001"#),
             "non-vacuity: the reply really carries the recovered id"
+        );
+    }
+
+    /// **[v1.0.1/D54]** An in-class `-32700` line arriving as the FIRST frame is answered ON its id by
+    /// the scanner — below the D50 gate, which never sees it — and the handshake still completes.
+    ///
+    /// The frame is parse-error corpus entry E23, the shape `pre_handshake.rs` names: an `initialize`
+    /// whose scalar `params` fails every variant. A cell asserting the GATE did something with it
+    /// would be vacuous, so this one asserts only the written bytes.
+    ///
+    /// Mutants: the recovered arm answering `None`; D54 handling moved into the gate, where the frame
+    /// never arrives; the `Err` arm returning `None` instead of looping to the next line.
+    #[tokio::test]
+    async fn a_parse_error_frame_before_the_handshake_is_answered_on_its_id_and_the_handshake_survives()
+     {
+        let corpus = parse_error_corpus();
+        let entry = corpus.iter().find(|f| f.id == "E23").expect("E23 missing");
+        assert_eq!(
+            entry.expect,
+            ParseExpect::RecoveredNum(5),
+            "E23 must recover id 5"
+        );
+
+        let (mut client, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        client.write_all(&entry.frame).await.unwrap();
+        client.write_all(b"\n").await.unwrap();
+        client
+            .write_all(br#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"d54","version":"0"}}}"#)
+            .await
+            .unwrap();
+        client.write_all(b"\n").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let server = UnblockServer::new(session().await, Quotas::default(), None);
+        run_mcp_server_handler(
+            server,
+            server_read,
+            server_write,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("the server survives an in-class first frame");
+
+        let mut written = Vec::new();
+        client.read_to_end(&mut written).await.unwrap();
+        let text = String::from_utf8_lossy(&written).to_string();
+        let mut lines = text.split_inclusive('\n');
+        assert_eq!(
+            lines.next().map(str::as_bytes),
+            Some(parse_error_bytes(&entry.expect).as_slice()),
+            "the first reply must be the -32700 ON id 5: {text}"
+        );
+        let second = lines.next().expect("the handshake is answered");
+        assert!(
+            second.contains(r#""id":2"#) && second.contains(r#""result""#),
+            "the initialize is answered after the parse error: {second}"
         );
     }
 
