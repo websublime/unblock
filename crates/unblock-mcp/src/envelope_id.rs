@@ -1,6 +1,9 @@
 //! The D47 UN-DECODABLE-ENVELOPE-`id` predicate — a `serde::de::DeserializeSeed` over the ROOT
 //! object that recovers the envelope `id` from a frame's RAW BYTES.
 //!
+//! It is also the id source for D54's `-32700` reply ([`crate::wire`]), where it runs only on
+//! lines the strict-JSON gate accepted.
+//!
 //! # Why the bytes are the only place the information exists
 //!
 //! rmcp decodes a JSON-RPC frame through a serde UNTAGGED union tried Request-first (rmcp
@@ -40,8 +43,10 @@
 //! A reader will assume symmetry, so: this verdict gates a REPLY to a frame on which nothing
 //! executes either way, and over-firing would answer a genuine notification, violating JSON-RPC
 //! 2.0's "The Server MUST NOT reply to a Notification" in a way every conforming client sees. The
-//! arm is also unreachable in practice — [`scan`] only ever runs on bytes `serde_json::from_slice`
-//! has ALREADY accepted.
+//! arm is also unreachable in practice, because both callers run [`scan`] only on bytes `serde_json`
+//! has ALREADY accepted: D47's on a line the typed `from_slice` decoded, D54's on a line whose typed
+//! parse failed but whose `Value` parse succeeded (the strict-JSON gate). On D54's arm a seed failure
+//! would yield `Absent`, i.e. the id-less `-32700` rmcp writes anyway — still the fail-safe direction.
 
 use rmcp::model::RequestId;
 use serde::Deserialize;
@@ -54,7 +59,8 @@ pub(crate) enum EnvelopeId {
     /// No top-level `id` member (or a non-object root).
     ///
     /// **D47 OUT OF SCOPE.** This is a legitimate JSON-RPC Notification — "a Request object without
-    /// an id member" — and it MUST keep behaving exactly as it did before D47.
+    /// an id member" — and it MUST keep behaving exactly as it did before D47. On D54's `-32700`
+    /// arm, `Absent` means "no id to recover": the reply stays id-less, exactly as before D54.
     Absent,
     /// One or more `id` members, ALL mutually equal, whose common value `RequestId` accepts.
     ///
@@ -82,6 +88,9 @@ struct IdCollector {
 /// type table, so agreement with the real decoder is structural. It is that impl which rejects
 /// `null`/object/array/bool ("Expect number or string"), non-integers ("Expected an integer") and
 /// values outside `i64` ("Number too large for i64").
+///
+/// Two callers: D47's Notification arm and D54's `-32700` arm. D54's runs it only behind the
+/// strict-JSON gate, because this scan is NOT a JSON validator — see the `end()` note in the body.
 pub(crate) fn scan(line: &[u8]) -> EnvelopeId {
     // Strip exactly ONE prefix BOM, reusing the transport's constant. Scanner and parser must see
     // the same document; two copies of that constant is precisely how they drift apart.
@@ -99,10 +108,13 @@ pub(crate) fn scan(line: &[u8]) -> EnvelopeId {
     }
     .deserialize(&mut deserializer);
 
-    // `deserializer.end()` is deliberately NOT called. Trailing-character rejection is already
-    // guaranteed, because `scan` only ever runs on bytes `serde_json::from_slice` has ALREADY
-    // accepted; a second, differently-configured strictness oracle here could only introduce
-    // divergence. (`dup_key` needs `end()` because it runs BEFORE the parse; this runs after.)
+    // `deserializer.end()` is deliberately NOT called. Both callers guarantee the input was ALREADY
+    // accepted by `serde_json`: D47's runs on a line the typed `from_slice` decoded, D54's on a line
+    // its strict `Value` parse accepted (`wire::ParseFailure::NotAMessage`). That is also why this
+    // scan must never BE the strictness oracle: `IgnoredAny` checks no nesting depth (serde_json's
+    // `ignore_value` keeps its own stack), validates neither UTF-8 nor surrogate escapes inside the
+    // strings it skips, and range-checks no number, so on an unvalidated line it recovers ids from
+    // text that is not JSON. (`dup_key` needs `end()` because it runs BEFORE any parse.)
 
     if seeded.is_err() {
         return EnvelopeId::Absent;

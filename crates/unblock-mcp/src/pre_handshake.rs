@@ -19,7 +19,10 @@
 //! A premature REQUEST is answered `-32600 Invalid Request` carrying THAT FRAME'S OWN id and is then
 //! DROPPED, never handed to rmcp. A premature NOTIFICATION, RESPONSE or ERROR frame is DROPPED with
 //! no reply, because JSON-RPC 2.0 §4.1 forbids replying to a Notification and a reply to a reply is
-//! meaningless.
+//! meaningless. A line rmcp cannot TYPE never reaches this gate: the transport answers it below the
+//! gate (a response-shaped one with a readable id gets `-32700` on that id, PRD D54 (10)(ii)), or,
+//! if the compatibility filter drops it (a last-wins `method` that is a non-standard
+//! `notifications/*`), drops it silently (PRD D54 (7)).
 //!
 //! Answering the Request shape is forced by a property of rmcp's client. Today the client's only
 //! signal is the child's death, which a stdio peer reads as EOF. A surviving server that dropped
@@ -691,7 +694,8 @@ mod tests {
     /// one, and under such a gate the `assert_is_initialize` call below goes red.
     ///
     /// The `params` must be an OBJECT to reach `CustomRequest` at all. A scalar `params` fails every
-    /// variant, so [`crate::wire`] answers it `-32700` and the frame never reaches this gate.
+    /// variant, so [`crate::wire`] answers it `-32700` — on its recovered id since D54 — and the
+    /// frame never reaches this gate.
     #[tokio::test]
     async fn a_method_initialize_frame_with_untypeable_params_is_answered_and_dropped() {
         let untypeable = r#"{"jsonrpc":"2.0","id":5,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#;

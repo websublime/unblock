@@ -372,11 +372,10 @@ fn ns1_a_duplicated_params_name_is_out_of_band_and_non_executing() {
 ///
 /// The `-32700` is METHOD-DEPENDENT and this cell pins the `tools/call` half only: the same
 /// duplication on `ping` — a request with no `params` at all — is a plain SUCCESS (PRD section 4
-/// D47, spine section 5.6). The reply also OMITS the id, which is what the assertion below checks
-/// and what leaves an rmcp client pending — a residual D47 discloses and deliberately leaves open
-/// (tracked as `ub-788`).
+/// D47, spine section 5.6). The reply carries the id: the line is strict JSON with a readable root
+/// `id`, so the `-32700` is answered ON id 9001, the id an rmcp client correlates on (D54, closing `ub-788`).
 #[test]
-fn ns2_a_duplicated_params_key_is_a_parse_error_and_recovers() {
+fn ns2_a_duplicated_params_key_is_a_parse_error_on_its_id_and_recovers() {
     let ws = Workspace::init();
     let mut c = client(&ws);
     let target = create_issue(&mut c, "ns2 target");
@@ -399,13 +398,16 @@ fn ns2_a_duplicated_params_key_is_a_parse_error_and_recovers() {
         resp["result"]["isError"], true,
         "the connection must recover after a -32700: {resp}"
     );
-    let saw_parse_error = c
-        .seen_lines
-        .iter()
-        .any(|line| line.contains("-32700") && !line.contains("\"id\":9001"));
+    // Sentinel follow, timeout-free: the server answered the bad line before it read the sentinel.
     assert!(
-        saw_parse_error,
-        "a -32700 with the id OMITTED must have been emitted; lines: {:?}",
+        c.saw_response_for(9001),
+        "a -32700 ON id 9001 must have been emitted (D54); lines: {:?}",
+        c.seen_lines
+    );
+    assert!(
+        c.seen_lines.iter().any(|line| line
+            == r#"{"jsonrpc":"2.0","id":9001,"error":{"code":-32700,"message":"Parse error"}}"#),
+        "the reply must be rmcp's -32700 with exactly id 9001 inserted; lines: {:?}",
         c.seen_lines
     );
 }
