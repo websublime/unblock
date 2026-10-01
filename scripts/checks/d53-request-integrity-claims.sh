@@ -61,16 +61,16 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; e
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
 # The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
-# the day a D54 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# the day a D55 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
 # goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves, the
-# prose range `(D1..D53)` and the tokenizer's regex ALTERNATION `\bD(53|52|51|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D54 finding — the lint would stop tokenizing
+# prose range `(D1..D54)` and the tokenizer's regex ALTERNATION `\bD(54|53|52|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D55 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D53'
-RANGE_ALT_RE='D\(53\|52\|'
+RANGE_RE='D1\.\.D54'
+RANGE_ALT_RE='D\(54\|53\|'
 
 # The LIVE published contract version. D53 does NOT move it, and neither does the D47 amendment, so
 # this row is the affirmative record of that. It tracks the LIVE id, so a later decision's bump moves
@@ -119,8 +119,9 @@ P4@.unblock/issues.jsonl@\"id\":\"ub-5v5\"@residual the D47 clause 8(v) amendmen
 #      corrected D47 and D50 bullets.
 # Q47..Q49 are the SIBLING ROW TEXT this change corrects: `d47`'s P15 and `d50`'s P2 said the reply
 #      loss was open, and `d50`'s Q19 named the removed helper.
-# Q50..Q54 are this gate's wiring: SPECIFIED, RUNNING, LISTED in PROCESS.md §3, NAMED as the newest
-#      reference in PROCESS.md §3 and in ci-cd §2.1(a).
+# Q50..Q54 are this gate's wiring: SPECIFIED, RUNNING, LISTED in PROCESS.md §3, and in ci-cd §2.1(a);
+#      Q53 pins PROCESS.md §3's newest-reference sentence naming its SUCCESSOR, the gate that pins this
+#      script's knobs (retargeted when D54 took the pointer).
 # =================================================================================================
 REQUIRE_ROW="
 Q1@crates/unblock-mcp/src/wire.rs@^ +parked_reply: Option<@parked_reply: Option<tokio::task::JoinHandle<std::io::Result<\(\)>>>,@[D47 8(v) amendment] the transport still PARKS the out-of-band reply's task handle, so a dropped receive() cannot take the reply along
@@ -175,8 +176,8 @@ Q49@scripts/checks/d50-pre-handshake-gate-claims.sh@^Q19@the contract the scanne
 Q50@docs/plans/ci-cd-and-distribution.md@Named sub-check \(its D53 sibling@d53-request-integrity-claims@this gate is SPECIFIED in its own paragraph — §2.1(a) of that same file also carries this filename, so a bare token stays green with the paragraph deleted
 Q51@.github/workflows/ci.yml@d53-request-integrity-claims@:[0-9]+: +- run: scripts/checks/d53-request-integrity-claims\.sh@this gate actually RUNS in the required doc-lint job; every line naming it must BE the run step, so a commented-out step fails
 Q52@docs/PROCESS.md@d53-request-integrity-claims\.sh. .RANGE_RE@RANGE_ALT_RE@the count-free LIST that IS the rule carries this script's own entry with BOTH knob names
-Q53@docs/PROCESS.md@always the NEWEST script@d53-request-integrity-claims\.sh@PROCESS.md §3 names THIS script as the newest reference, which it is — the previous reference cannot pin its own knobs
-Q54@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@since the D53 implementation commit, .scripts/checks/d53-request-integrity-claims\.sh.@ci-cd §2.1(a)'s enumeration carries this script's knobs as the newest entry
+Q53@docs/PROCESS.md@always the NEWEST script@d54-parse-error-id-claims\.sh@PROCESS.md §3 names D54's gate as the newest reference — the script that pins THIS one's knobs, which this script cannot pin itself (retargeted when D54 took the pointer; the next mint retargets it again)
+Q54@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@since the D53 implementation commit, .scripts/checks/d53-request-integrity-claims\.sh.@ci-cd §2.1(a)'s enumeration carries this script's knobs
 "
 
 blocked=0

@@ -252,8 +252,8 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   it would mean delivering the frame after answering it — the one shape measured, before D50's gate, to kill the
   server when it lands in the `initialize` slot — so the effect is traded for removing that fatality. A conforming cancellation, which
   carries no `id` member at all, is outside this class and is unaffected. **What it does NOT close, named rather than
-  implied, each with its own tracked issue:** a duplicated `jsonrpc`/`method` still answers `-32700` with the id
-  OMITTED, so an rmcp client stays pending (scoped out by Miguel; tracked as `ub-788`); an **id-less** notification
+  implied, each with its own tracked issue:** a duplicated `jsonrpc`/`method` answered `-32700` with the id OMITTED,
+  so an rmcp client stayed pending (scoped out by Miguel; `ub-788`, CLOSED by D54 below); an **id-less** notification
   before `initialize` killed the server, which D47's class excludes by decision — and `ub-kp7`, which tracks it, was
   scoped to the WHOLE class rather than to that one spelling, because **any first frame that is neither `initialize`
   NOR `ping` killed the server, Request or Notification alike**, and **D50 below CLOSES that class** by gating all
@@ -369,8 +369,8 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   to exit 0 and is RENAMED, and the D38 witness `a_no_signal_run_loop_error_exits_1_and_never_hangs` is REPOINTED at
   a broken pipe on the pre-handshake `ping` reply, keeping its exit-1 and stderr-payload halves and losing its
   frame-free-stdout half by construction. **What it does NOT close is named here rather than implied.** The gate's own
-  reply and read path inherit open residuals of their own — the `-32700` arm still omits a readable id so a
-  duplicated `method` or `jsonrpc` still leaves a client pending (`ub-788`), and the stdio read still carries no
+  reply and read path inherit an open residual of their own — the `-32700` arm's id omission (`ub-788`, CLOSED by D54
+  below) aside, the stdio read still carries no
   maximum accepted line length, so an oversized premature frame is read and scanned before the gate drops it
   (`ub-o8s`). The gate's own `-32600` is still written inside its `receive()`, and that is not among them: before
   the handshake only the signal path can drop that future, and it discards the whole transport, while the traffic
@@ -402,11 +402,29 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   buffer, or one written in more than one client write, was exposed whenever a response landed during the read:
   a 20 KB request with eight pings in flight, or a request split across two writes with eight creates in flight,
   was lost in most runs. **D53 clears the buffer only after a complete line**, and an
-  unterminated final line at EOF is still processed as before. rmcp's own transport keeps the loss; ours now
-  diverges from it only under cancellation, so the differential harness, which never cancels, stays
-  byte-identical with its corpus unmodified. **`unblock-mcp` (L7) is the only crate that gains code.** It mints no
+  unterminated final line at EOF is still processed as before. rmcp's own transport keeps the loss; D53's
+  change diverges from it only under cancellation, so the differential harness, which never cancels, saw
+  no byte of it and kept its corpus unmodified. **`unblock-mcp` (L7) is the only crate that gains code.** It mints no
   `ErrorCode`, moves no published byte, and carries **no `contract_version` bump and no `CONTRACT_HASH` re-pin** —
   `unblock.mcp.v1.10` stands. **What it does NOT close:** the stdio read still accepts a line of any length
+  (`ub-o8s`).
+- **A parse error on a READABLE id was answered with no id, so the caller waited forever** (P1, `ub-788`, PRD §4 **D54**).
+  This is the residual D47 named and Miguel scoped out of it, closed in the same cut; it mints its own D-id because
+  it is a separate decision to depart from the `-32700` reply rmcp writes. A line that fails rmcp's typed parse (a
+  duplicated `method` or `jsonrpc`, a wrong or missing `jsonrpc`, a missing or numeric `method`, a scalar `params` on
+  `tools/call`, a duplicated `params`) was answered `-32700` with the id OMITTED even when the id was perfectly
+  readable, and rmcp's own client discards an id-less error while awaiting untimed. **D54 answers `-32700` ON the
+  recovered id** when the line is strict JSON (UTF-8, and accepted by the same `serde_json::Value` parse rmcp's
+  compatibility filter runs) and the id is readable: one valid id, or several equal ones. A line the compatibility
+  filter drops (its last-wins `method` is a non-standard `notifications/*`) still gets no reply at all, as in rmcp.
+  Every other line keeps the id-less reply, byte-identical to rmcp. The code stays `-32700`, and the only byte that
+  differs from rmcp is the `id` member. **`unblock-mcp` (L7) is the only crate that gains code.** It mints no
+  `ErrorCode`, moves no published byte, and carries **no `contract_version` bump and no `CONTRACT_HASH` re-pin**:
+  `unblock.mcp.v1.10` stands. **What it does NOT close:** a line whose id cannot be read (not strict JSON, a
+  wrong-typed id, two differing ids, or no id) still gets an id-less reply that an rmcp client drops, and no spelling
+  can do better. A line the compatibility filter drops gets no reply even when its id is readable, so a client that
+  put an id on it waits (PRD D54 (10)(iii)). A response-shaped client line that carries a readable id is answered on
+  that id too, which only a non-conforming peer can cause. The stdio read still accepts a line of any length
   (`ub-o8s`).
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
