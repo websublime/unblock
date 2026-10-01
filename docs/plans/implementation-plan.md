@@ -490,6 +490,29 @@
   `cargo xtask check-layering`, `cargo xtask knowledge-lint` and every `scripts/checks/*.sh`, on EVERY
   commit of the branch. Both gates >=3 agents; Claude opens the PR, a human merges.)*
 
+- **T3.16 — the MCP transport answers a parse error on its readable id. Implements D54 (v1.0.1,
+  additive/non-semver).** *(Next free top-level M3 id — a peer of T3.15, not a sub-task.)* The design is normative in the **D54 PRD
+  §4 row**, the `[D54]` notes on the D43, D47, D50 and D53 rows, NFR-18, spine §5.6 and `unblock-mcp.md` (the D43
+  framing bullet, the `src/wire.rs` row and the test list) — **read those before implementing; this bullet is a
+  checklist of touched sites and never the spec.** Tracked as `ub-788`. Depends on **T3.15** (the parked reply path
+  this reply rides). Branch `ub788-parse-error-recovered-id`; the SPEC commit first (this task, the D-range bump,
+  ci-cd §2.1 and `docs/PROCESS.md` §3 included), then the implementation commit (code, doc comments, the corpus, the
+  re-homed and deleted cells, and the `d47`/`d50` reason strings that name `ub-788`), then the test commit, then a
+  `ci(d54)` commit that mints `scripts/checks/d54-parse-error-id-claims.sh` executable and wires it. Scope: (1)
+  `wire.rs` `ParseFailure`, `parse_error_reply_id`, the `Err` arm; (2) `envelope_id.rs` docs restated for the second
+  caller; (3) `envelope_id_corpus.rs` `parse_error_corpus()` and `parse_error_bytes()`; (4) CD-7: F20 and NS2 to the
+  `IdInserted` tier, W-R1 deleted; (5) the `server.rs` pre-handshake cell; (6) the new
+  `tests/parse_error_id_duplex.rs`; (7) the `unblock-cli` NS2 cell correlating on id 9001. *(AC: (1) ID FORM per D54
+  clause (4) on every corpus entry; (2) BYTE IDENTITY per clause (6), rmcp's own reply asserted id-less; (3)
+  STRICTNESS — the X-tier corpus entries, each a readable id in a line that is not strict JSON, get no id; (4)
+  PRE-HANDSHAKE — the id on the reply and the handshake completes; (5) a REAL rmcp client is released; (6) CONTRACT
+  AND EXIT TABLE UNMOVED; (7) GATE — the script is executable, wired, carries the live range, pins every older
+  sibling's knobs with `d53`'s two included and none of its own, and every row asserting a NEW landing FAILS on
+  the PRE-FIX TREE, `main` at `835d30c` (only P1, Q7 and Q25 pass, by design); (8) PROBE — `cargo fmt --check`, clippy pedantic,
+  `cargo test --workspace`, `cargo insta test --check`, `cargo xtask doc-lint`, `cargo xtask check-layering`,
+  `cargo xtask knowledge-lint` and every `scripts/checks/*.sh`, on EVERY commit of the branch. Both gates >=3
+  agents; Claude opens the PR, a human merges.)*
+
 ## 6. MCP surface — concrete v1 taxonomy (closes PRD §12.2)
 
 Consolidated to keep the client tool list small (target **≤ 8 tools**); read-heavy state is exposed as resources.
