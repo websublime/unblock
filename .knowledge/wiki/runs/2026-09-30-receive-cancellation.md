@@ -4,7 +4,7 @@ description: Making the MCP transport survive rmcp cancelling its receive() futu
 type: run
 date: 2026-09-30
 branch: ub-nbz-receive-cancellation
-pr: '-'
+pr: '451'
 issues: [ub-nbz, ub-zja, ub-0il]
 ---
 
@@ -33,8 +33,8 @@ introduced a defect a follow-up lens caught, and each time Miguel authorised the
 close the remaining items directly rather than run another round. The issue comments record both
 closures as such.
 
-The branch is `ub-nbz-receive-cancellation`, seven commits on `main` 3dcbf03. No pull request is
-open at the time of writing.
+The branch is `ub-nbz-receive-cancellation`, seven work commits on `main` 3dcbf03 plus the Track
+commits. Pull request 451 carries it.
 
 ## What & why
 
@@ -196,7 +196,7 @@ failed 20 of 20; on the branch the serve-loop cells passed 50 of 50.
   was dropped mid-line.
 - `ub-0il` — claims-script code rows can be satisfied by a `/* */` block or `#[cfg(test)]` text.
 - `ub-5v5` — rmcp's own send tasks aborted at drain timeout, untouched here.
-- Pull request — none open at the time of writing.
+- Pull request — 451 (`websublime/unblock`), opened 2026-10-01; merging is the human gate.
 - Key files touched —
   `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-mcp/src/wire.rs`,
   `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-mcp/tests/receive_cancellation.rs`,
