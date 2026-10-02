@@ -211,7 +211,7 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
   <5ms / 10k <50ms; export 10k <500ms; import 10k <1s — the **relative-10% regression delta** compares against
   this baseline in an **advisory/nightly** posture (`workflow_dispatch`/`#[ignore]`, report-only, never fails a
   PR); **(ii) hard per-PR gate** = a **generous absolute-ms ceiling** (a generous multiple of the baseline —
-  T3.5.1-CALIBRATED reads: create ≤15ms; list 1k ≤50ms / 10k ≤500ms; ready 1k ≤50ms / 10k ≤500ms; export 10k ≤2500ms;
+  T3.5.1-CALIBRATED reads: create ≤5ms; list 1k ≤50ms / 10k ≤500ms; ready 1k ≤50ms / 10k ≤500ms; export 10k ≤2500ms;
   import 10k ≤5000ms; count/search have no hard ceiling in v1) asserted on a **pinned ≥2-vCPU runner**, calibrated +
   confirmed against the first real libsql `criterion` run at T3.5 Implement (the "(Re-baseline on libsql)" step, now
   folded into the gate). **The read (list/ready) ceilings were widened at T3.5-P1 (to list/ready ≤100/≤1000) because
@@ -229,7 +229,10 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
   real hot-spin gave R≈28 on 14 cores but R≈4.42 on a 4-vCPU runner: a generous absolute budget is MORE portable than
   a tight relative delta). The create budget applies to the **storage insert path**
   (`Storage::create`/`create_issues`); the engine-mint `Session::create_issue` recomputes `issue_count()` per create
-  (O(N) at scale — a known v1.5 cached-count limit, not an NFR-1 miss).
+  (O(N) at scale — a known v1.5 cached-count limit, not an NFR-1 miss). **The create ceiling was re-derived from ≤15ms
+  to ≤5ms (`ub-lp9.28`)** once the create, mint and claim benches stopped timing their per-iteration teardown: by value,
+  the store and tempdir drop (~2-3ms) were most of each sample, so a ceiling on that number guarded the filesystem
+  rather than the operation and tripped on runner I/O noise.
 - **NFR-2 [performance]** Swarm scale **under the child-per-client topology (D14 as amended by D31)** —
   multiple `unblock mcp` servers per workspace is the SUPPORTED case, cross-process writes serialized by the
   `.unblock/.write.lock` advisory lock (D31); cross-machine/multi-dev sharing is **v1.3 (PROPOSED) remote mode** (D51) —
