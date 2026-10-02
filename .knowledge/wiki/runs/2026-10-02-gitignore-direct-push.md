@@ -4,7 +4,7 @@ description: Recording the direct push of 87f713e (.gitignore) to main before th
 type: run
 date: 2026-10-02
 branch: gitignore-direct-push-record
-pr: -
+pr: '457'
 issues: [ub-kpu]
 ---
 
@@ -59,7 +59,7 @@ No session-local ids were used in this run.
 ## Links
 
 - `ub-kpu` — the direct push of 87f713e that bypassed the pull-request rule and the run-report gate.
-- Pull request — none yet, opened from this branch; merging is the human gate.
+- Pull request — 457 (`websublime/unblock`), opened 2026-10-02; merging is the human gate.
 - Key files touched — `/Users/ramosmig/Public/WS-Labs/unblock/.gitignore` (by 87f713e, already
   on `main`).
 - Prior related run-report — `runs/2026-10-02-update-acceptance-run.md`, the release this push
