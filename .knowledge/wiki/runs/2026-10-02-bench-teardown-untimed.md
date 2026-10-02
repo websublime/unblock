@@ -4,7 +4,7 @@ description: Taking per-iteration teardown out of the timed region of the create
 type: run
 date: 2026-10-02
 branch: ub-lp9.28-bench-teardown
-pr: -
+pr: '458'
 issues: [ub-lp9.28]
 ---
 
@@ -73,7 +73,7 @@ No session-local ids were used in this run.
 ## Links
 
 - `ub-lp9.28` — the create benches measured teardown, not the operation.
-- Pull request — none yet, opened from this branch; merging is the human gate.
+- Pull request — 458 (`websublime/unblock`), opened 2026-10-02, stacked on 457; merging is the human gate.
 - Key files touched —
   `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-storage/benches/storage.rs`,
   `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-engine/benches/engine.rs`,
