@@ -1067,6 +1067,23 @@ automates that step behind a strict, human-operated safety model.
 - `AXOUPDATER_GITHUB_TOKEN` is a **client-runtime** env read by axoupdater on the user's machine (feeds
   `set_github_token` to avoid GitHub API rate limits) — it is NOT a release-workflow secret; the dist-generated
   `release.yml` publishes with the standard `${{ secrets.GITHUB_TOKEN }}`.
+- **Live end-to-end smoke — where it lives (`ub-lp9.26`).** Hermetic tests cannot reach the real path, because it
+  needs two **published** releases. `crates/unblock-cli/tests/update_verify.rs` pins only the client-side
+  no-swap half. The live smoke is the manual **`workflow_dispatch`** workflow
+  `.github/workflows/update-smoke.yml`, and the runbook step "After every published release" in `RELEASING.md`
+  fires it once per stable release. The workflow has no `pull_request`/`push` trigger, so it never runs on the
+  per-PR gate. It is not Rust code, so the `no-network` scan is untouched (D13). Its steps live in
+  `scripts/release/update-smoke.sh` (shell installer) and `scripts/release/update-smoke.ps1` (powershell
+  installer), so a human can run the same thing by hand. Each leg installs N with the **real** dist installer
+  (a genuine `unblock-cli-receipt.json`). Then `unblock update --dry-run` must report N+1 with the binary
+  byte-identical, `unblock update` swaps, and the swapped binary must report N+1 and serve `version`,
+  `migrate` and `doctor` on N's workspace. N+1 must be the latest **stable** release, since the updater
+  always targets latest. **Covered:** all five shipped triples, each on a native runner. **Uncovered,
+  knowingly:** Windows ARM64 hosts, which have no triple of their own and run the x86_64 build under
+  emulation (D36). **Non-goals:** it does not re-test dist's own SHA256 code (dist's suite covers it) and
+  does not move attestations onto the update path. **Runs so far:** a hand rehearsal on 2026-10-02,
+  `v1.0.0-rc.6 → v1.0.0` on `aarch64-apple-darwin`, passed. The acceptance run, `v1.0.0 → v1.0.1` on every
+  leg, happens at the v1.0.1 cut.
 
 ## 5. Mapping to PRD NFRs
 

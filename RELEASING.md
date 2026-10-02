@@ -132,9 +132,50 @@ To cut GA once the release PR is merged and `main` is clean and synced:
    `dist-manifest.json`, and the attestations. The `releases/latest/download/` installer links in the
    README resolve once this release is published.
 
-## 5. Reference
+## 5. After every published release: the live `unblock update` smoke
+
+The self-update path (`unblock update`: axoupdater → dist installer → SHA256 check → swap) needs two
+**real published** releases, so no hermetic test can exercise it end to end
+(`crates/unblock-cli/tests/update_verify.rs` covers only the client-side no-swap half). Run this smoke
+**once the new stable release is published**. The spec is
+[`docs/plans/ci-cd-and-distribution.md`](docs/plans/ci-cd-and-distribution.md) §4.
+
+1. Make sure the new release `vN+1` is the repo's **latest stable** release. `unblock update` always
+   targets the latest stable release, so the smoke cannot target an older one.
+2. Dispatch the smoke with `N` = the previous stable release:
+
+   ```sh
+   gh workflow run update-smoke.yml -f from_tag=vN -f to_tag=vN+1
+   ```
+
+   One leg per shipped triple, each on a native runner: `aarch64-apple-darwin` (`macos-15`),
+   `x86_64-apple-darwin` (`macos-15-intel`), `x86_64-unknown-linux-gnu` (`ubuntu-24.04`),
+   `aarch64-unknown-linux-gnu` (`ubuntu-24.04-arm`), `x86_64-pc-windows-msvc` (`windows-2025`,
+   powershell installer). **Not covered:** Windows ARM64 hosts. They have no triple of their own
+   (D36) and run the x86_64 build under emulation.
+3. Every leg must be green. The workflow run **is the evidence**: link it from the release's
+   run-report. A red leg means the release's self-update promise is broken on that platform. Treat it
+   as a release defect.
+4. To reproduce one leg by hand (the scripts are the same ones the workflow runs, and everything
+   stays in a temp dir, so PATH, shell rc files and any real install are left alone):
+
+   ```sh
+   scripts/release/update-smoke.sh vN vN+1                          # macOS / Linux
+   pwsh -File scripts/release/update-smoke.ps1 -FromTag vN -ToTag vN+1   # Windows
+   ```
+
+Each leg installs `vN` with the **real** dist installer, so a genuine `unblock-cli-receipt.json` is
+written. It then checks that `unblock update --dry-run` reports `vN+1` and leaves the binary
+byte-identical. Next, `unblock update` swaps in the new binary. Finally the leg checks that the swapped
+binary reports `vN+1` and still runs `version`, `migrate` and `doctor` on a workspace created by `vN`.
+**Non-goals:** the smoke does not re-test dist's own SHA256 code (dist's suite covers that). It does
+not put attestation checks on the update path either: attestations remain publish-side provenance,
+checked out-of-band with `gh attestation verify` (NFR-17).
+
+## 6. Reference
 
 - Release / distribution pipeline (authoritative): [`docs/plans/ci-cd-and-distribution.md`](docs/plans/ci-cd-and-distribution.md) §3
 - Self-update via axoupdater: [`docs/plans/ci-cd-and-distribution.md`](docs/plans/ci-cd-and-distribution.md) §4
+- Live self-update smoke: [`.github/workflows/update-smoke.yml`](.github/workflows/update-smoke.yml), [`scripts/release/`](scripts/release/)
 - The helper source: [`xtask/src/release.rs`](xtask/src/release.rs)
 - dist config: [`dist-workspace.toml`](dist-workspace.toml)

@@ -29,8 +29,10 @@
 //! abort → exit 1 → no swap. It does **NOT** re-test the dist installer's own SHA256 verification — that
 //! is dist's code, covered by dist's own suite, plus `gh attestation verify` out-of-band on real signed
 //! releases (publish-side provenance, NOT on the auto-update path, NFR-17). The real dist installer needs
-//! real signed artifacts that exist only post-release, so it is not runnable hermetically pre-cut; the
-//! live download+swap end-to-end is the human release runbook (a future v1.0.1 exercises it).
+//! real signed artifacts that exist only post-release, so it is not runnable hermetically. The live
+//! download+swap end-to-end is `.github/workflows/update-smoke.yml` (manual `workflow_dispatch`, one leg
+//! per shipped triple, driving `scripts/release/update-smoke.{sh,ps1}` against two real published
+//! releases), fired after every stable release per the `RELEASING.md` runbook (ci-cd §4, ub-lp9.26).
 //!
 //! ## Hermeticity
 //!
