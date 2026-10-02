@@ -155,7 +155,11 @@ The self-update path (`unblock update`: axoupdater → dist installer → SHA256
    (D36) and run the x86_64 build under emulation.
 3. Every leg must be green. The workflow run **is the evidence**: link it from the release's
    run-report. A red leg means the release's self-update promise is broken on that platform. Treat it
-   as a release defect.
+   as a release defect. **One exception:** a leg that fails at `update --dry-run` with
+   `403 rate limit exceeded` hit GitHub's per-IP limit for anonymous requests, which shared macOS
+   runners exhaust. That is not a defect. It happens when `vN` predates the `AXOUPDATER_GITHUB_TOKEN`
+   read (v1.0.0 and v1.0.1 ignore the variable; `ub-jh5`). Re-run that leg by hand (step 4) and record
+   both results.
 4. To reproduce one leg by hand (the scripts are the same ones the workflow runs, and everything
    stays in a temp dir, so PATH, shell rc files and any real install are left alone):
 

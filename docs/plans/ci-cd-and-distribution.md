@@ -1086,8 +1086,12 @@ automates that step behind a strict, human-operated safety model.
   knowingly:** Windows ARM64 hosts, which have no triple of their own and run the x86_64 build under
   emulation (D36). **Non-goals:** it does not re-test dist's own SHA256 code (dist's suite covers it) and
   does not move attestations onto the update path. **Runs so far:** a hand rehearsal on 2026-10-02,
-  `v1.0.0-rc.6 → v1.0.0` on `aarch64-apple-darwin`, passed. The acceptance run, `v1.0.0 → v1.0.1` on every
-  leg, happens at the v1.0.1 cut.
+  `v1.0.0-rc.6 → v1.0.0` on `aarch64-apple-darwin`, passed. The acceptance run, `v1.0.0 → v1.0.1` on
+  2026-10-02 (workflow run 37020158075), passed on every triple. Four legs passed in CI. The
+  `aarch64-apple-darwin` leg hit GitHub's anonymous per-IP rate limit (`403`) twice on the shared
+  `macos-15` runner, then passed by hand with the same script. That 403 exposed `ub-jh5`: v1.0.0 and v1.0.1
+  never send `AXOUPDATER_GITHUB_TOKEN`; the fix lands after v1.0.1. The run also exercised the D46 ladder
+  on a GA-created database (`migrate`: schema 1 → 2, applied).
 
 ## 5. Mapping to PRD NFRs
 

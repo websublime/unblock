@@ -431,8 +431,10 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   published release. The smoke is now the manual `workflow_dispatch` workflow `.github/workflows/update-smoke.yml`
   (spec: ci-cd §4; runbook: `RELEASING.md`). It covers all five shipped triples on native runners. Windows ARM64
   hosts stay knowingly uncovered: they run the x86_64 build under emulation (D36). A hand rehearsal,
-  `v1.0.0-rc.6 → v1.0.0` on `aarch64-apple-darwin`, passed on 2026-10-02. **This item closes only on the
-  acceptance run at this cut, `v1.0.0 → v1.0.1` on every leg.**
+  `v1.0.0-rc.6 → v1.0.0` on `aarch64-apple-darwin`, passed on 2026-10-02. **The acceptance run at this cut,
+  `v1.0.0 → v1.0.1`, passed on every leg on 2026-10-02**: four in CI, and `aarch64-apple-darwin` by hand after
+  two anonymous rate-limit `403`s on the shared runner. Those 403s exposed `ub-jh5`, the never-sent
+  `AXOUPDATER_GITHUB_TOKEN`, fixed after this cut.
 
 This slot is a **maintenance patch, but it is not "maintenance only"** — that framing is retired. No FR is
 added or re-tiered, and the v1.2+ resequence below is untouched. But **D42 spans two layers**: **L7
