@@ -38,7 +38,7 @@ Re-exported from `lib.rs`:
 ### v1.5 (PROPOSED)
 - Archival/compaction methods (`compact`, `restore_snapshot`), batch/streaming read variants, perf-tuned indexes. Additive; `contract_version` bump handled at L7.
 
-> Stability rule: every change v1.1→v1.5 is **additive** to the trait (default-method or new method) so engine/MCP `contract_version` bumps stay non-breaking (spine §6 rule 6).
+> Stability rule: from GA on, for as long as the major version stays 1 (PRD §4 D35), every change to the trait is **additive** (default-method or new method), so engine/MCP `contract_version` bumps stay non-breaking. A schema migration is not a trait change: it is a step on the forward `user_version` ladder (the `src/libsql/migrations.rs` row, D46) and leaves `Storage::migrate`/`Storage::schema_version` as shipped.
 
 ---
 
