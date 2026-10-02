@@ -26,6 +26,8 @@ target/
 # Claude Code harness — isolated agent worktrees (transient checkouts, never committed).
 # Scoped to the worktrees dir only: the tracked .claude/agents/ and .claude/settings.json stay versioned.
 /.claude/worktrees/
+# Per-machine Claude Code permission overrides — personal, never committed (the shared .claude/settings.json is).
+/.claude/settings.local.json
 
 # Archived pre-rewrite reference material (not part of the workspace)
 temp
