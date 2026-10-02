@@ -4,7 +4,7 @@ description: Answering the -32700 parse error on the id recovered from a readabl
 type: run
 date: 2026-10-02
 branch: ub788-parse-error-recovered-id
-pr: '-'
+pr: '452'
 issues: [ub-788, ub-a3w, ub-f1k]
 ---
 
@@ -29,7 +29,7 @@ VerifyGates) and a coordinator, then a text-only fix pass and a delta check. Tra
 and the tracker re-export.
 
 The branch is `ub788-parse-error-recovered-id`, four work commits on `main` 835d30c plus the Track
-commit. No pull request is open at the time of writing.
+commits. Pull request 452 carries it.
 
 ## What & why
 
@@ -167,7 +167,7 @@ where on `main` it is still pending after 3 s.
 - `ub-a3w` — `envelope_id::scan` heap-allocates a `String` for every root key.
 - `ub-f1k` — the `unblock-mcp` duplex harness read has no deadline.
 - `ub-46o`, `ub-fh5` — existing issues that received comments from the Verify gate.
-- Pull request — pending.
+- Pull request — 452 (`websublime/unblock`), opened 2026-10-02; merging is the human gate.
 - Key files touched —
   `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-mcp/src/wire.rs`,
   `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-mcp/src/envelope_id_corpus.rs`,
