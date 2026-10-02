@@ -9,8 +9,11 @@
 //! checksum (from `dist-manifest.json`) before the binary is swapped (`self_replace`); a
 //! checksum-mismatched/tampered download surfaces as a `CliError::Update` (→ `InternalError`, exit 1).
 //! GitHub artifact attestations are publish-side provenance (`gh attestation verify`), NOT consulted on
-//! the update path (NFR-17). The Cargo feature name (`self-update`) deliberately differs from the
-//! command token (`unblock update`) — CF-K/G-18. `--no-default-features` drops both.
+//! the update path (NFR-17). A non-empty `AXOUPDATER_GITHUB_TOKEN` is passed to axoupdater's
+//! `set_github_token`, so the release query is authenticated (ci-cd §4). The axoupdater LIBRARY reads
+//! no token env of its own, so without this call every query is unauthenticated and rate-limited per IP.
+//! The Cargo feature name (`self-update`) deliberately differs from the command token (`unblock update`)
+//! — CF-K/G-18. `--no-default-features` drops both.
 
 use axoupdater::AxoUpdater;
 
@@ -22,6 +25,12 @@ use crate::output;
 /// the release App from the package, so the install receipt is `unblock-cli-receipt.json` and the
 /// release-source lookup keys off `unblock-cli` (ci-cd §3.1 "P2 corrective"; Miguel's GA branding ruling).
 const APP_NAME: &str = "unblock-cli";
+
+/// The client-runtime env carrying a GitHub token for the release query (ci-cd §4). It is read HERE,
+/// because axoupdater 0.10.0 reads no token env itself; the token reaches it only through
+/// `set_github_token`, which sends it as a bearer header on the GitHub API requests. The token is never
+/// rendered: axoupdater/reqwest errors name the URL and the status, never a request header.
+const GITHUB_TOKEN_ENV: &str = "AXOUPDATER_GITHUB_TOKEN";
 
 /// Run `unblock update`.
 ///
@@ -37,6 +46,9 @@ pub async fn run(args: &UpdateArgs) -> Result<Option<u8>, CliError> {
     // REFUSES: self-update is only defined for a dist-installed binary (honest scope, ci-cd §4 / NFR-17).
     let mut updater = AxoUpdater::new_for(APP_NAME);
     updater.load_receipt().map_err(|e| update_error(&e))?;
+    if let Some(token) = github_token(std::env::var(GITHUB_TOKEN_ENV).ok()) {
+        updater.set_github_token(&token);
+    }
 
     if args.dry_run {
         // query_new_version() fetches + caches the latest release and returns its version;
@@ -81,9 +93,16 @@ fn update_error(err: &axoupdater::AxoupdateError) -> CliError {
     }
 }
 
+/// The token to authenticate the release query with, from the raw `AXOUPDATER_GITHUB_TOKEN` value.
+/// Unset, empty or whitespace-only means NO token: an empty bearer header would turn GitHub's
+/// unauthenticated answer into a 401 for everyone who exports the variable blank.
+fn github_token(raw: Option<String>) -> Option<String> {
+    raw.filter(|token| !token.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::update_error;
+    use super::{github_token, update_error};
     use crate::exit::CliError;
     use unblock_error::ErrorCode;
 
@@ -95,5 +114,16 @@ mod tests {
         assert!(matches!(cli, CliError::Update { .. }));
         assert_eq!(cli.code(), ErrorCode::InternalError);
         assert_eq!(cli.code().exit_code(), 1);
+    }
+
+    #[test]
+    fn a_blank_token_env_means_no_token() {
+        assert_eq!(github_token(None), None);
+        assert_eq!(github_token(Some(String::new())), None);
+        assert_eq!(github_token(Some("  \t".to_owned())), None);
+        assert_eq!(
+            github_token(Some("ghp_x".to_owned())),
+            Some("ghp_x".to_owned())
+        );
     }
 }

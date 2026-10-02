@@ -5,7 +5,7 @@
 //!
 //! `unblock update` calls `AxoUpdater::new_for("unblock-cli")` then `load_receipt()` (G1). The receipt
 //! (`unblock-cli-receipt.json`, App-name = the `unblock-cli` package, ci-cd §3.1) supplies THIS binary's
-//! release source + installed version. Two invariants are pinned here:
+//! release source + installed version. These invariants are pinned here:
 //!
 //! 1. **Refusal / no-swap (any platform).** A copy with NO install receipt (`cargo install` / raw
 //!    download) is not eligible: `load_receipt()` → `NoReceipt` → the command REFUSES **before any
@@ -21,6 +21,11 @@
 //!    (proving install-execution was REACHED, not the earlier `NoReceipt` refusal), then exits non-zero.
 //!    axoupdater surfaces that non-zero abort as `InstallFailed` → `CliError::Update` (exit 1) and the
 //!    on-disk `unblock` binary stays byte-identical (no swap).
+//!
+//! 3. **Authenticated release query (`#[cfg(unix)]`, ub-jh5).** A non-empty `AXOUPDATER_GITHUB_TOKEN`
+//!    reaches the release query as a bearer header (a mock that refuses everything else lets the
+//!    dry-run through only with it). An unset or blank variable sends none, and a refused query never
+//!    renders the token.
 //!
 //! ## The BOUNDARY (OQ-1 — read before trusting the assertion)
 //!
@@ -446,4 +451,119 @@ async fn update_dry_run_reports_available_when_receipt_is_behind_latest() {
         !stderr.contains("already up to date"),
         "dry-run behind the latest must NOT report 'already up to date'; got: {stderr}"
     );
+}
+
+/// Stand up a mock GHE release source that answers the latest-release query ONLY when it carries
+/// `Authorization: Bearer <token>` (the header axoupdater 0.10.0 sends once `set_github_token` is called,
+/// `release/github.rs` `bearer_auth`). Every other request gets the 403 GitHub returns to an
+/// unauthenticated client over its per-IP limit, which is exactly how the live smoke failed (ub-jh5).
+#[cfg(unix)]
+async fn token_gated_release_server(token: &str) -> MockServer {
+    let server = MockServer::start().await;
+    let download_url = format!("{}/download/{APP_NAME}-installer.sh", server.uri());
+    let release_body = serde_json::json!({
+        "tag_name": "v1.0.0",
+        "name": "1.0.0",
+        "url": format!("{}/releases/v1.0.0", server.uri()),
+        "assets": [{
+            "url": download_url,
+            "browser_download_url": download_url,
+            "name": format!("{APP_NAME}-installer.sh"),
+        }],
+        "prerelease": false,
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/websublime/unblock/releases/latest"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            format!("Bearer {token}").as_str(),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(release_body))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(serde_json::json!({ "message": "API rate limit exceeded" })),
+        )
+        .with_priority(10)
+        .mount(&server)
+        .await;
+    server
+}
+
+/// `AXOUPDATER_GITHUB_TOKEN` authenticates the release query (ub-jh5). The axoupdater library reads no
+/// token env itself, so before the fix the variable ci-cd §4 documents did nothing and every query was
+/// unauthenticated. Four runs against one token-gated mock, each with an eligible receipt behind the
+/// mock's latest release:
+/// - the right token gets through: exit 0 and "update available: 1.0.0";
+/// - no token, and a blank one, are refused like an unauthenticated client (exit 1). The blank case
+///   pins that an exported-but-empty variable never sends an empty bearer header;
+/// - a WRONG token is refused too, and that refusal's stdout and stderr never contain the token.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_dry_run_authenticates_with_the_github_token_env() {
+    const TOKEN: &str = "ghp_unblock_smoke_token_0123456789";
+    const WRONG_TOKEN: &str = "ghp_wrong_token_must_never_be_echoed";
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    let bin_path = assert_cmd::cargo::cargo_bin("unblock");
+    let canonical_bin = std::fs::canonicalize(&bin_path).expect("canonicalize unblock binary");
+    let install_prefix = canonical_bin.parent().expect("binary parent dir");
+    write_version_receipt(config_dir.path(), install_prefix, "0.0.1");
+    let server = token_gated_release_server(TOKEN).await;
+    let before = std::fs::read(&bin_path).expect("read the unblock binary before");
+
+    let dry_run = |token: Option<&str>| {
+        let mut cmd = unblock();
+        cmd.args(["update", "--dry-run", "--output", "json"])
+            .env("AXOUPDATER_CONFIG_PATH", config_dir.path())
+            .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
+            .env(GHE_BASE_URL_ENV, server.uri())
+            .env_remove("UNBLOCK_CLI_INSTALLER_GITHUB_BASE_URL")
+            .env("AXOUPDATER_APP_NAME", APP_NAME);
+        match token {
+            Some(value) => cmd.env("AXOUPDATER_GITHUB_TOKEN", value),
+            None => cmd.env_remove("AXOUPDATER_GITHUB_TOKEN"),
+        };
+        cmd.output().expect("run `unblock update --dry-run`")
+    };
+
+    let authed = dry_run(Some(TOKEN));
+    let stderr = String::from_utf8_lossy(&authed.stderr);
+    assert_eq!(
+        authed.status.code(),
+        Some(0),
+        "with the token set, the gated query must succeed; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("update available: 1.0.0"),
+        "the authenticated dry-run must reach the version comparison; got: {stderr}"
+    );
+
+    for (label, token) in [("unset", None), ("blank", Some(""))] {
+        let out = dry_run(token);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "with the token {label}, the query is unauthenticated and the mock refuses it; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: Value = serde_json::from_slice(&out.stdout)
+            .expect("valid JSON structured error on stdout (FR-11)");
+        assert_eq!(value["code"], "INTERNAL_ERROR", "self-update failure code");
+    }
+
+    let wrong = dry_run(Some(WRONG_TOKEN));
+    assert_eq!(wrong.status.code(), Some(1), "a wrong token is refused");
+    for (stream, bytes) in [("stdout", &wrong.stdout), ("stderr", &wrong.stderr)] {
+        assert!(
+            !String::from_utf8_lossy(bytes).contains(WRONG_TOKEN),
+            "the token must never be rendered on {stream}"
+        );
+    }
+
+    let after = std::fs::read(&bin_path).expect("read the unblock binary after");
+    assert_eq!(before, after, "--dry-run never swaps the binary");
 }
