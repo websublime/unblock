@@ -59,7 +59,10 @@ jobs:
       FROM_TAG: ${{ inputs.from_tag }}
       TO_TAG: ${{ inputs.to_tag }}
       UNBLOCK_SMOKE_REPO: ${{ github.repository }}
-      # Client-runtime env read by axoupdater (ci-cd §4) — only to avoid GitHub API rate limits.
+      # Client-runtime env `unblock update` reads and passes to axoupdater as a bearer token (ci-cd §4),
+      # so the release query is not subject to the per-IP limit that shared macOS runners exhaust.
+      # The querying binary is the from_tag install, so this helps only when from_tag already carries
+      # that read (ub-jh5); v1.0.0 and v1.0.1 ignore the variable.
       AXOUPDATER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
