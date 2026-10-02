@@ -426,9 +426,13 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   put an id on it waits (PRD D54 (10)(iii)). A response-shaped client line that carries a readable id is answered on
   that id too, which only a non-conforming peer can cause. The stdio read still accepts a line of any length
   (`ub-o8s`).
-- **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
-  check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
-  self-update promise is exercised, not just unit-asserted.
+- **`unblock update` end-to-end smoke** (tracked as `ub-lp9.26`): the self-update path (FR-25, axoupdater → dist
+  installer → SHA256 check-before-swap) had only been unit-asserted, never run end-to-end against a real
+  published release. The smoke is now the manual `workflow_dispatch` workflow `.github/workflows/update-smoke.yml`
+  (spec: ci-cd §4; runbook: `RELEASING.md`). It covers all five shipped triples on native runners. Windows ARM64
+  hosts stay knowingly uncovered: they run the x86_64 build under emulation (D36). A hand rehearsal,
+  `v1.0.0-rc.6 → v1.0.0` on `aarch64-apple-darwin`, passed on 2026-10-02. **This item closes only on the
+  acceptance run at this cut, `v1.0.0 → v1.0.1` on every leg.**
 
 This slot is a **maintenance patch, but it is not "maintenance only"** — that framing is retired. No FR is
 added or re-tiered, and the v1.2+ resequence below is untouched. But **D42 spans two layers**: **L7
