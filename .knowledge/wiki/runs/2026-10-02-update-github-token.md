@@ -4,7 +4,7 @@ description: Making unblock update send the documented GitHub token (tracker ub-
 type: run
 date: 2026-10-02
 branch: ub-jh5-update-github-token
-pr: -
+pr: '455'
 issues: [ub-jh5]
 ---
 
@@ -83,7 +83,7 @@ No session-local ids were used in this run.
 - `ub-jh5` — `unblock update` never sent a GitHub token, so every query was unauthenticated and
   rate-limited.
 - `ub-lp9.26` — the live update smoke whose acceptance run found it (comment 265).
-- Pull request — none yet, opened from this branch; merging is the human gate.
+- Pull request — 455 (`websublime/unblock`), opened 2026-10-02; merging is the human gate.
 - Key files touched —
   `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-cli/src/commands/update.rs`,
   `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-cli/tests/update_verify.rs`,
