@@ -1,0 +1,73 @@
+# unblock — the LIVE `unblock update` end-to-end smoke (FR-25 / NFR-17). See
+# docs/plans/ci-cd-and-distribution.md §4 and RELEASING.md §5 (tracked as ub-lp9.26).
+#
+# MANUAL ONLY (`workflow_dispatch`), by design: it downloads two REAL published releases from github.com,
+# so it can never ride the per-PR gate (D13: no network on normal paths) and it is not Rust code, so the
+# workspace `no-network` scan (ci.yml) is neither touched nor weakened. Fire it once a release is
+# PUBLISHED, with from_tag = the previous stable release and to_tag = the one just published (which must
+# be the LATEST STABLE release — `unblock update` always targets latest).
+#
+# Per leg: install from_tag with the REAL dist installer (shell / powershell) into an isolated prefix →
+# `update --dry-run` reports to_tag, binary byte-identical → `update` swaps → the swapped binary reports
+# to_tag and serves `version`, `migrate`, `doctor` on the old binary's workspace. The leg logs ARE the
+# recorded evidence. Logic lives in scripts/release/update-smoke.{sh,ps1} so a human runs the same steps.
+#
+# COVERAGE (fork b): every one of the 5 shipped triples on a native runner. UNCOVERED, knowingly:
+# Windows ARM64 hosts — no shipped triple (D36), they run the x86_64-pc-windows-msvc build under
+# emulation, and GitHub has no hosted runner for that path here.
+#
+# Every `uses:` is pinned to a 40-char commit SHA with a trailing `# vX.Y.Z` (NFR-9; `verify-pins`).
+
+name: update-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_tag:
+        description: "Installed release (N), e.g. v1.0.0"
+        required: true
+        type: string
+      to_tag:
+        description: "Release to update to (N+1) — must be the latest stable release, e.g. v1.0.1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: update ${{ inputs.from_tag }} → ${{ inputs.to_tag }} (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+    env:
+      # Inputs reach the scripts as env, never interpolated into the shell text (injection hygiene).
+      FROM_TAG: ${{ inputs.from_tag }}
+      TO_TAG: ${{ inputs.to_tag }}
+      UNBLOCK_SMOKE_REPO: ${{ github.repository }}
+      # Client-runtime env read by axoupdater (ci-cd §4) — only to avoid GitHub API rate limits.
+      AXOUPDATER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: live update smoke (shell installer)
+        if: runner.os != 'Windows'
+        shell: sh
+        run: scripts/release/update-smoke.sh "$FROM_TAG" "$TO_TAG"
+      - name: live update smoke (powershell installer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/release/update-smoke.ps1 -FromTag $env:FROM_TAG -ToTag $env:TO_TAG
