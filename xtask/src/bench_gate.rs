@@ -35,9 +35,12 @@ fn ceiling_ns(bench: &str) -> Option<f64> {
     // is record-only — no hard ceiling in v1 (PRD NFR-1); `render_issues/*` is matched by prefix below.
     const CEILINGS_MS: &[(&str, f64)] = &[
         // single mutation: storage insert / engine mint / engine claim (D34: the insert-path budget).
-        ("storage_create/insert", 15.0),
-        ("engine_create/mint", 15.0),
-        ("engine_claim/claim", 15.0),
+        // Re-derived at ub-lp9.28 from 15, once the routines borrowed their setup and the per-iteration
+        // teardown (store + tempdir drop, ~2-3ms) left the timed region: ~0.12 / ~0.71 / ~0.51ms local,
+        // so 5ms is ~7x the largest (mint) plus CI headroom, and >= 5x the tier-i create <1ms budget.
+        ("storage_create/insert", 5.0),
+        ("engine_create/mint", 5.0),
+        ("engine_claim/claim", 5.0),
         // 1k read budgets (list/ready) — the BATCH-hydration read path, T3.5.1 re-tightened from
         // 100 (the T3.5-P1 N+1 widening) as the N+1 is fixed (~5.1-5.6ms local; generous ~5x local
         // mean + CI-slowdown headroom, still comfortably >= the tier-i 1k budgets).
