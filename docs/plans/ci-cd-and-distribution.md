@@ -1064,9 +1064,13 @@ automates that step behind a strict, human-operated safety model.
   verifiable out-of-band via `gh attestation verify`), NOT consulted on the auto-update path. No network on any
   normal command path **in local mode, the default build** — only on explicit `unblock update` (D13/NFR-17;
   remote mode is the other opt-in exception, D51).
-- `AXOUPDATER_GITHUB_TOKEN` is a **client-runtime** env read by axoupdater on the user's machine (feeds
-  `set_github_token` to avoid GitHub API rate limits) — it is NOT a release-workflow secret; the dist-generated
-  `release.yml` publishes with the standard `${{ secrets.GITHUB_TOKEN }}`.
+- `AXOUPDATER_GITHUB_TOKEN` is a **client-runtime** env on the updating user's machine. `unblock update` reads it
+  and passes a non-empty value to axoupdater's `set_github_token`, which sends it as a bearer header on the GitHub
+  API release query; an unset or blank value sends none. The axoupdater library reads no token env itself, so
+  this read is unblock's (`ub-jh5`; until it landed, the variable did nothing). Without a token the query is
+  unauthenticated and subject to GitHub's per-IP rate limit, which shared egress such as CI runners exhausts. The
+  token is never rendered in the structured error or the diagnostics. It is NOT a release-workflow secret: the
+  dist-generated `release.yml` publishes with the standard `${{ secrets.GITHUB_TOKEN }}`.
 - **Live end-to-end smoke — where it lives (`ub-lp9.26`).** Hermetic tests cannot reach the real path, because it
   needs two **published** releases. `crates/unblock-cli/tests/update_verify.rs` pins only the client-side
   no-swap half. The live smoke is the manual **`workflow_dispatch`** workflow

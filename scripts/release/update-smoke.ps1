@@ -6,7 +6,8 @@
 # PRECONDITION: <ToTag> must be the LATEST STABLE release — `unblock update` always targets latest.
 #
 # Usage:  pwsh -File scripts/release/update-smoke.ps1 -FromTag v1.0.0 -ToTag v1.0.1
-# Env:    UNBLOCK_SMOKE_REPO (default websublime/unblock) · AXOUPDATER_GITHUB_TOKEN (optional)
+# Env:    UNBLOCK_SMOKE_REPO (default websublime/unblock) · AXOUPDATER_GITHUB_TOKEN (optional; only a
+#         <FromTag> that reads it, ub-jh5, sends it — v1.0.0 and v1.0.1 ignore it; ci-cd §4)
 #         UNBLOCK_SMOKE_KEEP=1 keeps the temp dir.
 # Exit:   0 = every step passed · 1 = a smoke assertion failed.
 param(

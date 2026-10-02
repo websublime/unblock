@@ -27,7 +27,9 @@
 #
 # Usage:  scripts/release/update-smoke.sh <from-tag> <to-tag>      e.g.  v1.0.0 v1.0.1
 # Env:    UNBLOCK_SMOKE_REPO       owner/repo of the release source (default websublime/unblock)
-#         AXOUPDATER_GITHUB_TOKEN  optional; avoids GitHub API rate limits (client-runtime env, ci-cd §4)
+#         AXOUPDATER_GITHUB_TOKEN  optional; authenticates the release query against GitHub's per-IP
+#                                  rate limit (ci-cd §4) — only when <from-tag> already reads it
+#                                  (ub-jh5); v1.0.0 and v1.0.1 ignore it
 #         UNBLOCK_SMOKE_KEEP=1     keep the temp dir for inspection
 # Exit:   0 = every step passed · 1 = a smoke assertion failed · 2 = bad usage / missing tool.
 set -u
