@@ -4,7 +4,7 @@ description: Authoring the live unblock update smoke (tracker ub-lp9.26) — a m
 type: run
 date: 2026-10-02
 branch: ub-lp9.26-update-smoke
-pr: -
+pr: '453'
 issues: [ub-lp9.26]
 ---
 
@@ -84,7 +84,7 @@ No session-local ids were used in this run.
 ## Links
 
 - `ub-lp9.26` — the live `unblock update` path had never run against a real published release.
-- Pull request — none yet, opened from this branch; merging is the human gate.
+- Pull request — 453 (`websublime/unblock`), opened 2026-10-02; merging is the human gate.
 - Key files touched —
   `/Users/ramosmig/Public/WS-Labs/unblock/.github/workflows/update-smoke.yml`,
   `/Users/ramosmig/Public/WS-Labs/unblock/scripts/release/update-smoke.sh`,
