@@ -4,7 +4,7 @@ description: The v1.0.0 to v1.0.1 live unblock update acceptance run (tracker ub
 type: run
 date: 2026-10-02
 branch: ub-lp9.26-record-acceptance-run
-pr: -
+pr: '456'
 issues: [ub-lp9.26, ub-jh5]
 ---
 
@@ -71,7 +71,7 @@ No session-local ids were used in this run.
 
 - `ub-lp9.26` — the live `unblock update` path had never run against a real published release.
 - `ub-jh5` — `unblock update` never sent a GitHub token; found by this run, fixed in pull request 455.
-- Pull request — none yet, opened from this branch; merging is the human gate.
+- Pull request — 456 (`websublime/unblock`), opened 2026-10-02; merging is the human gate.
 - Key files touched —
   `/Users/ramosmig/Public/WS-Labs/unblock/RELEASING.md`,
   `/Users/ramosmig/Public/WS-Labs/unblock/docs/plans/ci-cd-and-distribution.md` (§4),
