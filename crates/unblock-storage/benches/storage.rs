@@ -4,7 +4,9 @@
 //! the D31 `.write.lock` + WAL are on the write path, not the non-WAL shared-cache in-memory path):
 //!
 //! - **`storage_create`** — a single [`Storage::create_issue`] into a fresh, small-seeded DB per
-//!   iteration (via `iter_batched`), so the measured op is one insert, never a growing DB.
+//!   iteration (via `iter_batched_ref`), so the measured op is one insert, never a growing DB. The
+//!   routine BORROWS its setup, so criterion drops the storage and its tempdir AFTER the timed region:
+//!   by value, that teardown was ~97% of the sample (ub-lp9.28).
 //! - **`storage_list` / `storage_ready`** — the NFR-1 read budgets over a corpus seeded ONCE at 1k
 //!   and 10k (outside the timing loop). These flow through the production per-row-hydration read path
 //!   (`collect_hydrated`), so they carry the real end-to-end cost the budget must bound.
@@ -17,8 +19,8 @@
 //! afterward by `cargo xtask bench-gate` reading criterion's `estimates.json` (D34 tier-ii).
 //!
 //! **SF-7 (async setup nesting):** the read groups seed via a sequential `Runtime::block_on` BEFORE
-//! handing `&rt` to criterion's `to_async`, and the `create` group's `iter_batched` setup and routine
-//! each run their own `block_on` sequentially — no `block_on` is ever nested inside another, and
+//! handing `&rt` to criterion's `to_async`, and the `create` group's `iter_batched_ref` setup and
+//! routine each run their own `block_on` sequentially — no `block_on` is ever nested inside another, and
 //! `Handle::current()` is never reached for (both would panic).
 
 // `criterion_group!`/`criterion_main!` generate undocumented public items.
@@ -83,7 +85,7 @@ mod gate {
         // sample keeps the wall-clock bounded while staying statistically honest.
         group.sample_size(20);
         group.bench_function("insert", |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     // SETUP (untimed): a fresh tempdir + a small-seeded file DB + the insert fixture.
                     // `block_on` here completes before the routine's `block_on` runs (SF-7: not nested).
@@ -93,8 +95,9 @@ mod gate {
                 },
                 |(_dir, storage, issue)| {
                     // ROUTINE (timed): exactly one insert on the D31 `.write.lock` + WAL write path.
+                    // Borrowed, so the storage and tempdir drop after timing (TEARDOWN, untimed).
                     rt.block_on(async {
-                        black_box(storage.create_issue(&issue, "bench").await.expect("insert"));
+                        black_box(storage.create_issue(issue, "bench").await.expect("insert"));
                     });
                 },
                 BatchSize::SmallInput,

@@ -19,6 +19,11 @@
 //! **SF-7 (async setup nesting):** every group seeds via a sequential `Runtime::block_on` that
 //! completes BEFORE `to_async`/the timed routine runs — no `block_on` nests inside another, and
 //! `Handle::current()` is never reached for.
+//!
+//! **Teardown is untimed (ub-lp9.28).** The per-iteration groups (`engine_import`, `engine_create`,
+//! `engine_claim`) use `iter_batched_ref`, so the routine BORROWS its workspace and criterion drops the
+//! session, the store and the tempdir AFTER the timed region. Taken by value, that drop ran inside the
+//! timing and was most of the create/claim sample.
 
 // `criterion_group!`/`criterion_main!` generate undocumented public items.
 #![allow(missing_docs)]
@@ -125,7 +130,7 @@ mod gate {
     }
 
     /// `engine_import`: [`Session::import_jsonl`] of a 10k JSONL into a FRESH empty session per
-    /// iteration (`iter_batched`) — closes the NFR-1 import-budget gap (DRIFT-9).
+    /// iteration (`iter_batched_ref`) — closes the NFR-1 import-budget gap (DRIFT-9).
     pub fn bench_import(c: &mut Criterion) {
         let rt = runtime();
         // Build the 10k JSONL once by exporting a seeded workspace, then reuse its bytes.
@@ -138,7 +143,7 @@ mod gate {
         let mut group = c.benchmark_group("engine_import");
         group.sample_size(10);
         group.bench_with_input(BenchmarkId::from_parameter(IO_SIZE), &IO_SIZE, |b, _| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     // SETUP (untimed): a fresh EMPTY session with the 10k JSONL staged at its
                     // confined jsonl path. Sequential `block_on` (not nested with the routine's).
@@ -169,7 +174,7 @@ mod gate {
         let mut group = c.benchmark_group("engine_create");
         group.sample_size(20);
         group.bench_function("mint", |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || rt.block_on(build_seeded(MUT_SEED_BASE)),
                 |ws| {
                     rt.block_on(async {
@@ -189,7 +194,7 @@ mod gate {
         let mut group = c.benchmark_group("engine_claim");
         group.sample_size(20);
         group.bench_function("claim", |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     let ws = rt.block_on(build_seeded(0));
                     let id = rt
@@ -201,7 +206,7 @@ mod gate {
                 },
                 |(ws, id)| {
                     rt.block_on(async {
-                        black_box(ws.session.claim(&id, "bench-agent").await.expect("claim"));
+                        black_box(ws.session.claim(id, "bench-agent").await.expect("claim"));
                     });
                 },
                 BatchSize::SmallInput,
