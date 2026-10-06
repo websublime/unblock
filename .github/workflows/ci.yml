@@ -412,6 +412,17 @@ jobs:
       # plus the contract version standing UNMOVED. Positive-only by design. Specified in
       # ci-cd-and-distribution.md §2.1 (the D54 sub-check).
       - run: scripts/checks/d54-parse-error-id-claims.sh
+      # D55 (`ub-e47`) required landings: `unblock update` classifies GitHub's refusal of the release
+      # query. Every behaviour is a cell; this step asserts the positive: update_error's variant match and
+      # status read, the pure classifier and its 403|429 and 401 arms, the message function and the token
+      # state on their production lines, both CliError variants and the three code arms, no code line of
+      # update.rs or exit.rs spelling reqwest, every unit and update_refusal_ cell on its own declaration,
+      # the tracker id, the PRD row and its D34 note, the spine, the crate plans, the release runbook, the
+      # smoke headers, README, both roadmaps, the retargeted sibling rows, this gate's own wiring, and the
+      # live D-range at every prose site and every SIBLING script's knob — including `d54`'s two — plus
+      # the contract version standing UNMOVED. Positive-only by design. Specified in
+      # ci-cd-and-distribution.md §2.1 (the D55 sub-check).
+      - run: scripts/checks/d55-update-refusal-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
