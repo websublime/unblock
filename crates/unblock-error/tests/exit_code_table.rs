@@ -49,6 +49,8 @@ fn already_claimed_is_exit_three_and_retryable() {
 fn rate_limited_is_exit_two_and_retryable() {
     // NFR-18/D34 (OQ-2 ratified): the MCP concurrency-cap reject is exit 2 (the only {1..8} bucket
     // carrying "resource busy, retry" — a 9th exit code would break the pinned coverage) and retryable.
+    // Two producers emit it (D34, D55): the MCP concurrency cap and `unblock update` when GitHub
+    // refuses the release query with 403 or 429.
     assert_eq!(ErrorCode::RateLimited.exit_code(), 2);
     assert!(ErrorCode::RateLimited.is_retryable());
 }

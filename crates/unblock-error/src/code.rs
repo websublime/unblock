@@ -75,6 +75,8 @@ pub enum ErrorCode {
     NotInitialized,
     /// Workspace already initialized.
     AlreadyInitialized,
+    // D55: the CLI also emits this code, from `unblock update` when GitHub answers the release query
+    // 403 or 429. The `///` text below is the published description and names only the MCP producer.
     /// The MCP request-rate cap fired: too many concurrent in-flight requests (retryable — back off
     /// and retry). An MCP-surface concurrency cap (NFR-18/D34), grouped with the exit-2 transient-busy
     /// family by retry semantics — a `DatabaseLocked` sibling, NOT a DB fault (see the spine §2.3 note).

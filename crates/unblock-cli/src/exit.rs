@@ -10,7 +10,9 @@
 //! guard and sibling guard — `ConfigError` has none), `SiblingBindsFirst` (exit 2 through
 //! `ALREADY_INITIALIZED`, the init binds-first check), scaffold/agents `Io` (exit 8),
 //! `InitAgentsWrite` (exit 8, an `init --agents` that scaffolded but could not write `AGENTS.md`),
-//! `Update` (exit 1).
+//! `Update` (exit 1), and, behind `self-update`, `UpdateRateLimited` (exit 2, GitHub answered the
+//! release query 403 or 429) and `UpdateUnauthorized` (exit 7, GitHub answered 401) — D55. The HTTP
+//! status alone picks the variant; the token state picks only the message words.
 //!
 //! **NFR-14 + FR-11 stream split:** in `json`/`robot` the structured error renders to the command's
 //! REPORT channel (always valid JSON even on error, FR-11); in `plain`/`csv`/`markdown` a human
@@ -142,11 +144,30 @@ pub enum CliError {
         source: std::io::Error,
     },
 
-    /// A self-update failure (`axoupdater`/dist-installer). Maps to `ErrorCode::InternalError` (exit 1).
+    /// A self-update failure (`axoupdater`/dist-installer) that is not a refusal of the release query.
+    /// Maps to `ErrorCode::InternalError` (exit 1).
     #[cfg(feature = "self-update")]
     #[snafu(display("self-update failed: {message}"))]
     Update {
         /// A human description of the update failure.
+        message: String,
+    },
+
+    /// GitHub answered the release query 403 or 429 (D55). Maps to `ErrorCode::RateLimited` (exit 2,
+    /// retryable).
+    #[cfg(feature = "self-update")]
+    #[snafu(display("self-update failed: {message}"))]
+    UpdateRateLimited {
+        /// The refusal text, naming the status, the query URL and `AXOUPDATER_GITHUB_TOKEN`.
+        message: String,
+    },
+
+    /// GitHub answered the release query 401 (D55). Maps to `ErrorCode::ConfigError` (exit 7, not
+    /// retryable): the token is a setting the user must fix.
+    #[cfg(feature = "self-update")]
+    #[snafu(display("self-update failed: {message}"))]
+    UpdateUnauthorized {
+        /// The refusal text, naming the status, the query URL and `AXOUPDATER_GITHUB_TOKEN`.
         message: String,
     },
 }
@@ -169,6 +190,10 @@ impl CliError {
             Self::Io { .. } | Self::InitAgentsWrite { .. } => ErrorCode::IoError,
             #[cfg(feature = "self-update")]
             Self::Update { .. } => ErrorCode::InternalError,
+            #[cfg(feature = "self-update")]
+            Self::UpdateRateLimited { .. } => ErrorCode::RateLimited,
+            #[cfg(feature = "self-update")]
+            Self::UpdateUnauthorized { .. } => ErrorCode::ConfigError,
         }
     }
 }
@@ -396,6 +421,28 @@ mod tests {
         };
         assert_eq!(err.code(), ErrorCode::ValidationFailed);
         assert_eq!(err.code().exit_code(), 4);
+    }
+
+    #[cfg(feature = "self-update")]
+    #[test]
+    fn update_rate_limited_maps_to_exit_2_retryable() {
+        let err = CliError::UpdateRateLimited {
+            message: "GitHub refused the release query with HTTP 403".to_string(),
+        };
+        assert_eq!(err.code(), ErrorCode::RateLimited);
+        assert_eq!(err.code().exit_code(), 2);
+        assert!(err.code().is_retryable());
+    }
+
+    #[cfg(feature = "self-update")]
+    #[test]
+    fn update_unauthorized_maps_to_exit_7_not_retryable() {
+        let err = CliError::UpdateUnauthorized {
+            message: "GitHub rejected the token with HTTP 401".to_string(),
+        };
+        assert_eq!(err.code(), ErrorCode::ConfigError);
+        assert_eq!(err.code().exit_code(), 7);
+        assert!(!err.code().is_retryable());
     }
 
     #[cfg(feature = "self-update")]

@@ -27,6 +27,12 @@
 //!    dry-run through only with it). An unset or blank variable sends none, and a refused query never
 //!    renders the token.
 //!
+//! 4. **Refusal classification (`#[cfg(unix)]`, D55).** When the mock refuses the release query, a 403
+//!    or 429 reports `RATE_LIMITED` (exit 2, retryable) and a 401 reports `CONFIG_ERROR` (exit 7), each
+//!    with a one-line message naming `AXOUPDATER_GITHUB_TOKEN`; a 404 stays `INTERNAL_ERROR` (exit 1).
+//!    The `update_refusal_…` cells refuse both `/releases/latest` and `/releases` with a catch-all GET
+//!    mock, because axoupdater swallows the first query's failure and fails on the second.
+//!
 //! ## The BOUNDARY (OQ-1 — read before trusting the assertion)
 //!
 //! Test (2) is a faithful STAND-IN that proves **unblock's client-side no-swap-on-installer-abort half
@@ -106,8 +112,8 @@ async fn update_refuses_a_receiptless_binary_and_swaps_nothing() {
         .output()
         .expect("run `unblock update`");
 
-    // Refused: exit 1 with a VALID structured error on stdout (FR-11). The whole update surface maps to
-    // InternalError (exit 1) — never a silent success from a non-eligible (receiptless) binary.
+    // Refused: exit 1 with a VALID structured error on stdout (FR-11). A receiptless binary maps to
+    // InternalError (exit 1) — never a silent success from a non-eligible binary.
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -455,7 +461,8 @@ async fn update_dry_run_reports_available_when_receipt_is_behind_latest() {
 
 /// Stand up a mock GHE release source that answers the latest-release query ONLY when it carries
 /// `Authorization: Bearer <token>` (the header axoupdater 0.10.0 sends once `set_github_token` is called,
-/// `release/github.rs` `bearer_auth`). Every other request gets the 403 GitHub returns to an
+/// `release/github.rs` `bearer_auth`). Any other bearer gets the 401 GitHub returns for invalid
+/// credentials, and a request with no `authorization` header gets the 403 GitHub returns to an
 /// unauthenticated client over its per-IP limit, which is exactly how the live smoke failed (ub-jh5).
 #[cfg(unix)]
 async fn token_gated_release_server(token: &str) -> MockServer {
@@ -483,6 +490,15 @@ async fn token_gated_release_server(token: &str) -> MockServer {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
+        .and(wiremock::matchers::header_exists("authorization"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(serde_json::json!({ "message": "Bad credentials" })),
+        )
+        .with_priority(5)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
         .respond_with(
             ResponseTemplate::new(403)
                 .set_body_json(serde_json::json!({ "message": "API rate limit exceeded" })),
@@ -493,14 +509,16 @@ async fn token_gated_release_server(token: &str) -> MockServer {
     server
 }
 
-/// `AXOUPDATER_GITHUB_TOKEN` authenticates the release query (ub-jh5). The axoupdater library reads no
-/// token env itself, so before the fix the variable ci-cd §4 documents did nothing and every query was
-/// unauthenticated. Four runs against one token-gated mock, each with an eligible receipt behind the
-/// mock's latest release:
+/// `AXOUPDATER_GITHUB_TOKEN` authenticates the release query (ub-jh5), and its refusals are classified
+/// by status (D55). The axoupdater library reads no token env itself, so before ub-jh5 the variable
+/// ci-cd §4 documents did nothing and every query was unauthenticated. Four runs against one
+/// token-gated mock, each with an eligible receipt behind the mock's latest release:
 /// - the right token gets through: exit 0 and "update available: 1.0.0";
-/// - no token, and a blank one, are refused like an unauthenticated client (exit 1). The blank case
-///   pins that an exported-but-empty variable never sends an empty bearer header;
-/// - a WRONG token is refused too, and that refusal's stdout and stderr never contain the token.
+/// - no token, and a blank one, get the anonymous 403: `RATE_LIMITED`, exit 2, retryable. The blank
+///   case pins that an exported-but-empty variable never sends an empty bearer header;
+/// - a WRONG token gets the 401: `CONFIG_ERROR`, exit 7, not retryable.
+///
+/// Both token-bearing runs log at `RUST_LOG=trace`, and neither stream of either run contains the token.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_dry_run_authenticates_with_the_github_token_env() {
@@ -524,8 +542,15 @@ async fn update_dry_run_authenticates_with_the_github_token_env() {
             .env_remove("UNBLOCK_CLI_INSTALLER_GITHUB_BASE_URL")
             .env("AXOUPDATER_APP_NAME", APP_NAME);
         match token {
-            Some(value) => cmd.env("AXOUPDATER_GITHUB_TOKEN", value),
-            None => cmd.env_remove("AXOUPDATER_GITHUB_TOKEN"),
+            Some(value) if !value.trim().is_empty() => cmd
+                .env("AXOUPDATER_GITHUB_TOKEN", value)
+                .env("RUST_LOG", "trace"),
+            Some(value) => cmd
+                .env("AXOUPDATER_GITHUB_TOKEN", value)
+                .env_remove("RUST_LOG"),
+            None => cmd
+                .env_remove("AXOUPDATER_GITHUB_TOKEN")
+                .env_remove("RUST_LOG"),
         };
         cmd.output().expect("run `unblock update --dry-run`")
     };
@@ -541,22 +566,44 @@ async fn update_dry_run_authenticates_with_the_github_token_env() {
         stderr.contains("update available: 1.0.0"),
         "the authenticated dry-run must reach the version comparison; got: {stderr}"
     );
+    for (stream, bytes) in [("stdout", &authed.stdout), ("stderr", &authed.stderr)] {
+        assert!(
+            !String::from_utf8_lossy(bytes).contains(TOKEN),
+            "the token must never be rendered on {stream}"
+        );
+    }
 
     for (label, token) in [("unset", None), ("blank", Some(""))] {
         let out = dry_run(token);
         assert_eq!(
             out.status.code(),
-            Some(1),
-            "with the token {label}, the query is unauthenticated and the mock refuses it; stderr: {}",
+            Some(2),
+            "with the token {label}, the query is unauthenticated and the mock refuses it 403; stderr: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         let value: Value = serde_json::from_slice(&out.stdout)
             .expect("valid JSON structured error on stdout (FR-11)");
-        assert_eq!(value["code"], "INTERNAL_ERROR", "self-update failure code");
+        assert_eq!(value["code"], "RATE_LIMITED", "a 403 is a rate limit (D55)");
+        assert_eq!(value["retryable"], true, "a rate limit is retryable");
     }
 
     let wrong = dry_run(Some(WRONG_TOKEN));
-    assert_eq!(wrong.status.code(), Some(1), "a wrong token is refused");
+    assert_eq!(
+        wrong.status.code(),
+        Some(7),
+        "a wrong token is refused 401; stderr: {}",
+        String::from_utf8_lossy(&wrong.stderr)
+    );
+    let value: Value =
+        serde_json::from_slice(&wrong.stdout).expect("valid JSON structured error on stdout");
+    assert_eq!(
+        value["code"], "CONFIG_ERROR",
+        "a 401 is a config error (D55)"
+    );
+    assert_eq!(
+        value["retryable"], false,
+        "a rejected token is not retryable"
+    );
     for (stream, bytes) in [("stdout", &wrong.stdout), ("stderr", &wrong.stderr)] {
         assert!(
             !String::from_utf8_lossy(bytes).contains(WRONG_TOKEN),
