@@ -1,6 +1,6 @@
 # unblock — Version Roadmap
 
-- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (maintenance patch — the `v1.0.1` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
+- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (released 2026-10-02; maintenance patch — the `v1.0.1` subsection of §1); v1.0.2 **PLANNED** (maintenance patch — the `v1.0.2` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
 - **Date:** 2026-06-19 · **v1.2–v1.5 resequence:** 2026-07-07 (session ratified by Miguel; audience decision minted as PRD §4 D28) · **post-GA v1.2+ resequence:** 2026-07-20 (Miguel-ratified; the PROPOSED v1.2–v1.5 order is reworked and a v1.0.1 maintenance-patch slot added — full mapping in roadmap §8, rationale + guardrail in PRD §4 D41)
 - **Owner:** Miguel Ramos
 - **Sources of truth:** `docs/PRD.md` (PRD APPROVED v1.1, §5 tiers / §11 scope / §13 phasing), `docs/plans/01-design-spine.md` (cross-crate interfaces — wins on any cross-crate type/signature disagreement), `docs/plans/implementation-plan.md` (v1 walking skeleton). Hierarchy: PRD > spine > crate plans. Grounding for deferred/later items: original `temp/beads_rust-main` feature inventory; UX grounding for the v1.4 TUI: the TUI-adopted subset of the 14 mockups under `temp/tentative-v2/docs/designs/` (**reference-only**, same status as `temp/beads_rust-main`; the graph / burnup screens there inform the v2+ PRO web instead — roadmap §7).
@@ -19,7 +19,7 @@
 - **Theme/Goal** — the one-line reason the release exists.
 - **Lands** — the FR/NFR ids and features delivered (FR ids trace to PRD §5; new proposed capabilities are tagged `[NEW]` and not yet PRD-blessed).
 - **Crates touched** — which of the 12 workspace crates (PRD §8.1) take work. The proposed v1.4 `unblock-tui` crate (roadmap §5/§9) would be a 13th; it is minted only at v1.4 lock (PRD §8.1 is unchanged until then).
-- **Status** — `LOCKED` (PRD-approved), `PLANNED` (scope agreed and committed but not a locked release plan — the v1.0.1 maintenance patch, §1), or `PROPOSED` (review candidate). PROPOSED versions are **direction, locked just-in-time** as each nears its build window; every per-version tech/scope call below is **re-confirmed at that version's lock** with fresh research and real learnings.
+- **Status** — `LOCKED` (PRD-approved), `PLANNED` (scope agreed and committed but not a locked release plan — the v1.0.x maintenance patches, §1), or `PROPOSED` (review candidate). PROPOSED versions are **direction, locked just-in-time** as each nears its build window; every per-version tech/scope call below is **re-confirmed at that version's lock** with fresh research and real learnings.
 
 Acyclic layering is invariant across all releases (PRD §8.1 / NFR-15):
 `model`/`error` → `policy` → `storage` → `sync`/`health` → `config` → `engine` → `render` → `mcp`/`cli`.
@@ -73,7 +73,7 @@ M0 Foundation → M1 Engine + core domain → M2 MCP surface → M3 Reliability 
 
 ---
 
-### v1.0.1 — maintenance patch  **[PLANNED]**
+### v1.0.1 — maintenance patch  **[PLANNED]** (released 2026-10-02)
 
 A small, orthogonal-to-the-resequence patch slot (recorded 2026-07-20; PRD §4 D41): a bugfix/maintenance
 release cut on top of GA **before** v1.1, carrying the concrete dogfood defects found running unblock on its
@@ -463,6 +463,42 @@ behavioural break shipping in a PATCH release, ratified and stated plainly at PR
 shipped AC was unmet (FR-20, FR-12, NFR-18), and D43 strengthens that same wording at FR-20 and NFR-18** — **within the D42/D43 pair** FR-12 is D42's alone, since D43 moves no `contract_version`; D44 and D45 each move it again, so that clause scopes the pair and never the whole slot. **D45 strengthens the acceptance criteria of FR-5 (a declared blocker must denote something), FR-7 (an export may not emit an edge whose target row it dropped), FR-15 (the new `dangling` diagnostics action) and FR-16 (the same findings in the doctor-lite report)** rather than adding or re-tiering a requirement. **Neither of D42 and D43 adds outward
 surface** — the subject of this clause is that pair, not the slot: no new tool, command, `ErrorCode` or schema field (D43's new items — the shared `dup_key` scanner and the shared flip corpus — are workspace-internal, and the `unblock-*` crates are
 not published). **D45 DOES add outward surface** — a new `dangling` action arm on the `diagnostics` tool, and therefore a new `oneOf` arm plus a `DiagnosticKind` enum member in the published schema — while still adding no new tool, no new command and no new `ErrorCode`.
+
+### v1.0.2 — maintenance patch  **[PLANNED]**
+
+A second maintenance patch on the 1.0 line, opened on 2026-10-06 by PRD §4 D55 and cut on top of v1.0.1 before
+v1.1. It adds no FR, re-tiers nothing, and leaves the v1.2+ resequence of PRD §4 D41 untouched. Its scope is the
+work the tracker labels `v1-0-2`:
+- **`unblock update` reported GitHub's refusal of the release query as an internal error** (P2, `ub-e47`, PRD §4
+  **D55**). A 403 or 429 from the list query rendered `INTERNAL_ERROR`, exit 1, `retryable:false`, with reqwest's
+  text and no hint of the fix, which is what the v1.0.0 → v1.0.1 update smoke hit on the shared `macos-15` runner.
+  **D55 reports a 403 or 429 as `RATE_LIMITED`** (exit 2, retryable) **and a 401 as `CONFIG_ERROR`** (exit 7, not
+  retryable). The HTTP status alone picks the code. Whether a token was sent only picks the message, which keeps
+  the `self-update failed:` prefix, the status and the query URL, names `AXOUPDATER_GITHUB_TOKEN`, and never
+  renders the token. A 404, a 5xx, a transport error, a missing receipt, a tampered download and an install
+  failure stay `INTERNAL_ERROR`, exit 1. Two existing events change code, which makes D55 the first post-GA
+  reclassification of a CLI process exit code. The anonymous 403 or 429 moves from exit 1 to exit 2, and the
+  tokenless 401, reachable only through a GitHub Enterprise base-URL override, moves from exit 1 to exit 7. D55 clause (8) names both
+  plainly; the token-set 401 and 403 or 429 are first classifications. **`unblock-cli` (L7) is the only crate that gains code**, and
+  `unblock-error` gains a comment only. D55 mints no `ErrorCode`, keeps the published `RateLimited` description
+  word for word, and carries **no `contract_version` bump and no `CONTRACT_HASH` re-pin**, so
+  `unblock.mcp.v1.10` stands and the 0–8 exit table is unchanged. **What it does NOT close:** a 403 cannot be told
+  apart in-process, so every 403 reads as `RATE_LIMITED` whatever caused it (a lockout after failed logins, a token
+  without sufficient permissions, a classic token not authorized for SAML SSO, an intercepting proxy, and other
+  causes); no message can say when to retry; a refused installer download stays `INTERNAL_ERROR`; and v1.0.0 and
+  v1.0.1 keep their old output.
+- **The `AXOUPDATER_GITHUB_TOKEN` read takes effect** (`ub-jh5`, closed 2026-10-02, after the v1.0.1 cut). v1.0.0
+  and v1.0.1 never send the token, so v1.0.2 is the first release whose `unblock update` does. In the live update
+  smoke a v1.0.2 binary queries GitHub authenticated at whichever step it runs. The post-swap `update --dry-run`
+  of a `v1.0.1 → v1.0.2` run already does, and the `update --dry-run` and `update` steps do once `from_tag` is
+  v1.0.2 (ci-cd §4).
+- **CI and test-harness hardening**, each item a tracker issue labelled `v1-0-2` and not yet closed: the two create
+  benchmarks measured teardown rather than the operation (`ub-lp9.28`); the libsql
+  `open_in_memory_parallel_first_write_stress` cell fails intermittently with SQLite "bad parameter or other API
+  misuse" (`ub-q1u`); the `write_lock_two_process` non-vacuity control fails under load (`ub-fh5`);
+  `McpClient::read_response` blocks past its 20-second deadline when the child never writes a correlatable reply
+  (`ub-46o`); `RawDuplexClient::read_response` in `unblock-mcp` has no deadline at all (`ub-f1k`); and
+  `McpClient` child spawns get serialised behind a process-wide mutex (`ub-vcp`).
 
 ---
 

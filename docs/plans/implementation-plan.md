@@ -513,6 +513,54 @@
   `cargo xtask knowledge-lint` and every `scripts/checks/*.sh`, on EVERY commit of the branch. Both gates >=3
   agents; Claude opens the PR, a human merges.)*
 
+- **T3.17 — `unblock update` classifies GitHub's refusal of the release query. Implements D55 (v1.0.2,
+  a named reclassification inside 1.x).** *(Next free top-level M3 id — a peer of T3.16, not a sub-task.)* The design is normative in the **D55 PRD
+  §4 row**, the `[D55]` note on D34 clause (3), spine §2.2, §2.3 and the exit-boundary paragraph, `unblock-cli.md`
+  (the `CliError` row and the `src/exit.rs`, `src/commands/update.rs` and `tests/update_verify.rs` rows),
+  `unblock-error.md` and ci-cd §4 — **read those before implementing; this bullet is a checklist of touched sites
+  and never the spec.** Tracked as `ub-e47`. Builds on the `ub-jh5` token read already on `main`. Branch
+  `ub-e47-update-rate-limited`; the SPEC commit first (this task, the D-range bump, ci-cd §2.1 and §4,
+  `docs/PROCESS.md` §3, the roadmap v1.0.2 slot, `RELEASING.md`, the smoke-script headers and README included),
+  then the IMPLEMENTATION commit (code, doc comments, the `refusal_for_status` and `refusal_message` unit cells,
+  and the re-pin of the existing
+  `update_dry_run_authenticates_with_the_github_token_env`, whose mock gains a 401 answer for a wrong bearer and
+  whose unset, blank and wrong-token runs move to `RATE_LIMITED`/2, `RATE_LIMITED`/2 and `CONFIG_ERROR`/7, because
+  that cell asserts exit 1 today and the code alone would turn `cargo test` red), then the TEST commit (only the
+  new `update_refusal_…` cells), then a `ci(d55)` commit that mints `scripts/checks/d55-update-refusal-claims.sh`
+  executable and wires it, then the tracker commit. Every commit of the branch passes `cargo test --workspace`.
+  Scope: (1) `update.rs` `update_error` matching `AxoupdateError::Reqwest(e)` and reading
+  `e.status().map(u16::from)`, the pure `refusal_for_status` (its `403 | 429` and `401` arms), the two-valued
+  `TokenState` computed once in `run`, the pure `refusal_message` returning the text after the
+  `self-update failed: ` prefix, and the unit cells over both functions; (2) `exit.rs` `CliError::UpdateRateLimited`
+  and `CliError::UpdateUnauthorized` with the display `"self-update failed: {message}"`, their `CliError::code` arms
+  and the module doc; (3) the `//` comment beside `ErrorCode::RateLimited` and the comment on
+  `rate_limited_is_exit_two_and_retryable`, with the `///` text untouched; (4) the `update_refusal_…` cells in
+  `tests/update_verify.rs`. *(AC: (1) STATUS ONLY — 403 and 429 give `RATE_LIMITED`, exit 2, `retryable:true`, and
+  401 gives `CONFIG_ERROR`, exit 7, `retryable:false`, with the token unset, blank or set, per D55 clauses (3)-(4);
+  (2) MESSAGE — the four rendered texts of clause (5) exactly, the `self-update failed:` prefix, the status and the
+  URL, `AXOUPDATER_GITHUB_TOKEN` named, the unset and set texts distinct, one line, no `hint`; at least the
+  429-unset, 401-set and 401-unset cells assert the whole JSON `message`, the 401-unset cell
+  (`update_refusal_401_unset_is_config_error`, through the GitHub Enterprise base-URL override the harness sets)
+  covering the tokenless-401 text end to end; (3) TOKEN NEVER RENDERED — every run that sets a non-blank token,
+  the token-gated cell's correct-token run included, runs with `RUST_LOG=trace` and finds the token on neither
+  stream, every tokenless run removes `RUST_LOG`, and the
+  401 never routes through `ConfigError::InvalidValue`; (4) BOUNDARY — the 404 cell, the tampered-download cell
+  and the receiptless cells keep `INTERNAL_ERROR`, exit 1, per clause (6); (5) BOTH PATHS — `--dry-run` and a real
+  run classify alike, and the `-o plain` cell (with `RUST_LOG` removed) sees exactly one `error[RATE_LIMITED]`
+  stderr line; (6) CONTRACT AND EXIT TABLE UNMOVED — `unblock.mcp.v1.10`, no `CONTRACT_HASH` re-pin, the
+  `RateLimited` description byte-unchanged, per clause (7); (7) NO-NETWORK — no code line (comments excepted) of
+  `crates/unblock-cli/src/commands/update.rs` or `crates/unblock-cli/src/exit.rs` spells `reqwest`, which the
+  gate's negative row enforces because `cargo xtask no-network` does not; (8) PRE-FIX — every new cell is red on
+  `main` at `03489ec` except the 404 boundary cell; (9) GATE — the script is executable, wired, carries the live
+  range, pins every older sibling's knobs with `d54`'s two included and none of its own, and every row asserting
+  a NEW landing FAILS on the PRE-FIX TREE, `main` at `03489ec` (only the rows pinning what D55 keeps pass, by
+  design: the P row, the unchanged `Update` arm, the tampered-download and token-gated cell declarations, the
+  published `RateLimited` text, the negative `reqwest` row and the contract knob); (10) PROBE — `cargo fmt
+  --check`, clippy pedantic, `cargo test --workspace`, `cargo insta test --check`, `cargo xtask doc-lint`,
+  `cargo xtask check-layering`, `cargo xtask no-network`, `cargo xtask knowledge-lint` and every
+  `scripts/checks/*.sh`, on EVERY commit of the branch. Both gates >=3 agents; Claude opens the PR, a human
+  merges.)*
+
 ## 6. MCP surface — concrete v1 taxonomy (closes PRD §12.2)
 
 Consolidated to keep the client tool list small (target **≤ 8 tools**); read-heavy state is exposed as resources.

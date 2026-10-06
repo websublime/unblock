@@ -155,11 +155,25 @@ The self-update path (`unblock update`: axoupdater → dist installer → SHA256
    (D36) and run the x86_64 build under emulation.
 3. Every leg must be green. The workflow run **is the evidence**: link it from the release's
    run-report. A red leg means the release's self-update promise is broken on that platform. Treat it
-   as a release defect. **One exception:** a leg that fails at `update --dry-run` with
-   `403 rate limit exceeded` hit GitHub's per-IP limit for anonymous requests, which shared macOS
-   runners exhaust. That is not a defect. It happens when `vN` predates the `AXOUPDATER_GITHUB_TOKEN`
-   read (v1.0.0 and v1.0.1 ignore the variable; `ub-jh5`). Re-run that leg by hand (step 4) and record
-   both results.
+   as a release defect. **One exception:** a leg whose release query GitHub refused with HTTP 403 or
+   429 is not a release defect. Two binaries in a leg query GitHub. The installed `vN` binary runs
+   `update --dry-run` and `update`, and the swapped-in `vN+1` binary runs the post-swap
+   `update --dry-run`. The version of the binary that ran the failing step decides what the refusal
+   looks like.
+   - A v1.0.2 or later binary fails with code `RATE_LIMITED`, exit 2 (PRD §4 D55). It sends
+     `AXOUPDATER_GITHUB_TOKEN`, and the code means GitHub refused the query with HTTP 403 or 429 for a
+     cause the binary cannot tell apart: a used-up rate limit, a refused token, missing access, or an
+     intercepting proxy, among others. In a `v1.0.1 → v1.0.2` run this can already happen at the
+     post-swap step.
+   - A v1.0.0 or v1.0.1 binary fails with code `INTERNAL_ERROR`, exit 1, and a message naming HTTP
+     status 403 or 429 for the `/releases` URL, at `update --dry-run` or at `update`. These binaries
+     ignore the variable (`ub-jh5`), so their queries are anonymous and shared macOS runners exhaust
+     GitHub's per-IP limit.
+
+   Re-run that leg by hand (step 4) and record both results. Key on the step, the code and the exit
+   code. The reason text after the status depends on the HTTP stack and is no stable signal. A
+   `CONFIG_ERROR`, exit 7, from a v1.0.2+ binary is a real failure. GitHub rejected the token
+   (HTTP 401), so fix the workflow's token and re-run.
 4. To reproduce one leg by hand (the scripts are the same ones the workflow runs, and everything
    stays in a temp dir, so PATH, shell rc files and any real install are left alone):
 

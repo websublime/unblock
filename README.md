@@ -297,6 +297,14 @@ The command lives behind the default-on **`self-update`** Cargo feature; `--no-d
 it (and with it the only network surface). No network is touched on any normal command path — only on
 explicit `unblock update`.
 
+`AXOUPDATER_GITHUB_TOKEN` is optional. Set it to a GitHub token and `unblock update` sends it with the
+release query. The query then counts against the authenticated limit of the account behind the token
+(5,000 requests per hour for a user, or 1,000 per hour per repository for a GitHub Actions
+`GITHUB_TOKEN`) instead of GitHub's anonymous limit of 60 per hour per IP address. If GitHub refuses
+the query, the error is `RATE_LIMITED` (exit 2, retry later) for a 403 or 429, and `CONFIG_ERROR`
+(exit 7) for a 401, which means GitHub rejected the token (D55, from v1.0.2). The token is never
+printed.
+
 ## Architecture
 
 unblock is an acyclic, multi-crate Rust workspace: layers **L0 → L7** (`model`/`error` → `policy` →

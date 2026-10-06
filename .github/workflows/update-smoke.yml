@@ -61,8 +61,11 @@ jobs:
       UNBLOCK_SMOKE_REPO: ${{ github.repository }}
       # Client-runtime env `unblock update` reads and passes to axoupdater as a bearer token (ci-cd §4),
       # so the release query is not subject to the per-IP limit that shared macOS runners exhaust.
-      # The querying binary is the from_tag install, so this helps only when from_tag already carries
-      # that read (ub-jh5); v1.0.0 and v1.0.1 ignore the variable.
+      # Two binaries query GitHub, the from_tag install (`update --dry-run`, `update`) and the swapped-in
+      # to_tag (the post-swap `update --dry-run`). Each sends this only if it carries the read (ub-jh5);
+      # v1.0.0 and v1.0.1 ignore the variable. A refusal at a step run by v1.0.2+ reads RATE_LIMITED,
+      # exit 2 (403/429), or CONFIG_ERROR, exit 7 (401); at a step run by an older binary it reads
+      # INTERNAL_ERROR, exit 1 (PRD D55, ci-cd §4).
       AXOUPDATER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0

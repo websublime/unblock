@@ -14,13 +14,13 @@ codes are stable, a breaking change → 2.0.0. (Original source for reference on
 
 | Doc | Role |
 |---|---|
-| `docs/PRD.md` | Product truth — decisions (§4 D1..D54), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
+| `docs/PRD.md` | Product truth — decisions (§4 D1..D55), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
 | **unblock (MCP)** — tracker | **System of record for tasks** (dogfooded) — next-ready/status/deps live here, not in a doc. Git record: `.unblock/issues.jsonl`; wiring + tool surface: `.mcp.json` / `AGENTS.md` / `unblock://capabilities`. |
 | `docs/plans/STATUS.md` | **Retired pointer stub** — task tracking moved to unblock (MCP); the v1 M0–M3 registry is preserved in the file's git history. |
 | `docs/plans/crates/unblock-*.md` | Per-file plan for each crate. |
-| `docs/plans/00-roadmap.md` | v1/v1.1 LOCKED; v1.0.1 PLANNED; v1.2–v1.5/v2+ PROPOSED. |
+| `docs/plans/00-roadmap.md` | v1/v1.1 LOCKED; v1.0.1 released; v1.0.2 PLANNED; v1.2–v1.5/v2+ PROPOSED. |
 | `docs/plans/ci-cd-and-distribution.md` | CI gates + `dist` release + the doc-lint. |
 | `.knowledge/` | **Descriptive knowledge layer — never normative** (hierarchy unchanged: PRD > spine > crate plans): `memories/` atomic facts + `wiki/` run-reports & topic runbooks, each with a curated `index.md`. Rules & enforcement (hard): `PROCESS.md` §8. |
 
