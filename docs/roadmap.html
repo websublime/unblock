@@ -278,10 +278,16 @@
           <div class="thm">Published · <span class="mono">Latest</span> · 5 triples + attestations</div>
           <span class="tag">Shipped</span>
         </div>
-        <div class="stn future">
+        <div class="stn done">
           <span class="node"></span>
           <div class="ver">v1.0.1</div>
-          <div class="thm">Maintenance patch — the dogfood defect set + update smoke</div>
+          <div class="thm">Maintenance patch — the dogfood defect set + update smoke (released 2026-10-02)</div>
+          <span class="tag">Patch · released</span>
+        </div>
+        <div class="stn future">
+          <span class="node"></span>
+          <div class="ver">v1.0.2</div>
+          <div class="thm">Maintenance patch — honest <span class="mono">unblock update</span> refusals + CI hardening</div>
           <span class="tag">Patch</span>
         </div>
         <div class="stn locked">
@@ -422,6 +428,18 @@
           <li>Ran the end-to-end <span class="mono">unblock update</span> full-swap smoke (FR-25): v1.0.0 → v1.0.1 passed on all five triples, 2026-10-02</li>
         </ul>
         <div class="crates"><b>surfaced by</b> dogfooding unblock as its own tracker</div>
+      </div>
+
+      <div class="card">
+        <div class="ch"><span class="cv">v1.0.2</span><span class="status st-locked">Patch · planned</span></div>
+        <div class="thm">Maintenance patch</div>
+        <p class="desc">A second patch on the 1.0 line, before v1.1 &mdash; the self-update error a user actually hits, the token read v1.0.1 shipped without, and the CI flakes the tracker labels <span class="mono">v1-0-2</span>.</p>
+        <ul>
+          <li>Fix: <span class="mono">unblock update</span> reported GitHub&rsquo;s refusal of the release query as an internal error (D55) &mdash; a 403 or 429 rendered <span class="mono">INTERNAL_ERROR</span>, exit 1, not retryable, and named nothing the user could do. A 403 or 429 is now <span class="mono">RATE_LIMITED</span> (exit 2, retryable) and a 401 is <span class="mono">CONFIG_ERROR</span> (exit 7). The HTTP status alone picks the code. The message names <span class="mono">AXOUPDATER_GITHUB_TOKEN</span>, says whether one was sent, and never prints it. Every other update failure stays <span class="mono">INTERNAL_ERROR</span>. The contract stays <span class="mono">unblock.mcp.v1.10</span>. Not closed: a 403 cannot be told apart in-process, so every 403 reads as <span class="mono">RATE_LIMITED</span> whatever caused it (a lockout after failed logins, a token without sufficient permissions, a classic token not authorized for SAML SSO, an intercepting proxy, and other causes); no message can say when to retry; a refused installer download stays <span class="mono">INTERNAL_ERROR</span>; and v1.0.0 and v1.0.1 keep their old output.</li>
+          <li>The <span class="mono">AXOUPDATER_GITHUB_TOKEN</span> read (<span class="mono">ub-jh5</span>) takes effect &mdash; v1.0.0 and v1.0.1 never send the token, so v1.0.2 is the first release whose update query can be authenticated</li>
+          <li>CI and test-harness hardening, each item a tracker issue not yet closed: the create benchmarks measured teardown (<span class="mono">ub-lp9.28</span>), a flaky libsql stress cell (<span class="mono">ub-q1u</span>), a flaky write-lock control (<span class="mono">ub-fh5</span>), two MCP test clients that could wait past their deadline (<span class="mono">ub-46o</span>, <span class="mono">ub-f1k</span>), and serialised <span class="mono">McpClient</span> child spawns (<span class="mono">ub-vcp</span>)</li>
+        </ul>
+        <div class="crates"><b>touches</b> cli · error (a comment only) · CI</div>
       </div>
 
       <div class="card">

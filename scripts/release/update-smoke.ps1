@@ -5,9 +5,17 @@
 #
 # PRECONDITION: <ToTag> must be the LATEST STABLE release — `unblock update` always targets latest.
 #
+# A REFUSED QUERY. Two binaries query GitHub here. The <FromTag> binary runs `update --dry-run` and
+# `update`, and the swapped-in <ToTag> binary runs the post-swap `update --dry-run`; the version of the
+# binary that ran the failing step decides how a refusal reads. v1.0.2 and later (PRD D55) send the token
+# and give RATE_LIMITED, exit 2, for a 403 or 429, and CONFIG_ERROR, exit 7, for a 401; v1.0.0 and
+# v1.0.1 send none and give INTERNAL_ERROR, exit 1, for a 403 or a 429. So a v1.0.1 -> v1.0.2 run can
+# already show RATE_LIMITED at the post-swap step. Key on the step, the code and the exit code, never on
+# the reason text.
+#
 # Usage:  pwsh -File scripts/release/update-smoke.ps1 -FromTag v1.0.0 -ToTag v1.0.1
 # Env:    UNBLOCK_SMOKE_REPO (default websublime/unblock) · AXOUPDATER_GITHUB_TOKEN (optional; only a
-#         <FromTag> that reads it, ub-jh5, sends it — v1.0.0 and v1.0.1 ignore it; ci-cd §4)
+#         binary that reads it, ub-jh5, sends it — v1.0.0 and v1.0.1 ignore it; ci-cd §4)
 #         UNBLOCK_SMOKE_KEEP=1 keeps the temp dir.
 # Exit:   0 = every step passed · 1 = a smoke assertion failed.
 param(
