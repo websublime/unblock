@@ -2356,10 +2356,7 @@ async fn create_issues_empty_batch_is_noop_ok() {
 /// must be preserved across the chunk boundary — the single-accumulator + ordered-reconstruct proof
 /// (a bug that processed only the first chunk, or reset the accumulator per chunk, would be caught).
 ///
-/// Runs against a **file-backed** DB (a unique temp dir, like `scale.rs`) — NOT the shared-cache
-/// `open_in_memory` path: a 900+-row bulk insert on the process-global shared-cache registry would
-/// aggravate its documented parallel-open contention (`mod.rs::memory_open_lock`) and flake OTHER
-/// in-memory tests' opens. A file DB has no shared cache, so it stays isolated under `cargo test`.
+/// Runs against a **file-backed** DB (a unique temp dir, like `scale.rs`).
 #[tokio::test]
 async fn batch_hydration_second_chunk_hydrates_and_order_preserved() {
     // 902 issues > the 900-id chunk size → two chunks. All share the default priority + fixed

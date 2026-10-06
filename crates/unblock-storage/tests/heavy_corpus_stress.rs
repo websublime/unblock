@@ -1,37 +1,29 @@
-//! File-backed heavy-corpus parallel stress regression (T3.5.1 Verify follow-up; unblock-storage.md
-//! §5 OQ-8).
+//! File-backed heavy-corpus parallel stress (T3.5.1 Verify follow-up).
 //!
 //! **Un-gated** (unlike `tests/scale.rs`, which needs `--features testkit` for its
-//! `testkit::seed_corpus` import) so this runs in the always-on `cargo test --workspace` set — the
-//! exact suite under which the T3.5.1 residual flake surfaced. Being un-gated, it builds its own heavy
-//! batch inline rather than importing the testkit-gated `seed_corpus`.
+//! `testkit::seed_corpus` import) so this runs in the always-on `cargo test --workspace` set. Being
+//! un-gated, it builds its own heavy batch inline rather than importing the testkit-gated
+//! `seed_corpus`.
 //!
 //! This is the **file analogue of `open_in_memory_parallel_first_write_stress`** (`src/libsql/mod.rs`)
-//! but with the *heavy* bulk workload that surfaced the flake on the in-memory path: [`TASKS`] parallel
-//! tasks each open their own [`LibsqlStorage::open_local`]-backed store, migrate it, insert one
-//! [`HEAVY_ROWS`]-issue batch via a single [`Storage::create_issues`] call, and read every row back.
-//! Every task must succeed — zero failures.
+//! with a *heavy* bulk workload: [`TASKS`] parallel tasks each open their own
+//! [`LibsqlStorage::open_local`]-backed store, migrate it, insert one [`HEAVY_ROWS`]-issue batch via a
+//! single [`Storage::create_issues`] call, read every row back and drop the store. Every task must
+//! succeed — zero failures.
 //!
-//! # Why in-memory can't carry this load
-//!
-//! [`LibsqlStorage::open_in_memory`]'s docs explain the boundary this test pins in place: opening a
-//! shared-cache `:memory:` URI mutates `SQLite`'s process-global shared-cache registry, and
-//! `memory_open_lock` serializes only the **open-vs-open** race (T0.9). It cannot cover the window
-//! where an open races a concurrent *heavy* shared-cache transaction (or a store close/Drop) on another
-//! in-memory instance — the residual window behind the T3.5.1 flake (~2/15 under full-workspace
-//! parallel load; not reproducible in a dedicated single-process harness, so it is not a bug an
-//! in-memory-only fix could safely target). The file path sidesteps the whole class: `open_local` opens
-//! a private file with no shared cache, so there is no global registry to race. This test proves the
-//! file path carries the identical heavy load cleanly — pinning the boundary `open_in_memory`'s docs now
-//! prescribe: heavy or high-concurrency corpus work belongs on `open_local`, never `open_in_memory`.
+//! T3.5.1 wrote this test to pin a boundary: heavy work on `open_local`, never on `open_in_memory`,
+//! on the theory that the in-memory flake was a shared-cache registry race the file path could not
+//! hit. ub-q1u disproved that theory. The flake was libsql closing every dropped connection handle
+//! twice, and the file path was exposed in exactly the same way. The fix is
+//! `src/libsql/close_once.rs`. No boundary between the two constructors remains, so this test now
+//! stands on its own as a parallel heavy-batch stress of the file path.
 
 use chrono::{DateTime, TimeZone, Utc};
 
 use unblock_model::Issue;
 use unblock_storage::{DEFAULT_WRITE_LOCK_TIMEOUT_MS, LibsqlStorage, Storage, StorageError};
 
-/// The T3.5.1 heavy-batch row count — the size of the single `create_issues` batch (per task) that
-/// surfaced the residual `open_in_memory` shared-cache flake under full-workspace parallel load.
+/// The T3.5.1 heavy-batch row count — the size of the single `create_issues` batch per task.
 const HEAVY_ROWS: usize = 902;
 
 /// Parallel tasks, each driving its own file-backed store through one [`HEAVY_ROWS`]-issue batch — the
@@ -60,8 +52,7 @@ fn heavy_issue(task: usize, i: usize, created: DateTime<Utc>) -> Issue {
 /// The file-backed heavy-corpus analogue of `open_in_memory_parallel_first_write_stress`: [`TASKS`]
 /// parallel tasks each `open_local` their own tempdir-backed store, migrate it, insert one
 /// [`HEAVY_ROWS`]-issue batch via a single `create_issues` call, then read every row back. Every task
-/// must succeed — proving the file path carries the heavy load the in-memory path cannot (T3.5.1,
-/// unblock-storage.md §5 OQ-8).
+/// must succeed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn file_backed_heavy_corpus_parallel_stress() {
     let created = ts(2026, 1, 1);
