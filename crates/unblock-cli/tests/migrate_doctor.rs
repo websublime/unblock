@@ -353,11 +353,7 @@ fn make_comments_table_stale(ws: &Workspace) {
 fn drop_comment_columns(ws: &Workspace) {
     let rt = runtime();
     rt.block_on(async {
-        let database = libsql::Builder::new_local(ws.db_path())
-            .build()
-            .await
-            .expect("open the workspace db");
-        let conn = database.connect().expect("connect");
+        let conn = common::raw_connection(&ws.db_path()).await;
         for column in ["updated_at", "redacted_at"] {
             conn.execute(&format!("ALTER TABLE comments DROP COLUMN {column}"), ())
                 .await
@@ -370,11 +366,7 @@ fn drop_comment_columns(ws: &Workspace) {
 fn comments_columns(ws: &Workspace) -> Vec<String> {
     let rt = runtime();
     rt.block_on(async {
-        let database = libsql::Builder::new_local(ws.db_path())
-            .build()
-            .await
-            .expect("open the workspace db");
-        let conn = database.connect().expect("connect");
+        let conn = common::raw_connection(&ws.db_path()).await;
         let mut rows = conn
             .query("PRAGMA table_info(comments)", ())
             .await
@@ -393,11 +385,7 @@ fn comments_columns(ws: &Workspace) -> Vec<String> {
 fn stamped_user_version(ws: &Workspace) -> i64 {
     let rt = runtime();
     rt.block_on(async {
-        let database = libsql::Builder::new_local(ws.db_path())
-            .build()
-            .await
-            .expect("open the workspace db");
-        let conn = database.connect().expect("connect");
+        let conn = common::raw_connection(&ws.db_path()).await;
         let mut rows = conn.query("PRAGMA user_version", ()).await.expect("uv");
         let row = rows.next().await.expect("row").expect("present");
         row.get_value(0)
@@ -845,11 +833,7 @@ fn plant_dangling_edge(ws: &Workspace, source: &str, target: &str, dep_type: &st
         .build()
         .expect("build a current-thread runtime");
     rt.block_on(async {
-        let database = libsql::Builder::new_local(ws.db_path())
-            .build()
-            .await
-            .expect("open the workspace db");
-        let conn = database.connect().expect("connect");
+        let conn = common::raw_connection(&ws.db_path()).await;
         conn.execute(
             "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) \
              VALUES (?1, ?2, ?3, '2026-08-01T00:00:00Z', 'planted')",

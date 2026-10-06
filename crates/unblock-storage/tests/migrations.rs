@@ -14,7 +14,9 @@
 //! Every "this case pins X" claim below is proven by APPLYING the mutation and observing red, never
 //! by reading the test — see each cell's MUTANT KILLED notes.
 
-use libsql::{Connection, Database};
+use std::ops::Deref;
+
+use libsql::{Connection, Statement};
 use unblock_error::CodedError as _;
 use unblock_storage::{LibsqlStorage, Storage, StorageError};
 
@@ -203,14 +205,42 @@ const HISTORICAL_BASELINE_SQL: &str = r"
 /// The two columns step 2 reconciles, as the production step appends them.
 const STEP_TWO_COLUMNS: [&str; 2] = ["updated_at", "redacted_at"];
 
-/// A raw libsql handle on `path` (the same bundled `SQLite` the backend uses).
-async fn raw(path: &std::path::Path) -> (Database, Connection) {
+/// A raw libsql connection (the same bundled `SQLite` the backend uses) that closes its handle
+/// exactly once.
+///
+/// libsql 0.9.30 closes a dropped connection's handle TWICE (ub-q1u, tursodatabase/libsql#2251), and
+/// the second close can shut a connection another test in this process has just opened.
+/// `_close_guard` is a prepared, never-stepped statement declared AFTER `conn`, so it drops after
+/// it: while it lives, `conn`'s drop closes nothing, and its own drop closes the handle once. Same
+/// mechanism as the backend's `src/libsql/close_once.rs`.
+struct RawConnection {
+    conn: Connection,
+    _close_guard: Statement,
+}
+
+impl Deref for RawConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+/// A [`RawConnection`] on the database file at `path`.
+async fn raw(path: &std::path::Path) -> RawConnection {
     let db = libsql::Builder::new_local(path)
         .build()
         .await
         .expect("open the db");
     let conn = db.connect().expect("connect");
-    (db, conn)
+    let close_guard = conn
+        .prepare("SELECT 1")
+        .await
+        .expect("prepare the close guard");
+    RawConnection {
+        conn,
+        _close_guard: close_guard,
+    }
 }
 
 /// Seed a database at the HISTORICAL baseline and stamp it `stamp`.
@@ -220,7 +250,7 @@ async fn raw(path: &std::path::Path) -> (Database, Connection) {
 /// stamp). Both must reach the current shape, and neither may be stamped at the current version
 /// without running the ladder.
 async fn seed_historical(path: &std::path::Path, stamp: i32) {
-    let (_db, conn) = raw(path).await;
+    let conn = raw(path).await;
     conn.execute_batch(HISTORICAL_BASELINE_SQL)
         .await
         .expect("apply the historical baseline");
@@ -231,7 +261,7 @@ async fn seed_historical(path: &std::path::Path, stamp: i32) {
 
 /// Insert one comment row through the 4-column historical INSERT (what an old build wrote).
 async fn seed_historical_comment(path: &std::path::Path, issue_id: &str, text: &str) {
-    let (_db, conn) = raw(path).await;
+    let conn = raw(path).await;
     conn.execute(
         "INSERT INTO issues (id, title, created_at, updated_at) \
          VALUES (?1, 'seeded', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z')",
@@ -315,7 +345,7 @@ async fn a_five_column_database_stamped_one_reaches_the_current_shape() {
         "the ladder advanced the stale database to the current stamp"
     );
 
-    let (_db, conn) = raw(&db).await;
+    let conn = raw(&db).await;
     let cols = columns(&conn, "comments").await;
     assert_eq!(
         cols,
@@ -370,7 +400,7 @@ async fn a_seven_column_database_stamped_one_succeeds_with_no_ddl() {
     let db = tmp.path().join("unblock.db");
     seed_historical(&db, 1).await;
     {
-        let (_db, conn) = raw(&db).await;
+        let conn = raw(&db).await;
         for column in STEP_TWO_COLUMNS {
             conn.query(
                 &format!("ALTER TABLE comments ADD COLUMN {column} DATETIME"),
@@ -388,7 +418,7 @@ async fn a_seven_column_database_stamped_one_succeeds_with_no_ddl() {
         "an already-shaped database is still ADVANCED to the current stamp"
     );
 
-    let (_db, conn) = raw(&db).await;
+    let conn = raw(&db).await;
     let cols = columns(&conn, "comments").await;
     assert_eq!(cols.len(), 7, "no column was added twice");
 }
@@ -411,7 +441,7 @@ async fn a_stamped_zero_database_with_tables_falls_through_the_ladder() {
     let storage = open_and_migrate(&db).await;
     assert_eq!(storage.schema_version().await.expect("schema_version"), 2);
 
-    let (_db, conn) = raw(&db).await;
+    let conn = raw(&db).await;
     assert_eq!(columns(&conn, "comments").await.len(), 7);
 }
 
@@ -442,7 +472,7 @@ async fn a_fresh_database_reaches_the_current_shape_by_running_the_ladder() {
         "0 -> 2 is a REAL migration even on a brand-new file"
     );
 
-    let (_db, conn) = raw(&db).await;
+    let conn = raw(&db).await;
     let cols = columns(&conn, "comments").await;
     assert_eq!(
         cols,
@@ -477,8 +507,8 @@ async fn a_migrated_database_and_a_fresh_one_agree_on_shape() {
     let fresh_path = tmp.path().join("fresh.db");
     let _fresh = open_and_migrate(&fresh_path).await;
 
-    let (_a, migrated_conn) = raw(&migrated_path).await;
-    let (_b, fresh_conn) = raw(&fresh_path).await;
+    let migrated_conn = raw(&migrated_path).await;
+    let fresh_conn = raw(&fresh_path).await;
 
     for table in [
         "issues",
@@ -519,7 +549,7 @@ async fn re_migrating_is_a_noop_and_a_future_stamp_is_refused() {
     drop(storage);
 
     {
-        let (_db, conn) = raw(&db).await;
+        let conn = raw(&db).await;
         conn.query("PRAGMA user_version = 99", ())
             .await
             .expect("stamp a future version");
@@ -612,7 +642,7 @@ async fn a_lying_stamp_is_refused_naming_the_missing_column() {
     // (This is what makes the hint the remedy rather than a description — there is no in-product
     // rescue verb for this state, since `sync export` is broken by the same stale shape.)
     {
-        let (_db, conn) = raw(&db).await;
+        let conn = raw(&db).await;
         conn.query("PRAGMA user_version = 1", ())
             .await
             .expect("reset the lying stamp to the baseline, exactly as the hint says");
@@ -629,7 +659,7 @@ async fn a_lying_stamp_is_refused_naming_the_missing_column() {
         2,
         "the recovered database ends at the current version"
     );
-    let (_db, conn) = raw(&db).await;
+    let conn = raw(&db).await;
     let present = columns(&conn, "comments").await;
     for column in STEP_TWO_COLUMNS {
         assert!(

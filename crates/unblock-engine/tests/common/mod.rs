@@ -1066,3 +1066,41 @@ pub mod race {
         }
     }
 }
+
+/// A raw libsql connection (the same bundled `SQLite` the backend uses) that closes its handle
+/// exactly once.
+///
+/// libsql 0.9.30 closes a dropped connection's handle TWICE (ub-q1u, tursodatabase/libsql#2251), and
+/// the second close can shut a connection another test in this process has just opened.
+/// `_close_guard` is a prepared, never-stepped statement declared AFTER `conn`, so it drops after
+/// it: while it lives, `conn`'s drop closes nothing, and its own drop closes the handle once. Same
+/// mechanism as `unblock-storage`'s `src/libsql/close_once.rs`.
+pub struct RawConnection {
+    conn: libsql::Connection,
+    _close_guard: libsql::Statement,
+}
+
+impl std::ops::Deref for RawConnection {
+    type Target = libsql::Connection;
+
+    fn deref(&self) -> &libsql::Connection {
+        &self.conn
+    }
+}
+
+/// Open a [`RawConnection`] on the database file at `db`.
+pub async fn raw_connection(db: &std::path::Path) -> RawConnection {
+    let database = libsql::Builder::new_local(db)
+        .build()
+        .await
+        .expect("raw open");
+    let conn = database.connect().expect("connect");
+    let close_guard = conn
+        .prepare("SELECT 1")
+        .await
+        .expect("prepare the close guard");
+    RawConnection {
+        conn,
+        _close_guard: close_guard,
+    }
+}
