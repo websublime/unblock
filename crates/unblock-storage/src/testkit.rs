@@ -125,9 +125,10 @@ pub trait StorageTestkit: Storage {
 /// Run the **full** backend-independent `Storage` contract suite (NFR-16) against a backend produced
 /// by `factory`.
 ///
-/// `factory` must yield a **fresh, migrated** store on each call (no cross-case state). The
-/// concurrency case wraps the produced store in `Arc<S>` and spawns tokio tasks, hence the
-/// `'static` / `Send` bounds.
+/// `factory` must yield a **fresh, migrated** store on each call (no cross-case state), and calls may
+/// run **concurrently**: each yields a store independent of every other (for a file backend, its own
+/// workspace directory). The concurrency cases spawn tokio tasks, hence the `'static` / `Send`
+/// bounds; run the suite on a multi-thread runtime so those tasks really overlap.
 ///
 /// # Panics
 ///
@@ -252,6 +253,10 @@ where
 
     // Production trait read-half (D21): next_child_number advances as children are created.
     contract_next_child_number(factory().await).await;
+
+    // Concurrency: whole store lifecycles overlapping in one process (ub-q1u). Last, because it
+    // takes ownership of the factory.
+    contract_concurrent_store_lifecycles_are_isolated(Arc::new(factory)).await;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -1380,6 +1385,62 @@ pub async fn contract_undefer_issue<S: Storage>(storage: S) {
         "undefer writes a second Updated"
     );
 }
+
+// --------------------------------------------------------------------------------------------------
+// Concurrency — independent store lifecycles (ub-q1u)
+// --------------------------------------------------------------------------------------------------
+
+/// Stores opened, used and dropped concurrently in one process never disturb one another.
+///
+/// [`LIFECYCLE_TASKS`] tasks each run [`LIFECYCLE_ROUNDS`] whole lifecycles: `factory()`, one write,
+/// a read-back, drop. Stores are therefore torn down while others are being opened. Every lifecycle
+/// must succeed, and each store must list exactly its own issue. A backend that tears a connection
+/// down twice fails this case under load (ub-q1u: libsql 0.9.30 closed every handle twice). The
+/// store whose handle got closed under it fails its next call. A store whose handle ended up on
+/// another store's database lists someone else's issue, or none.
+pub async fn contract_concurrent_store_lifecycles_are_isolated<S, F, Fut>(factory: Arc<F>)
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = S> + Send + 'static,
+    S: Storage + 'static,
+{
+    let mut handles = Vec::with_capacity(LIFECYCLE_TASKS);
+    for task in 0..LIFECYCLE_TASKS {
+        let factory = Arc::clone(&factory);
+        handles.push(tokio::spawn(async move {
+            for round in 0..LIFECYCLE_ROUNDS {
+                let storage = factory().await;
+                let id = format!("ub-t{task}r{round}");
+                storage
+                    .create_issue(&issue(&id, "lifecycle"), "a")
+                    .await
+                    .unwrap_or_else(|e| panic!("task {task} round {round}: create failed: {e:?}"));
+                let listed: Vec<String> = storage
+                    .list_issues(&ListFilters::default())
+                    .await
+                    .unwrap_or_else(|e| panic!("task {task} round {round}: list failed: {e:?}"))
+                    .into_iter()
+                    .map(|i| i.id)
+                    .collect();
+                assert_eq!(
+                    listed,
+                    vec![id],
+                    "task {task} round {round}: a store must see exactly its own issue"
+                );
+                drop(storage);
+            }
+        }));
+    }
+    for handle in handles {
+        handle.await.expect("lifecycle task panicked");
+    }
+}
+
+/// Concurrent tasks in [`contract_concurrent_store_lifecycles_are_isolated`].
+const LIFECYCLE_TASKS: usize = 16;
+
+/// Whole store lifecycles each task runs in [`contract_concurrent_store_lifecycles_are_isolated`].
+const LIFECYCLE_ROUNDS: usize = 8;
 
 // --------------------------------------------------------------------------------------------------
 // Queries
@@ -3196,23 +3257,6 @@ const SEED_CHUNK: usize = 1_000;
 /// backend the passive WAL-checkpoint cadence (`CHECKPOINT_EVERY_N_MUTATIONS`) fires on the held
 /// write connection as the committed chunk-txs accumulate, keeping the `-wal` sidecar bounded across
 /// the whole seed (the contention-lab precedent — no unbounded WAL growth even at 250k).
-///
-/// # Invariant: file-backed storage for large `n` / high-concurrency seeding (T3.5.1, unblock-storage.md §5 OQ-8)
-///
-/// Callers **MUST** pass a **file-backed** (`open_local`) storage when `n` is large or several tasks
-/// seed concurrently — never the shared-cache `open_in_memory` path. `open_in_memory`'s docs explain
-/// why: its `memory_open_lock` serializes only the open-vs-open race, and a large concurrent
-/// shared-cache transaction (or a concurrent store close) can still aggravate the same `SQLite`
-/// process-global shared-cache registry race under heavy load — the intermittent flake observed at
-/// T3.5.1. `benches/storage.rs` and `tests/scale.rs` already honor this (both seed a file-backed
-/// store); `tests/heavy_corpus_stress.rs` is the dedicated regression proof for the boundary.
-///
-/// This function deliberately carries **no runtime guard** rejecting an in-memory `storage`: it is
-/// generic over `S: Storage` and cannot cleanly detect file-vs-memory from the trait alone, and adding
-/// a detection seam would either widen the production `create_issues` path or land somewhere not
-/// cleanly reachable from here — either a genuine (and unwarranted) production-behaviour change for a
-/// test/bench-only invariant. The boundary is enforced by this doc, the `tests/heavy_corpus_stress.rs`
-/// regression, and code review instead — a deliberate omission, not an oversight.
 ///
 /// # Errors
 ///

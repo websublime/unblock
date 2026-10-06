@@ -4,7 +4,9 @@
 //! file binds it to the two libsql constructors — `open_in_memory` (shared-cache) and `open_local`
 //! (a temp-file WAL DB) — so the contract is proven on **both** the in-memory and the file-backed
 //! paths. Each factory call yields a **fresh, migrated** store (no cross-case state), the temp-file
-//! leg using a unique filename per call.
+//! leg giving every call its own workspace directory. The suite calls the factory concurrently in
+//! its store-lifecycle case, and stores sharing a directory would share one `.write.lock` (D31).
+//! Both legs run on a multi-thread runtime so the suite's concurrency cases really overlap.
 //!
 //! This is the reusable proof the v2+ pluggable-backend seam relies on: a future backend supplies a
 //! factory and reuses the exact same suite.
@@ -30,19 +32,21 @@ async fn fresh_in_memory() -> LibsqlStorage {
     storage
 }
 
-/// Monotonic counter giving each temp-file factory call a unique filename within the shared `TempDir`.
+/// Monotonic counter giving each temp-file factory call a unique workspace directory within the
+/// shared `TempDir`.
 static FILE_DB_SEQ: AtomicU64 = AtomicU64::new(0);
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn contract_suite_in_memory() {
     unblock_storage::run_storage_contract_suite(fresh_in_memory).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn contract_suite_temp_file() {
-    // One TempDir for the whole suite run; each factory call gets a UNIQUE filename inside it, so the
-    // fresh-per-case guarantee holds (no DB file is reused across cases). The TempDir is owned for
-    // the duration of the suite and cleaned up on drop.
+    // One TempDir for the whole suite run; each factory call gets a UNIQUE workspace directory
+    // inside it, so the fresh-per-case guarantee holds (no DB file is reused across cases) and
+    // concurrent calls never contend on a shared `.write.lock`. The TempDir is owned for the
+    // duration of the suite and cleaned up on drop.
     let dir = tempfile::tempdir().expect("tempdir");
     let base = dir.path().to_path_buf();
 
@@ -50,7 +54,9 @@ async fn contract_suite_temp_file() {
         let base = base.clone();
         async move {
             let seq = FILE_DB_SEQ.fetch_add(1, Ordering::Relaxed);
-            let path = base.join(format!("contract-{seq}.db"));
+            let workspace = base.join(format!("contract-{seq}"));
+            std::fs::create_dir(&workspace).expect("create the per-store workspace dir");
+            let path = workspace.join("unblock.db");
             let storage =
                 LibsqlStorage::open_local(&path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
                     .await
