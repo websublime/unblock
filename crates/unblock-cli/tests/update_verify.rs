@@ -614,3 +614,256 @@ async fn update_dry_run_authenticates_with_the_github_token_env() {
     let after = std::fs::read(&bin_path).expect("read the unblock binary after");
     assert_eq!(before, after, "--dry-run never swaps the binary");
 }
+
+/// Stand up a mock GHE release source that refuses EVERY GET with `status`. One catch-all mock covers
+/// both `/releases/latest`, whose failure axoupdater swallows, and `/releases`, whose
+/// `error_for_status` is the failure that reaches unblock (D55 clause (1)).
+#[cfg(unix)]
+async fn refusing_release_server(status: u16) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(status)
+                .set_body_json(serde_json::json!({ "message": "refused by the mock" })),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+/// The release list URL the refusal carries, as the rendered message spells it.
+#[cfg(unix)]
+fn releases_url(server: &MockServer) -> String {
+    format!("{}/api/v3/repos/websublime/unblock/releases", server.uri())
+}
+
+/// Run `unblock update` with `args` against a mock that refuses every query with `status`, with an
+/// eligible receipt behind any release so a real run reaches the release query. `token` is the
+/// `AXOUPDATER_GITHUB_TOKEN` value (`None` removes it). A non-blank token runs at `RUST_LOG=trace`, so
+/// the token-absence check also covers the HTTP stack's trace output; a tokenless run removes
+/// `RUST_LOG`. Asserts the on-disk binary is byte-unchanged and that a non-blank token is on neither
+/// stream, then returns the output and the mock's list URL.
+#[cfg(unix)]
+async fn refusal_run(
+    status: u16,
+    token: Option<&str>,
+    args: &[&str],
+) -> (std::process::Output, String) {
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    let bin_path = assert_cmd::cargo::cargo_bin("unblock");
+    let canonical_bin = std::fs::canonicalize(&bin_path).expect("canonicalize unblock binary");
+    let install_prefix = canonical_bin.parent().expect("binary parent dir");
+    write_version_receipt(config_dir.path(), install_prefix, "0.0.1");
+    let server = refusing_release_server(status).await;
+    let before = std::fs::read(&bin_path).expect("read the unblock binary before");
+
+    let mut cmd = unblock();
+    cmd.args(args)
+        .env("AXOUPDATER_CONFIG_PATH", config_dir.path())
+        .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
+        .env(GHE_BASE_URL_ENV, server.uri())
+        .env_remove("UNBLOCK_CLI_INSTALLER_GITHUB_BASE_URL")
+        .env("AXOUPDATER_APP_NAME", APP_NAME);
+    match token {
+        Some(value) if !value.trim().is_empty() => cmd
+            .env("AXOUPDATER_GITHUB_TOKEN", value)
+            .env("RUST_LOG", "trace"),
+        Some(value) => cmd
+            .env("AXOUPDATER_GITHUB_TOKEN", value)
+            .env_remove("RUST_LOG"),
+        None => cmd
+            .env_remove("AXOUPDATER_GITHUB_TOKEN")
+            .env_remove("RUST_LOG"),
+    };
+    let out = cmd.output().expect("run `unblock update`");
+
+    let after = std::fs::read(&bin_path).expect("read the unblock binary after");
+    assert_eq!(before, after, "a refused query never swaps the binary");
+    if let Some(value) = token.filter(|value| !value.trim().is_empty()) {
+        for (stream, bytes) in [("stdout", &out.stdout), ("stderr", &out.stderr)] {
+            assert!(
+                !String::from_utf8_lossy(bytes).contains(value),
+                "the token must never be rendered on {stream}"
+            );
+        }
+    }
+    (out, releases_url(&server))
+}
+
+/// Parse the JSON structured error on stdout and assert its code, exit code and `retryable` flag.
+#[cfg(unix)]
+fn assert_json_refusal(
+    out: &std::process::Output,
+    code: &str,
+    exit: i32,
+    retryable: bool,
+) -> String {
+    assert_eq!(
+        out.status.code(),
+        Some(exit),
+        "expected {code} (exit {exit}); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: Value =
+        serde_json::from_slice(&out.stdout).expect("valid JSON structured error on stdout (FR-11)");
+    assert_eq!(value["code"], code);
+    assert_eq!(value["retryable"], retryable);
+    value["message"]
+        .as_str()
+        .expect("the structured error carries a message")
+        .to_owned()
+}
+
+/// The anonymous-refusal text for `status` (PRD §4 D55 clause (5)).
+#[cfg(unix)]
+fn rate_limited_unset_message(status: u16, url: &str) -> String {
+    format!(
+        "self-update failed: GitHub refused the release query with HTTP {status} ({url}). Anonymous \
+         queries share GitHub's limit of 60 per hour per IP address. Set AXOUPDATER_GITHUB_TOKEN to a \
+         GitHub token, or retry later."
+    )
+}
+
+/// The token-set refusal text for `status` (PRD §4 D55 clause (5)).
+#[cfg(unix)]
+fn rate_limited_set_message(status: u16, url: &str) -> String {
+    format!(
+        "self-update failed: GitHub refused the release query with HTTP {status} ({url}) although \
+         AXOUPDATER_GITHUB_TOKEN is set. The authenticated rate limit may be used up, or GitHub may be \
+         refusing the token, for example after repeated failed logins. Retry later, and check the \
+         token if it keeps failing."
+    )
+}
+
+#[cfg(unix)]
+const DRY_RUN_JSON: &[&str] = &["update", "--dry-run", "--output", "json"];
+#[cfg(unix)]
+const REFUSAL_TOKEN: &str = "ghp_refusal_token_must_never_be_echoed_42";
+
+/// D55: an anonymous 403 is `RATE_LIMITED`, exit 2, retryable, with the anonymous text.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_refusal_403_unset_is_rate_limited() {
+    let (out, url) = refusal_run(403, None, DRY_RUN_JSON).await;
+    let message = assert_json_refusal(&out, "RATE_LIMITED", 2, true);
+    assert_eq!(message, rate_limited_unset_message(403, &url));
+}
+
+/// D55: a blank or whitespace-only token counts as unset, so a 403 reads exactly as the anonymous one.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_refusal_403_blank_reads_as_unset() {
+    for blank in ["", "  \t"] {
+        let (out, url) = refusal_run(403, Some(blank), DRY_RUN_JSON).await;
+        let message = assert_json_refusal(&out, "RATE_LIMITED", 2, true);
+        assert_eq!(
+            message,
+            rate_limited_unset_message(403, &url),
+            "token {blank:?}"
+        );
+    }
+}
+
+/// D55: a 403 with the token set is `RATE_LIMITED`, with the token-set text and no token rendered.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_refusal_403_set_is_rate_limited_and_names_the_token_env() {
+    let (out, url) = refusal_run(403, Some(REFUSAL_TOKEN), DRY_RUN_JSON).await;
+    let message = assert_json_refusal(&out, "RATE_LIMITED", 2, true);
+    assert_eq!(message, rate_limited_set_message(403, &url));
+}
+
+/// D55: an anonymous 429 is `RATE_LIMITED`; the WHOLE message is pinned byte for byte.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_refusal_429_unset_is_rate_limited_with_the_whole_message() {
+    let (out, url) = refusal_run(429, None, DRY_RUN_JSON).await;
+    let message = assert_json_refusal(&out, "RATE_LIMITED", 2, true);
+    assert_eq!(
+        message,
+        format!(
+            "self-update failed: GitHub refused the release query with HTTP 429 ({url}). Anonymous \
+             queries share GitHub's limit of 60 per hour per IP address. Set AXOUPDATER_GITHUB_TOKEN \
+             to a GitHub token, or retry later."
+        )
+    );
+}
+
+/// D55: a 401 with the token set is `CONFIG_ERROR`, exit 7, not retryable; the WHOLE message is pinned.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_refusal_401_set_is_config_error_with_the_whole_message() {
+    let (out, url) = refusal_run(401, Some(REFUSAL_TOKEN), DRY_RUN_JSON).await;
+    let message = assert_json_refusal(&out, "CONFIG_ERROR", 7, false);
+    assert_eq!(
+        message,
+        format!(
+            "self-update failed: GitHub rejected the token in AXOUPDATER_GITHUB_TOKEN with HTTP 401 \
+             ({url}). Replace it with a valid token, or unset it to query anonymously."
+        )
+    );
+}
+
+/// D55: a tokenless 401 is `CONFIG_ERROR`, exit 7, not retryable, with the tokenless text; the WHOLE
+/// message is pinned. GitHub itself never sends it, but a GitHub Enterprise base URL can.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_refusal_401_unset_is_config_error() {
+    let (out, url) = refusal_run(401, None, DRY_RUN_JSON).await;
+    let message = assert_json_refusal(&out, "CONFIG_ERROR", 7, false);
+    assert_eq!(
+        message,
+        format!(
+            "self-update failed: the release source refused the query with HTTP 401 ({url}) and \
+             requires a token. Set AXOUPDATER_GITHUB_TOKEN to a token it accepts."
+        )
+    );
+}
+
+/// D55 boundary: a 404 is no refusal D55 classifies, so it stays `INTERNAL_ERROR`, exit 1.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_refusal_404_set_stays_internal_error() {
+    let (out, _url) = refusal_run(404, Some(REFUSAL_TOKEN), DRY_RUN_JSON).await;
+    let message = assert_json_refusal(&out, "INTERNAL_ERROR", 1, false);
+    assert!(
+        !message.contains("AXOUPDATER_GITHUB_TOKEN"),
+        "a 404 keeps the plain self-update text; got: {message}"
+    );
+}
+
+/// D55 under `-o plain`: exactly one `error[RATE_LIMITED]` line on stderr and nothing on stdout.
+/// Plain output carries no `retryable`, so none is asserted.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_refusal_403_unset_plain_is_one_stderr_line() {
+    let (out, url) = refusal_run(403, None, &["update", "--dry-run", "-o", "plain"]).await;
+    assert_eq!(out.status.code(), Some(2), "a 403 exits 2 in every format");
+    assert!(
+        out.stdout.is_empty(),
+        "plain errors never reach stdout (NFR-14)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines.len(), 1, "exactly one stderr line; got: {stderr}");
+    assert!(
+        lines[0].starts_with("error[RATE_LIMITED]: self-update failed:"),
+        "got: {stderr}"
+    );
+    assert_eq!(
+        lines[0],
+        format!(
+            "error[RATE_LIMITED]: {}",
+            rate_limited_unset_message(403, &url)
+        )
+    );
+}
+
+/// D55 on a real run (no `--dry-run`): a 403 with the token set is `RATE_LIMITED` and swaps nothing.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_refusal_403_set_on_a_real_run_is_rate_limited_and_swaps_nothing() {
+    let (out, url) = refusal_run(403, Some(REFUSAL_TOKEN), &["update", "--output", "json"]).await;
+    let message = assert_json_refusal(&out, "RATE_LIMITED", 2, true);
+    assert_eq!(message, rate_limited_set_message(403, &url));
+}
