@@ -22,6 +22,7 @@
 //! `busy_timeout = 0` and hand-rolled a flock + sleep backoff to dodge *frankensqlite*'s hot-spin;
 //! libsql ships real `SQLite`, whose native timeout resolves that defect by construction.
 
+mod close_once;
 mod comments;
 mod crud;
 mod deps;
@@ -57,7 +58,6 @@ pub(crate) use schema::BASELINE_SCHEMA_VERSION;
 mod testkit;
 
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -73,6 +73,7 @@ use unblock_model::{
 
 use crate::error::{StorageError, is_busy_locked, map_libsql_err};
 use crate::filters::{DeletePlan, IssuePatch};
+use crate::libsql::close_once::CloseOnceConnection;
 use crate::libsql::lock::WriteLock;
 use crate::trait_def::Storage;
 
@@ -96,26 +97,6 @@ pub(crate) const CHECKPOINT_EVERY_N_MUTATIONS: u64 = 50;
 /// Monotonic counter giving each `open_in_memory()` a unique shared-cache name, so two in-memory
 /// stores never collide on the process-global `SQLite` shared cache.
 static MEMORY_DB_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Serializes the **shared-cache in-memory open** sequence across the whole process.
-///
-/// `open_in_memory()` opens a `cache=shared` URI. Opening a shared-cache database mutates `SQLite`'s
-/// **process-global shared-cache registry** (the `sqlite3SharedCacheList` linked list), and libsql
-/// opens connections with the default mutex flags — so two threads racing `sqlite3_open_v2` on
-/// shared-cache URIs concurrently can corrupt that global step and surface `SQLITE_MISUSE`
-/// ("bad parameter or other API misuse"). This is a genuine `SQLite` shared-cache concurrency
-/// limitation, not cross-store contention: even *distinct* shared-cache names race in the global
-/// list. Serializing the open (build + both `connect()`s + pragmas) removes the race at its source —
-/// this is mutual exclusion around a non-reentrant global op, NOT a retry/sleep band-aid.
-///
-/// Scoped to the **in-memory** path only: `open_local()` opens a private file with no shared cache and
-/// is unaffected (and production runs on file DBs — D14/D15 — so this never serializes a hot path; an
-/// open happens once per workspace). The guard is a `tokio` async mutex because the guarded sequence
-/// awaits (`build`/pragmas); the brief critical section is the open, not the lifetime of the store.
-fn memory_open_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 /// Process-internal instrumentation for a [`LibsqlStorage`] — three monotonic counters plus the
 /// test-controllable checkpoint cadence and the (test-only) busy-witness/spin toggles.
@@ -237,10 +218,11 @@ pub struct LibsqlStorage {
     _db: Database,
     /// The serialized write connection. The async [`Mutex`] guarantees one in-flight `BEGIN
     /// IMMEDIATE` mutation at a time *within this process* even if the engine's D14 permit is ever
-    /// bypassed; under normal operation it is uncontended.
-    write_conn: Mutex<Connection>,
+    /// bypassed; under normal operation it is uncontended. A [`CloseOnceConnection`], like
+    /// `read_conn`, so dropping the store closes each `SQLite` handle exactly once (ub-q1u).
+    write_conn: Mutex<CloseOnceConnection>,
     /// The read connection (WAL MVCC reader snapshots; never serialized behind the writer).
-    read_conn: Connection,
+    read_conn: CloseOnceConnection,
     /// The native `busy_timeout` (ms) applied to both connections. Always [`BUSY_TIMEOUT_MS`] in
     /// production; the gated forced-spin test constructor sets it to `0` so losers spin-retry
     /// (proving the contention-lab metric actually detects a hot-spin).
@@ -323,27 +305,13 @@ impl LibsqlStorage {
     /// skipped on this path (asserting WAL there is a no-op). Real WAL + `busy_timeout` concurrency is
     /// validated by the **T0.8 contention lab on a file DB**, not here.
     ///
-    /// The whole open sequence (build + connect + pragmas) is serialized process-wide via
-    /// [`memory_open_lock`]: opening a `cache=shared` URI mutates `SQLite`'s global shared-cache
-    /// registry, which is not safe to run concurrently and otherwise intermittently surfaces
-    /// `SQLITE_MISUSE` ("bad parameter or other API misuse") under parallel opens — a real `SQLite`
-    /// limitation, fixed at source here rather than masked (T0.9; root-fix of the T0.6 flake).
-    ///
-    /// # Test-only: light / low-concurrency use ONLY (T3.5.1 boundary, unblock-storage.md §5 OQ-8)
-    ///
-    /// This constructor is **test-only** and sized for **light or low-concurrency** tests.
-    /// **Heavy-corpus or high-concurrency-write tests MUST use [`open_local`](Self::open_local)**
-    /// (file-backed) instead. [`memory_open_lock`] serializes only the **open-vs-open** race (T0.9) —
-    /// it cannot cover the window where an open races a concurrent *large* shared-cache transaction (or
-    /// a concurrent store close) on another `open_in_memory` instance, which can still aggravate the
-    /// same `SQLite` process-global shared-cache registry race the open-lock does not reach. This
-    /// surfaced as a rare, intermittent flake under full-`cargo test --workspace` parallel load
-    /// (T3.5.1) that a dedicated single-process adversarial harness could not reproduce — i.e. it is a
-    /// load-marginal artifact of the shared-cache registry, not a bug this constructor can safely
-    /// immunize against. The robust fix is the boundary this doc prescribes: keep `open_in_memory` for
-    /// light tests, and route heavy or high-concurrency corpus work through `open_local`, mirroring
-    /// the gated `testkit::seed_corpus` invariant note and the regression proof in
-    /// `tests/heavy_corpus_stress.rs`.
+    /// Opens need no process-wide serialization. libsql builds `SQLite` with `SQLITE_THREADSAFE=1`
+    /// and configures `SQLITE_CONFIG_SERIALIZED`, so `SQLite` guards its process-global shared-cache
+    /// list with its own static mutexes. The intermittent "bad parameter or other API misuse" that was
+    /// once blamed on that list (T0.9, T3.5.1) was libsql closing every connection handle twice
+    /// (ub-q1u). The private `CloseOnceConnection` wrapper fixes it for every constructor. The
+    /// heavy/high-concurrency boundary that T3.5.1 drew around this constructor rested on that
+    /// misdiagnosis and no longer applies.
     ///
     /// # Errors
     ///
@@ -354,13 +322,8 @@ impl LibsqlStorage {
         // two connections share one cache. `mode=memory` + `cache=shared` is interpreted because
         // libsql-ffi compiles SQLite with SQLITE_USE_URI.
         let uri = format!("file:unblock_mem_{seq}?mode=memory&cache=shared");
-        // Serialize the shared-cache open: `sqlite3_open_v2` on a `cache=shared` URI mutates SQLite's
-        // process-global shared-cache registry, which is not safe to run concurrently from multiple
-        // threads (it intermittently surfaces SQLITE_MISUSE). Hold the global open-lock for the whole
-        // build + connect + pragma sequence (`from_database`), then drop it; the store then runs
-        // fully concurrently. Scoped to in-memory only — `open_local` has no shared cache. See
-        // [`memory_open_lock`].
-        let _open_guard = memory_open_lock().lock().await;
+        // The unique `seq` rules out shared-cache name collisions. Concurrent opens are safe without
+        // serialization (see the method docs).
         let db = Builder::new_local(&uri)
             .build()
             .await
@@ -382,8 +345,8 @@ impl LibsqlStorage {
         busy_timeout_ms: u64,
         write_lock: Option<WriteLock>,
     ) -> Result<Self, StorageError> {
-        let write_conn = db.connect().map_err(map_libsql_err)?;
-        let read_conn = db.connect().map_err(map_libsql_err)?;
+        let write_conn = CloseOnceConnection::connect(&db).await?;
+        let read_conn = CloseOnceConnection::connect(&db).await?;
         apply_pragmas(&write_conn, file_backed, busy_timeout_ms).await?;
         apply_pragmas(&read_conn, file_backed, busy_timeout_ms).await?;
         Ok(Self {
@@ -402,8 +365,8 @@ impl LibsqlStorage {
     }
 
     /// Lock and borrow the write connection. Mutations acquire this, run a `BEGIN IMMEDIATE`
-    /// transaction, and release it on return.
-    pub(super) async fn write(&self) -> tokio::sync::MutexGuard<'_, Connection> {
+    /// transaction, and release it on return. The guard derefs to the libsql `Connection`.
+    pub(super) async fn write(&self) -> tokio::sync::MutexGuard<'_, CloseOnceConnection> {
         self.write_conn.lock().await
     }
 
@@ -436,9 +399,7 @@ impl LibsqlStorage {
 /// `file_backed`.** A shared-cache `:memory:` database cannot use WAL — it always reports
 /// `journal_mode = memory` — so asserting WAL there is a no-op; the in-memory store relies on
 /// shared-cache + the native `busy_timeout`, and real WAL concurrency is validated by the T0.8
-/// contention lab on a file DB. (The intermittent "bad parameter or other API misuse" seen under
-/// parallel in-memory opens is **not** caused by this pragma — it is the `SQLite` shared-cache
-/// global-open race, serialized at source by [`memory_open_lock`] in `open_in_memory`.)
+/// contention lab on a file DB.
 async fn apply_pragmas(
     conn: &Connection,
     file_backed: bool,
@@ -1044,11 +1005,12 @@ mod tests {
     }
 
     /// Stress the `open_in_memory` + migrate + first-write path under heavy parallelism: 32 tasks
-    /// each open an independent shared-cache in-memory store, migrate it, and write an issue. This is
-    /// the regression guard for the `SQLite` shared-cache global-open race (T0.6 flake): concurrent
-    /// `sqlite3_open_v2` on `cache=shared` URIs intermittently returned "bad parameter or other API
-    /// misuse" until `open_in_memory` began serializing the open via `memory_open_lock` (T0.9). Every
-    /// task must succeed.
+    /// each open an independent shared-cache in-memory store, migrate it, write an issue, read it
+    /// back and drop the store while other tasks are still opening theirs. Its intermittent "bad
+    /// parameter or other API misuse" (T0.6, T3.5.1, ub-q1u) was never a shared-cache race: libsql
+    /// closed each dropped handle twice, and the second close could hit a handle a concurrent open
+    /// had just been given. `CloseOnceConnection` (`close_once.rs`) holds the fix and its mechanism
+    /// test. Every task must succeed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn open_in_memory_parallel_first_write_stress() {
         use chrono::{TimeZone, Utc};
