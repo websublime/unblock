@@ -278,11 +278,7 @@ async fn doctor_schema_findings_report_the_stamp_and_the_build_version_separatel
     //    shape is untouched, so this is a stamp-only disagreement: exactly the observable the two
     //    findings exist to surface.
     {
-        let database = libsql::Builder::new_local(&db_path)
-            .build()
-            .await
-            .expect("raw open");
-        let conn = database.connect().expect("connect");
+        let conn = common::raw_connection(&db_path).await;
         conn.query("PRAGMA user_version = 1", ())
             .await
             .expect("re-stamp to the baseline");

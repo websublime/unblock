@@ -205,17 +205,51 @@ pub fn runtime() -> tokio::runtime::Runtime {
         .expect("build a current-thread runtime")
 }
 
+/// A raw libsql connection (the same bundled `SQLite` the backend uses) that closes its handle
+/// exactly once.
+///
+/// libsql 0.9.30 closes a dropped connection's handle TWICE (ub-q1u, tursodatabase/libsql#2251), and
+/// the second close can shut a connection another test in this process has just opened.
+/// `_close_guard` is a prepared, never-stepped statement declared AFTER `conn`, so it drops after
+/// it: while it lives, `conn`'s drop closes nothing, and its own drop closes the handle once. Same
+/// mechanism as `unblock-storage`'s `src/libsql/close_once.rs`.
+pub struct RawConnection {
+    conn: libsql::Connection,
+    _close_guard: libsql::Statement,
+}
+
+impl std::ops::Deref for RawConnection {
+    type Target = libsql::Connection;
+
+    fn deref(&self) -> &libsql::Connection {
+        &self.conn
+    }
+}
+
+/// Open a [`RawConnection`] on the workspace database file at `db`.
+pub async fn raw_connection(db: &Path) -> RawConnection {
+    let database = libsql::Builder::new_local(db)
+        .build()
+        .await
+        .expect("open the workspace db");
+    let conn = database.connect().expect("connect");
+    let close_guard = conn
+        .prepare("SELECT 1")
+        .await
+        .expect("prepare the close guard");
+    RawConnection {
+        conn,
+        _close_guard: close_guard,
+    }
+}
+
 /// Stamp `PRAGMA user_version = <version>` on the workspace DB via a raw libsql open (the same
 /// bundled `SQLite` the backend uses). This makes the on-disk schema look NEWER than this build so
 /// the next migrate rejects it with `SchemaMismatch` (D27/AF-2). The connection is dropped before
 /// the CLI child opens the file, so there is no writer contention.
 pub fn stamp_user_version(db: &Path, version: i64) {
     runtime().block_on(async {
-        let database = libsql::Builder::new_local(db)
-            .build()
-            .await
-            .expect("open the workspace db");
-        let conn = database.connect().expect("connect");
+        let conn = raw_connection(db).await;
         conn.execute(&format!("PRAGMA user_version = {version}"), ())
             .await
             .expect("stamp user_version");

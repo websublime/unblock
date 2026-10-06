@@ -395,11 +395,7 @@ fn corrupt_db(db: &std::path::Path) {
 /// partial write" the count channel of [`reopen_and_check`] must be sensitive to (mirrors
 /// `migrate_doctor.rs::stamp_user_version`'s raw-libsql idiom, adapted to an already-async caller).
 async fn seed_one_row_out_of_band(db: &std::path::Path) {
-    let database = libsql::Builder::new_local(db)
-        .build()
-        .await
-        .expect("open the workspace db");
-    let conn = database.connect().expect("connect");
+    let conn = common::raw_connection(db).await;
     conn.execute(
         "INSERT INTO issues (id, title) VALUES ('c-neg-partial', 'partial')",
         (),

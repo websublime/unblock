@@ -451,11 +451,7 @@ fn plant_dangling_edge(ws: &Workspace, source: &str, target: &str, dep_type: &st
         .build()
         .expect("build a current-thread runtime");
     rt.block_on(async {
-        let database = libsql::Builder::new_local(ws.db_path())
-            .build()
-            .await
-            .expect("open the workspace db");
-        let conn = database.connect().expect("connect");
+        let conn = common::raw_connection(&ws.db_path()).await;
         conn.execute(
             "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) \
              VALUES (?1, ?2, ?3, '2026-08-01T00:00:00Z', 'planted')",
