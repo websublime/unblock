@@ -4,7 +4,7 @@ description: Root-causing the intermittent "bad parameter or other API misuse" i
 type: run
 date: 2026-10-06
 branch: ub-q1u-libsql-double-close
-pr: '-'
+pr: '460'
 issues: [ub-q1u, ub-lp9.30]
 ---
 
