@@ -4,7 +4,7 @@ description: Classifying GitHub's refusals of the unblock update release query (
 type: run
 date: 2026-10-06
 branch: ub-e47-update-rate-limited
-pr: '-'
+pr: '459'
 issues: [ub-e47, ub-bq8, ub-pe6]
 ---
 
@@ -116,7 +116,7 @@ The planned sequence is docs(spec) → fix(update) → test(update) → ci(d55) 
 - `ub-bq8` — D55-SEC-N5, the bearer token sent to a `Link` header URL.
 - `ub-pe6` — D55-SEC-N4, the base-URL userinfo echo.
 - `ub-lp9.47` — the shared target dir test pair.
-- Pull request — none yet.
+- Pull request — 459 (`websublime/unblock`), opened 2026-10-06; merging is the human gate.
 - Key files —
   `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-cli/src/commands/update.rs`,
   `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-cli/src/exit.rs`,
