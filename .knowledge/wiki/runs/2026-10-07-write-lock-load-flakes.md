@@ -4,7 +4,7 @@ description: Making the two D31 write-lock test cells that failed under host loa
 type: run
 date: 2026-10-07
 branch: ub-fh5-write-lock-flake
-pr: '-'
+pr: '461'
 issues: [ub-fh5]
 ---
 
@@ -19,6 +19,7 @@ which saw no `IdCollision` at all. The second is `write_lock_flock_contention_an
 had folded into ub-fh5 earlier. The run went off main at e702ba6 on branch `ub-fh5-write-lock-flake`. It
 was a solo implementation followed by a read-only Verify gate of three reviewer agents (gate protocol,
 non-vacuity by mutation, docs and runtime) with the main session coordinating. No design Review gate ran.
+The work landed as PR 461.
 
 ## What & why
 
@@ -44,7 +45,7 @@ acquisitions, and with the loop in a separate process none in 400.
 ## Outcome
 
 - `tests/bin/write_lock_race.rs` and `tests/write_lock_two_process.rs` gate each child's first mutation over stdio. A child inside the read-to-insert window prints `GATE=entered` and waits for `GO`, and the test releases nobody until both children have reported. In `locked` mode the first acquire is one `try_lock` on a second handle opened with `lock_timeout_ms = 0`, so the loser reports `GATE=refused`. The locked half asserts one `entered` plus one `refused`, and the control asserts two `entered` and at least one collision.
-- `tests/contention_lab.rs` section 3 runs the MCP-server loop on its own runtime on a dedicated thread and stops it before asserting. The p99 is printed but not asserted, and the cell asserts the CLI is never starved to `write_lock_timeout_ms`.
+- `tests/contention_lab.rs` section 3 runs the MCP-server loop on its own runtime on a dedicated thread and stops it before asserting. The p99 is printed but not asserted, and the cell asserts the CLI is never starved to `write_lock_timeout_ms`. Miguel approved retiring the 500 ms ceiling on 2026-10-07.
 - `src/libsql/lock.rs` gained `contended_acquire_sees_the_release_within_one_poll`, a paused-clock test that pins the 25 ms poll. `tokio`'s `test-util` feature is on for `unblock-storage` dev-dependencies only, and `Cargo.lock` did not change.
 - The storage crate plan §5 gained a bullet that records both changes. The `tests/contention_lab.rs` row stays verbatim, following the ub-q1u precedent.
 - Under the same load the two-process cell went 0/30, the fairness cell 0/12 (recorded p99 1.2–7.4 s) and the cadence test 0/30.
@@ -70,6 +71,7 @@ No session-local ids were used in this run.
 - ub-fh5 — the two load-sensitive D31 cells this run made load-independent.
 - ub-0qm — the closed duplicate of the two-process failure.
 - ub-q1u — the sibling flake fix whose plan-doc convention this run followed.
+- https://github.com/websublime/unblock/pull/461 — the pull request.
 - `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-storage/tests/bin/write_lock_race.rs` — the child process and its stdio gate.
 - `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-storage/tests/write_lock_two_process.rs` — the gate driver and the gated assertions.
 - `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-storage/tests/contention_lab.rs` — section 3 of `write_lock_flock_contention_and_fairness`.
