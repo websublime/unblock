@@ -1286,8 +1286,9 @@ fn print_diagnostics(
 // The M0 legs above write via `create_issue` and take NO flock, so they REMAIN the **no-lock CONTROL**
 // that keeps the WAL busy-witness valid: the flock serializes UPSTREAM of `BEGIN IMMEDIATE`, so a
 // flock-in-the-path leg would read a 0 WAL witness (OQ-4). Here we witness the flock DIRECTLY (a
-// separate, non-spinning `try_lock`→`WouldBlock` witness) and pin a PROVISIONAL fairness ceiling under
-// an ASYMMETRIC MCP-server+CLI mix + the migrate-vs-MCP-server `timeout=0` refusal.
+// separate, non-spinning `try_lock`→`WouldBlock` witness), bound the stall of a CLI one-shot racing a
+// long-lived MCP server (the ASYMMETRIC mix) by `write_lock_timeout_ms`, and pin the migrate-vs-MCP-server
+// `timeout=0` refusal.
 // =====================================================================================================
 
 /// Open one `LibsqlStorage` on `db` with the given `.write.lock` acquire timeout.
@@ -1297,8 +1298,9 @@ async fn open_locked(db: &Path, lock_timeout_ms: u64) -> LibsqlStorage {
         .expect("open_local")
 }
 
-/// D31 (T3.4.1) — the `.write.lock` flock-contention witness + a PROVISIONAL p99-write-stall fairness
-/// bound under an ASYMMETRIC MCP-server+CLI mix, plus the migrate-vs-MCP-server `timeout=0` refusal (AC-8/AC-10).
+/// D31 (T3.4.1) — the `.write.lock` flock-contention witness + the no-starvation bound under an
+/// ASYMMETRIC MCP-server+CLI mix (p99 stall recorded), plus the migrate-vs-MCP-server `timeout=0`
+/// refusal (AC-8/AC-10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn write_lock_flock_contention_and_fairness() {
     // Serialize against the M0 CPU legs (whole-process CPU is attributable to this test — see
@@ -1410,51 +1412,69 @@ async fn write_lock_flock_contention_and_fairness() {
         "migrate acquires once the MCP server releases (the lock is not stuck)"
     );
 
-    // --- (3) PROVISIONAL p99-write-stall fairness under an ASYMMETRIC MCP-server+CLI mix ---
-    // A long-lived MCP server acquires the flock in brief bursts and releases (yields fairly); a "CLI
-    // one-shot" measures its acquire wait under that contention.
+    // --- (3) no starvation under an ASYMMETRIC MCP-server+CLI mix ---
+    // A long-lived MCP server takes the flock in brief bursts with gaps, and a "CLI one-shot" acquires
+    // under that contention. The MCP server runs on its own runtime on a dedicated thread, as it would
+    // in its own process. Keep it off the test's runtime, because under host load that sharing starved
+    // the CLI past the 30 s timeout (ub-fh5).
     let bg_db = db.clone();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let bg_stop = Arc::clone(&stop);
-    let bg = tokio::spawn(async move {
-        let mcp_server = open_locked(&bg_db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
-        while !bg_stop.load(Ordering::Relaxed) {
-            if let Ok(g) = mcp_server.acquire_write_lock().await {
-                tokio::time::sleep(Duration::from_millis(1)).await; // brief hold
-                drop(g);
-            }
-            // Rest between bursts so the flock (which is NOT FIFO-fair) does not starve the CLI — the
-            // asymmetric mix is an MCP server WITH gaps, not a pathological tight re-acquire loop.
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
+    let bg = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the MCP server's runtime")
+            .block_on(async move {
+                let mcp_server =
+                    open_locked(&bg_db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
+                while !bg_stop.load(Ordering::Relaxed) {
+                    if let Ok(g) = mcp_server.acquire_write_lock().await {
+                        tokio::time::sleep(Duration::from_millis(1)).await; // brief hold
+                        drop(g);
+                    }
+                    // Rest between bursts so the flock (which is NOT FIFO-fair) does not starve the
+                    // CLI — the asymmetric mix is an MCP server WITH gaps, not a pathological tight
+                    // re-acquire loop.
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            });
     });
 
     let cli = open_locked(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
     let mut waits: Vec<Duration> = Vec::with_capacity(200);
+    let mut starved = None;
     for _ in 0..200 {
         let start = Instant::now();
-        let g = cli
-            .acquire_write_lock()
-            .await
-            .expect("cli acquires (bounded, never a hang)");
-        waits.push(start.elapsed());
-        drop(g);
+        match cli.acquire_write_lock().await {
+            Ok(g) => {
+                waits.push(start.elapsed());
+                drop(g);
+            }
+            Err(err) => {
+                starved = Some(err);
+                break;
+            }
+        }
         tokio::time::sleep(Duration::from_micros(200)).await; // give the MCP server a turn
     }
-    stop.store(true, Ordering::Relaxed);
-    let _ = bg.await;
 
+    // Stop the MCP server before asserting, so a failure cannot leave its thread running.
+    stop.store(true, Ordering::Relaxed);
+    bg.join().expect("the MCP server thread");
+    assert!(
+        starved.is_none(),
+        "an MCP server that leaves gaps must never starve the CLI to write_lock_timeout_ms (got {starved:?})"
+    );
+
+    // The p99 stall is recorded, not asserted. PRD D31 accepts multi-second p99 stalls on this
+    // non-FIFO lock, and under CPU saturation the `open()` that starts every acquire is slow even with
+    // no holder (ub-fh5), so a wall-clock bound here measures the host. The poll cadence is pinned
+    // deterministically by the paused-clock unit test in `src/libsql/lock.rs`.
     waits.sort_unstable();
     let p99 = waits[(waits.len() * 99 / 100).min(waits.len() - 1)];
-    // PROVISIONAL fairness ceiling (calibration-pending — perf budgets are T3.5; mirrors the T0.8
-    // R-ratio pattern). The 30s `lock_timeout_ms` is the starvation HARD-ceiling; p99 must be far
-    // below it, which also witnesses no hang and no hot-spin (the poll sleeps).
-    assert!(
-        p99 <= Duration::from_millis(500),
-        "PROVISIONAL p99-write-stall <= 500ms under the asymmetric MCP-server+CLI mix (got {p99:?})"
-    );
     println!(
         "D31 flock: WouldBlock(contended)={wouldblock}/{k}, baseline=0; migrate-vs-MCP-server fail-fast OK; \
-         p99 acquire stall={p99:?} (ceiling 500ms, hard-ceiling = 30s lock_timeout)"
+         p99 acquire stall={p99:?} (recorded; no-starvation ceiling = 30s write_lock_timeout_ms)"
     );
 }
