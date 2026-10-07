@@ -380,4 +380,38 @@ mod tests {
         drop(held);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A contended acquire retries every 25 ms (PRD D31 clause 4, NFR-3), so a separate holder's
+    /// release is seen within one poll. The clock is paused, so tokio's timers advance only while the
+    /// runtime is idle and host load cannot move the result. A coarser interval or a backoff lands
+    /// the acquire past `HOLD + SPEC_POLL`.
+    #[tokio::test(start_paused = true)]
+    async fn contended_acquire_sees_the_release_within_one_poll() {
+        const HOLD: Duration = Duration::from_millis(300);
+        const SPEC_POLL: Duration = Duration::from_millis(25);
+        let dir = temp_dir("cadence");
+        let holder = WriteLock::new(&dir, DEFAULT_WRITE_LOCK_TIMEOUT_MS);
+        let waiter = WriteLock::new(&dir, DEFAULT_WRITE_LOCK_TIMEOUT_MS);
+        let held = holder.acquire().await.expect("holder acquires");
+
+        let start = tokio::time::Instant::now();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(HOLD).await;
+            drop(held);
+        });
+        let g = waiter
+            .acquire()
+            .await
+            .expect("waiter acquires after the release");
+        let wait = start.elapsed();
+        release.await.expect("release task");
+
+        assert!(
+            wait >= HOLD && wait <= HOLD + SPEC_POLL,
+            "the waiter must acquire within one {SPEC_POLL:?} poll of the release at {HOLD:?}, \
+             waited {wait:?}"
+        );
+        drop(g);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -50,8 +50,9 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 # Drives the `#[tokio::test]` async tests (object-safety coercion, in-memory round-trips,
-# concurrent-claim contention).
-tokio = { workspace = true }
+# concurrent-claim contention). `test-util` provides the paused clock that pins the D31 lock's poll
+# cadence without depending on host load (`src/libsql/lock.rs`, ub-fh5).
+tokio = { workspace = true, features = ["test-util"] }
 # Column-order / index-list / ErrorCode golden snapshots.
 insta = { workspace = true }
 # Row<->domain round-trip + invariant property tests.
