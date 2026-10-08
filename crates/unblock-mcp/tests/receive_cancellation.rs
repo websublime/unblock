@@ -8,12 +8,13 @@
 //! `mcp_server_duplex_for_test`), in the regime that loses them in production: fast handlers in
 //! flight and a promptly draining client.
 //!
-//! # Observation, without a single timeout
+//! # Observation, without a single sleep
 //!
 //! The shipped SENTINEL FOLLOW: one burst ending in a known-good sentinel request, read up to the
 //! sentinel's response, then inspect `seen_lines`. The PASS side is not a race. The transport writes
 //! a parked reply to completion before it reads the next frame, so the reply is on the wire before
-//! the sentinel is even read — ordering by construction, never by timing.
+//! the sentinel is even read — ordering by construction, never by timing. The only timer is
+//! `read_response`'s overall deadline (ub-f1k), which the passing path never waits on.
 
 mod common;
 

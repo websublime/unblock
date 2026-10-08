@@ -202,6 +202,15 @@ pub async fn call_tool_with_meta(
     (is_error, structured)
 }
 
+/// **[ub-f1k]** Overall deadline for one [`RawDuplexClient::read_response`] call. Generous so a
+/// loaded machine never trips it on the passing path; finite so an uncorrelatable reply is a fast red.
+pub const READ_RESPONSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// **[ub-f1k]** The most bytes of one line a [`RawDuplexClient::read_response`] deadline panic
+/// quotes (mirrors the CLI harness's `QUOTED_LINE_LIMIT`), so a huge frame cannot bury the message.
+/// Public so `tests/raw_duplex_client.rs` can pin the clip.
+pub const QUOTED_LINE_LIMIT: usize = 512;
+
 /// A RAW duplex MCP client — writes exact bytes, reads exact lines (D43).
 ///
 /// # Why the rmcp client cannot be used here
@@ -220,9 +229,9 @@ pub struct RawDuplexClient {
     ///
     /// `seen_ids` is not enough for D47: a reply whose `id` is OMITTED — the ambiguous/unusable
     /// arm — carries no id at all, so it is invisible to `seen_ids` AND `read_response` would loop
-    /// past it until the server closed. A cell that can only observe id-carrying replies could
-    /// therefore never see half of what this decision emits. The CLI harness already records every
-    /// line for exactly this reason; this mirrors it.
+    /// past it until the server closed or [`READ_RESPONSE_DEADLINE`] expired. A cell that can only
+    /// observe id-carrying replies could therefore never see half of what this decision emits. The
+    /// CLI harness already records every line for exactly this reason; this mirrors it.
     pub seen_lines: Vec<String>,
 }
 
@@ -256,14 +265,34 @@ impl RawDuplexClient {
     /// Read newline-delimited lines until the response with `id` arrives.
     ///
     /// Every line read must be valid JSON (the NFR-14 stdout-framing guard).
+    ///
+    /// **[ub-f1k]** Bounded by [`READ_RESPONSE_DEADLINE`] across ALL reads: a reply that never
+    /// correlates (wrong/stringified/omitted id) or silence fails fast instead of hanging the
+    /// suite. The passing path never waits on the timer. The deadline panic quotes only the lines
+    /// THIS call read (`first` marks where they start in `seen_lines`), each clipped to
+    /// [`QUOTED_LINE_LIMIT`] bytes on a char boundary. `tests/raw_duplex_client.rs` pins it.
     pub async fn read_response(&mut self, id: i64) -> Value {
         use tokio::io::AsyncBufReadExt as _;
+        let deadline = tokio::time::Instant::now() + READ_RESPONSE_DEADLINE;
+        let first = self.seen_lines.len();
         loop {
             let mut line = String::new();
-            let read = self
-                .reader
-                .read_line(&mut line)
+            let read = tokio::time::timeout_at(deadline, self.reader.read_line(&mut line))
                 .await
+                .unwrap_or_else(|_| {
+                    let taken = &self.seen_lines[first..];
+                    let mut quoted = String::new();
+                    for seen in taken {
+                        quoted.push_str("\n  ");
+                        quoted.push_str(&seen[..seen.floor_char_boundary(QUOTED_LINE_LIMIT)]);
+                    }
+                    panic!(
+                        "no response correlated to id={id} within {READ_RESPONSE_DEADLINE:?}; \
+                         this call read {} line(s) with no match (each quoted up to \
+                         {QUOTED_LINE_LIMIT} bytes):{quoted}",
+                        taken.len()
+                    )
+                })
                 .expect("read server line");
             assert!(read > 0, "the server closed before answering id={id}");
             let trimmed = line.trim_end_matches(['\n', '\r']);
@@ -437,7 +466,11 @@ pub async fn connect_raw_unscanned(
     (client, server, cancel)
 }
 
-fn raw_client(client_io: tokio::io::DuplexStream) -> RawDuplexClient {
+/// Wrap the client end of a duplex in a [`RawDuplexClient`] — no handshake, no server.
+///
+/// **[ub-f1k]** Public so `tests/raw_duplex_client.rs` can put a FABRICATED peer on the other end
+/// and drive [`RawDuplexClient::read_response`]'s deadline without a real server.
+pub fn raw_client(client_io: tokio::io::DuplexStream) -> RawDuplexClient {
     let (client_read, client_write) = tokio::io::split(client_io);
     RawDuplexClient {
         writer: client_write,

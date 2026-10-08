@@ -24,8 +24,8 @@ use unblock_mcp::{Quotas, mcp_server_duplex_for_test};
 /// and executes NOTHING.
 ///
 /// The reply is observed by SENTINEL FOLLOW over `seen_lines`, so a mutant that drops the id fails
-/// at once instead of hanging an id-correlating read; the fingerprint proves the class never
-/// executes (PRD D54 clause (1)'s measured "created NOTHING", on the real serve path).
+/// at once instead of waiting out `read_response`'s deadline (ub-f1k); the fingerprint proves the
+/// class never executes (PRD D54 clause (1)'s measured "created NOTHING", on the real serve path).
 ///
 /// Mutants: the recovered arm answering `None`; deliver-instead-of-answer; answer-AND-deliver.
 #[tokio::test]
