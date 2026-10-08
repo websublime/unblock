@@ -497,8 +497,9 @@ work the tracker labels `v1-0-2`:
   `open_in_memory_parallel_first_write_stress` cell failed intermittently with SQLite "bad parameter or other API
   misuse" (`ub-q1u`, closed 2026-10-06); the `write_lock_two_process` non-vacuity control failed under load
   (`ub-fh5`, closed 2026-10-07); `McpClient::read_response` fails at its 20-second deadline when the child never
-  writes a correlatable reply (`ub-46o`). Still open: `RawDuplexClient::read_response` in `unblock-mcp` has no
-  deadline at all (`ub-f1k`), and `McpClient` child spawns get serialised behind a process-wide mutex (`ub-vcp`).
+  writes a correlatable reply (`ub-46o`); `RawDuplexClient::read_response` in `unblock-mcp` fails at one 30-second
+  deadline spanning every read when no correlatable reply arrives (`ub-f1k`). Still open: `McpClient` child spawns
+  get serialised behind a process-wide mutex (`ub-vcp`).
 
 ---
 
