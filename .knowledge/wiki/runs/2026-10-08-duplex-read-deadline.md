@@ -4,7 +4,7 @@ description: Bounding the unblock-mcp test client RawDuplexClient::read_response
 type: run
 date: 2026-10-08
 branch: ub-f1k-duplex-read-deadline
-pr: '-'
+pr: '463'
 issues: [ub-f1k]
 ---
 
@@ -89,6 +89,7 @@ that quotes only this call's lines clipped like the CLI twin, and the roadmap an
 ## Links
 
 - ub-f1k — the defect this run fixed.
+- https://github.com/websublime/unblock/pull/463 — the pull request.
 - ub-46o — the CLI `McpClient` counterpart, fixed in 2026-10-08-read-response-deadline.
 - ub-vcp — the CLI spawn mutex, still open.
 - ub-788 — the D54 run whose Verify gate filed ub-f1k.
