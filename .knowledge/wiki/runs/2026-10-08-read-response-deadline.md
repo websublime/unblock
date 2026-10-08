@@ -4,7 +4,7 @@ description: Bounding every stdout read of the unblock-cli test client McpClient
 type: run
 date: 2026-10-08
 branch: ub-46o-read-response-deadline
-pr: '-'
+pr: '462'
 issues: [ub-46o]
 ---
 
@@ -99,6 +99,7 @@ any case, because rmcp runs each request on its own task and a later ping can be
 - ub-46o — the defect this run fixed.
 - ub-f1k — the unblock-mcp `RawDuplexClient` counterpart, still open.
 - ub-vcp — the spawn mutex for the same harness, still open.
+- https://github.com/websublime/unblock/pull/462 — the pull request.
 - ub-788 — the D54 run whose Verify gate re-observed the hang.
 - `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-cli/tests/common/mod.rs` — `read_response` and `read_line_by`.
 - `/Users/ramosmig/Public/WS-Labs/unblock/crates/unblock-cli/tests/mcp_stdout_channel.rs` — H10.
