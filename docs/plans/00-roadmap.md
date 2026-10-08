@@ -492,13 +492,13 @@ work the tracker labels `v1-0-2`:
   smoke a v1.0.2 binary queries GitHub authenticated at whichever step it runs. The post-swap `update --dry-run`
   of a `v1.0.1 → v1.0.2` run already does, and the `update --dry-run` and `update` steps do once `from_tag` is
   v1.0.2 (ci-cd §4).
-- **CI and test-harness hardening**, each item a tracker issue labelled `v1-0-2` and not yet closed: the two create
-  benchmarks measured teardown rather than the operation (`ub-lp9.28`); the libsql
-  `open_in_memory_parallel_first_write_stress` cell fails intermittently with SQLite "bad parameter or other API
-  misuse" (`ub-q1u`); the `write_lock_two_process` non-vacuity control fails under load (`ub-fh5`);
-  `McpClient::read_response` blocks past its 20-second deadline when the child never writes a correlatable reply
-  (`ub-46o`); `RawDuplexClient::read_response` in `unblock-mcp` has no deadline at all (`ub-f1k`); and
-  `McpClient` child spawns get serialised behind a process-wide mutex (`ub-vcp`).
+- **CI and test-harness hardening**, each item a tracker issue labelled `v1-0-2`: the two create benchmarks
+  measured teardown rather than the operation (`ub-lp9.28`, closed 2026-10-06); the libsql
+  `open_in_memory_parallel_first_write_stress` cell failed intermittently with SQLite "bad parameter or other API
+  misuse" (`ub-q1u`, closed 2026-10-06); the `write_lock_two_process` non-vacuity control failed under load
+  (`ub-fh5`, closed 2026-10-07); `McpClient::read_response` fails at its 20-second deadline when the child never
+  writes a correlatable reply (`ub-46o`). Still open: `RawDuplexClient::read_response` in `unblock-mcp` has no
+  deadline at all (`ub-f1k`), and `McpClient` child spawns get serialised behind a process-wide mutex (`ub-vcp`).
 
 ---
 
