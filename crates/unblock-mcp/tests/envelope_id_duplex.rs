@@ -21,11 +21,12 @@
 //! its signature takes one well-formed `i64` id. Every frame here is a whole envelope, written
 //! verbatim, taken from the shared corpus.
 //!
-//! # Observation, without a single timeout
+//! # Observation, without a single sleep
 //!
 //! A reply whose id is OMITTED is invisible to any id-correlating reader, so the ambiguous arm is
 //! observed with the shipped SENTINEL FOLLOW: send the frame, send a known-good request, read the
-//! sentinel, then inspect `seen_lines`. No sleeps, no threads, no timeouts.
+//! sentinel, then inspect `seen_lines`. No sleeps, no threads. The only timer is
+//! `read_response`'s overall deadline (ub-f1k), which the passing path never waits on.
 
 mod common;
 
@@ -65,7 +66,8 @@ async fn an_undecodable_id_tools_call_answers_and_executes_nothing() {
     );
 
     // The id is recoverable (both occurrences are 90016), so the answer rides it and
-    // `read_response` can correlate on it — which is also what proves the hang is over.
+    // `read_response` can correlate on it. A regression that breaks correlation (e.g. a
+    // stringified id) trips `read_response`'s bounded deadline (ub-f1k) instead of hanging.
     let response = client.request_raw(90016, &raw).await;
     assert_eq!(
         response["error"]["code"], -32600,

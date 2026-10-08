@@ -71,3 +71,7 @@ sha2 = { workspace = true }
 # The NFR-18 quota AC suite (`tests/quotas.rs`) wraps storage in a `RecordingStorage` spy that
 # implements the async `Storage` trait — test-only, never linked into the shipped binary.
 async-trait = { workspace = true }
+# `test-util` provides the paused clock that pins `RawDuplexClient::read_response`'s OVERALL deadline
+# (`tests/raw_duplex_client.rs`, ub-f1k) in virtual time — no 30-second wall-clock wait, no host-load
+# flake. Test-only; the shipped build's `tokio` features are unchanged.
+tokio = { workspace = true, features = ["test-util"] }
