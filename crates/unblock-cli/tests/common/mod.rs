@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -292,17 +293,31 @@ pub fn unblock_in(dir: &Path) -> Command {
 // can reuse it without duplicating the JSON-RPC framing code).
 // ----------------------------------------------------------------------------------------------
 
+/// How long [`McpClient::read_response`] waits for its matching reply unless a cell sets another
+/// deadline with [`McpClient::set_response_deadline`].
+const RESPONSE_DEADLINE: Duration = Duration::from_secs(20);
+
+/// The most bytes of one stdout line a read-timeout panic quotes.
+const QUOTED_LINE_LIMIT: usize = 512;
+
 /// A hand-rolled newline-delimited JSON-RPC client over a spawned `unblock mcp` child.
 pub struct McpClient {
     pub child: Child,
     /// `Some` while the pipe is open; `.take()` + drop closes it → the child reads EOF.
     stdin: Option<ChildStdin>,
-    /// `Some` until [`write_without_reading`](Self::write_without_reading) moves it into a background
-    /// drain thread (C2/C6 — a write-without-read case never reads a response on this client again).
+    /// `Some` while this client may read responses. [`close_stdout`](Self::close_stdout),
+    /// [`capture_stdout`](Self::capture_stdout) and
+    /// [`write_without_reading`](Self::write_without_reading) take it for good. Each read in
+    /// [`read_response`](Self::read_response) lends it to a helper thread for one line and gets it
+    /// back before the read returns, so between calls it is idle. A read that times out panics and
+    /// leaves it `None`, because the helper still holds it.
     stdout: Option<BufReader<ChildStdout>>,
+    /// How long one [`read_response`](Self::read_response) call waits for its matching reply.
+    response_deadline: Duration,
     next_id: i64,
     /// Every non-empty stdout LINE the server produced (each must be valid JSON — NFR-14 guard).
-    /// Only populated while `stdout` is still owned by this client (i.e. `read_response` ran).
+    /// Only `read_response` fills it, on the caller thread, so it holds the lines read while this
+    /// client still owned `stdout`.
     pub seen_lines: Vec<String>,
     /// The child's STDERR, drained continuously by a background thread (T3.2.1/D38 — see
     /// [`stderr_snapshot`](Self::stderr_snapshot)).
@@ -382,6 +397,7 @@ impl McpClient {
             child,
             stdin: Some(stdin),
             stdout: Some(stdout),
+            response_deadline: RESPONSE_DEADLINE,
             next_id: 1,
             seen_lines: Vec::new(),
             stderr,
@@ -414,9 +430,10 @@ impl McpClient {
             child,
             stdin: Some(stdin),
             stdout: Some(stdout),
-            // The same seed as `spawn_with_args`: the guard-DELETED branch must be able to correlate
-            // the fabricated child's `id=1` response, or it would hang to the deadline instead of
-            // returning, and the self-test would stop discriminating between the two states.
+            response_deadline: RESPONSE_DEADLINE,
+            // The same seed as `spawn_with_args`, so the guard-DELETED branch correlates the
+            // fabricated child's `id=1` response and returns it, and H4's `expect_err` reports the
+            // missing panic.
             next_id: 1,
             seen_lines: Vec::new(),
             stderr,
@@ -431,6 +448,13 @@ impl McpClient {
     #[must_use]
     pub fn stderr_snapshot(&self) -> String {
         snapshot(&self.stderr)
+    }
+
+    /// Bound every later [`read_response`](Self::read_response) call by `deadline` instead of the
+    /// default 20 seconds. It exists so the `mcp_stdout_channel.rs` harness self-test can prove the
+    /// deadline binds without waiting 20 seconds.
+    pub fn set_response_deadline(&mut self, deadline: Duration) {
+        self.response_deadline = deadline;
     }
 
     /// Move this client's STDOUT into a background CAPTURE thread, RETAINING every byte for
@@ -592,6 +616,12 @@ impl McpClient {
     /// [`stdout_snapshot`](Self::stdout_snapshot) is the trap — it reads the separate capture buffer,
     /// so it returns an empty string with no complaint and must not be read after this call. A cell
     /// that closes stdout asserts on the exit code and on stderr and never on stdout.
+    ///
+    /// A read in [`read_response`](Self::read_response) lends the reader to a helper thread and
+    /// returns only once the reader is back, so the drop here releases the last in-process read end
+    /// and the child still gets EPIPE. After a read-timeout panic the helper keeps the reader, and
+    /// this call no-ops on the `None` it finds, as `capture_stdout` and the drain half of
+    /// `write_without_reading` do.
     pub fn close_stdout(&mut self) {
         // Dropping the `BufReader<ChildStdout>` closes the last read end → the child gets EPIPE.
         drop(self.stdout.take());
@@ -605,19 +635,15 @@ impl McpClient {
     /// life of the suite while sitting on the framing channel. The predicate is
     /// [`is_jsonrpc_framing`]; this call site is what INSTALLS it for all the inherited `spawn*`
     /// sites, and it has its own self-test because deleting it here would be green and silent.
+    ///
+    /// The response deadline bounds the whole call, including a read that blocks on a silent
+    /// child. [`read_line_by`](Self::read_line_by) performs each read, and it panics with the lines
+    /// this call took and the child's stderr once the deadline passes.
     fn read_response(&mut self, id: i64) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + self.response_deadline;
+        let first_line = self.seen_lines.len();
         loop {
-            assert!(
-                Instant::now() < deadline,
-                "timed out awaiting response id={id}"
-            );
-            let stdout = self
-                .stdout
-                .as_mut()
-                .expect("stdout still owned (close_stdout, capture_stdout and write_without_reading each take it)");
-            let mut line = String::new();
-            let n = stdout.read_line(&mut line).expect("read child stdout line");
+            let (n, line) = self.read_line_by(deadline, id, first_line);
             assert!(n > 0, "child stdout closed before response id={id}");
             let trimmed = line.trim_end_matches(['\n', '\r']);
             if trimmed.is_empty() {
@@ -637,6 +663,64 @@ impl McpClient {
             if value.get("id").and_then(Value::as_i64) == Some(id) {
                 return value;
             }
+        }
+    }
+
+    /// Read one stdout line, or panic once `deadline` passes.
+    ///
+    /// A helper thread takes the reader, performs one `read_line` and sends the reader back with
+    /// the result over a channel. The calling thread waits on that channel until `deadline`. The
+    /// helper owns the only sender, so a helper that dies surfaces as a disconnect and never as a
+    /// hang. Once `deadline` has passed, the wait still returns a line the helper has already sent,
+    /// and otherwise times out at once. On a timeout the reader stays with the helper, which exits
+    /// once its read returns, on the child's next line or when the last holder of the pipe's write
+    /// end closes it.
+    ///
+    /// The guard, the `seen_lines` push and the id match stay with the caller, so their panics
+    /// unwind on the caller thread. `first_line` marks where this call's lines start in
+    /// `seen_lines`, and the timeout panic quotes only those.
+    fn read_line_by(&mut self, deadline: Instant, id: i64, first_line: usize) -> (usize, String) {
+        let mut reader = self.stdout.take().expect(
+            "stdout still owned (close_stdout, capture_stdout and write_without_reading each take \
+             it, and a timed-out read leaves it with its reader thread)",
+        );
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("mcp-stdout-line".into())
+            .spawn(move || {
+                let mut line = String::new();
+                let result = reader.read_line(&mut line);
+                // A failed send means the caller timed out. The reader drops with this thread.
+                let _ = tx.send((reader, result, line));
+            })
+            .expect("spawn the stdout line reader");
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok((reader, result, line)) => {
+                self.stdout = Some(reader);
+                let n = result.expect("read child stdout line");
+                (n, line)
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let taken = &self.seen_lines[first_line..];
+                let mut quoted = String::new();
+                for line in taken {
+                    quoted.push_str("\n  ");
+                    quoted.push_str(&line[..line.floor_char_boundary(QUOTED_LINE_LIMIT)]);
+                }
+                panic!(
+                    "timed out awaiting response id={id} after {:?}. This call read {} line(s) \
+                     with no match (each quoted up to {QUOTED_LINE_LIMIT} bytes):{quoted}\n\
+                     Child stderr:\n{}",
+                    self.response_deadline,
+                    taken.len(),
+                    self.stderr_snapshot()
+                );
+            }
+            Err(RecvTimeoutError::Disconnected) => panic!(
+                "the stdout line reader died before reading a line for response id={id}. \
+                 Child stderr:\n{}",
+                self.stderr_snapshot()
+            ),
         }
     }
 
@@ -787,8 +871,8 @@ impl McpClient {
     /// Was a response with `id` ever seen on this connection?
     ///
     /// The deterministic, TIMEOUT-FREE probe for "no response at all": send the frame, then a
-    /// known-good SENTINEL request with a fresh id, read the sentinel's response, then ask this. No
-    /// sleeps, no threads, no flake.
+    /// known-good SENTINEL request with a fresh id, read the sentinel's response, then ask this. The
+    /// sentinel's reply proves the negative, so no cell waits out a deadline and none can flake.
     #[must_use]
     pub fn saw_response_for(&self, id: i64) -> bool {
         self.seen_lines.iter().any(|line| {

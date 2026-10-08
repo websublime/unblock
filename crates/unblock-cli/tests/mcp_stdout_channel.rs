@@ -266,10 +266,11 @@ fn a_malformed_config_reports_on_stderr() {
 // -------------------------------------------------------------------------------------------------
 // HARNESS SELF-TESTS — a guard nobody drives is a guard that can be deleted.
 //
-// The three guards this change adds to `common/mod.rs` are HARNESS, not SUT, so nothing in the
-// product turns red when one is reverted. Each therefore gets a cell that drives it directly, and
-// the predicate and its CALL SITE get SEPARATE cells: they are separately revertible, and a cell
-// that calls the predicate by hand says nothing about whether `read_response` still does.
+// The guards `common/mod.rs` installs for this file are HARNESS, not SUT, so nothing in the product
+// turns red when one is reverted. Each therefore gets a cell that drives it directly, and the
+// predicate and its CALL SITE get SEPARATE cells: they are separately revertible, and a cell that
+// calls the predicate by hand says nothing about whether `read_response` still does. The read
+// deadline of `read_response` is one more such guard, and H10 drives it.
 // -------------------------------------------------------------------------------------------------
 
 /// The MEASURED ub-og3 blob — the real bytes `unblock mcp` used to write onto the framing channel,
@@ -426,6 +427,69 @@ fn the_read_response_guard_is_actually_installed() {
     assert!(
         message.contains("must be JSON-RPC framing"),
         "the guard must be the thing that fired, not a downstream symptom: {message}"
+    );
+}
+
+/// A valid JSON-RPC error with NO id, the reply shape a server gives a request it cannot correlate.
+const ID_LESS_FRAME: &str =
+    r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"premature request"}}"#;
+
+/// **H10** — `read_response` fails at its deadline when no correlatable reply arrives.
+///
+/// The fabricated child answers the first request with a real frame, then writes one id-less
+/// frame and falls silent with stdout still open. The first request runs under the default
+/// deadline and proves the shell is up, so its startup sits outside the bounded window. The second
+/// request consumes the id-less frame and then blocks on a read that never completes, which only
+/// the deadline can end.
+///
+/// `exec cat 9>&1 >/dev/null` keeps the stdout pipe's write end open on fd 9 while `cat` drains
+/// stdin into `/dev/null`. H4's `exec cat >/dev/null` would close stdout, and the read would end on
+/// EOF instead. Dropping the client kills `cat`, which releases the reader thread.
+#[test]
+fn the_read_deadline_binds_when_no_correlatable_reply_arrives() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::time::{Duration, Instant};
+
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "printf '%s\\n' '{REAL_FRAME}' '{ID_LESS_FRAME}'; exec cat 9>&1 >/dev/null"
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the fabricated child");
+
+    let mut client = common::McpClient::from_child(child);
+    let first = client.request("ping", &serde_json::json!({}));
+    assert_eq!(
+        first,
+        serde_json::from_str::<Value>(REAL_FRAME).expect("fixture parses"),
+        "the first request must return the real frame under the default deadline"
+    );
+
+    client.set_response_deadline(Duration::from_secs(1));
+    let start = Instant::now();
+    let caught = catch_unwind(AssertUnwindSafe(|| {
+        client.request("ping", &serde_json::json!({}))
+    }))
+    .expect_err("a child that never answers id=2 must make read_response PANIC");
+    let waited = start.elapsed();
+
+    let message = panic_message(&caught);
+    assert!(
+        message.contains("timed out awaiting response id=2"),
+        "the deadline must be the thing that fired, not EOF or the framing guard: {message}"
+    );
+    assert_eq!(
+        client.seen_lines.last().map(String::as_str),
+        Some(ID_LESS_FRAME),
+        "the read loop must consume the id-less frame before the deadline binds the next read"
+    );
+    assert!(
+        waited >= Duration::from_secs(1),
+        "the deadline must not fire early: it fired after {waited:?}"
     );
 }
 

@@ -426,7 +426,7 @@ fn ns2_a_duplicated_params_key_is_a_parse_error_on_its_id_and_recovers() {
 /// This cell is the RECOVERED half. Its sibling drives the AMBIGUOUS half with two DIFFERING ids —
 /// which is what the single pre-D47 cell used, so the recoverable half had no coverage at all.
 ///
-/// Proved by a SENTINEL FOLLOW — no timeouts, no sleeps, no threads.
+/// A SENTINEL FOLLOW proves it, so this cell never waits out a deadline.
 #[test]
 fn ns4_a_duplicated_envelope_id_with_equal_ids_is_answered_on_that_id() {
     let ws = Workspace::init();
@@ -478,7 +478,7 @@ fn ns4_a_duplicated_envelope_id_with_equal_ids_is_answered_on_that_id() {
 /// stayed TRUE across D47: the bytes are ambiguous, so neither candidate id is ever answered on.
 /// What changed is that a reply now EXISTS at all, which is the third assertion below.
 ///
-/// Proved by a SENTINEL FOLLOW — no timeouts, no sleeps, no threads.
+/// A SENTINEL FOLLOW proves both negatives, so this cell never waits out a deadline.
 #[test]
 fn ns4_a_duplicated_envelope_id_with_differing_ids_answers_with_the_id_omitted() {
     let ws = Workspace::init();
