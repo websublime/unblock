@@ -677,9 +677,9 @@ const PRE_HANDSHAKE_REJECTION: &str = "the server has not completed the initiali
 /// Find the gate's `-32600` among the lines the server wrote, then assert it whole.
 ///
 /// The caller round-trips a SENTINEL request first, so `seen_lines` already holds every line the
-/// server produced and this read is deterministic and timeout-free. Blocking on the answer's own id
-/// instead would HANG under the mutation that drops that id, because `read_response` checks its
-/// deadline only between lines that actually arrive, and after an id-less reply none does.
+/// server produced and this read is deterministic and timeout-free. The probe reads the gate's
+/// reply wherever it lands, so a mutation that drops the reply's id fails here at once, with the
+/// reply in hand. Blocking on the reply's own id would fail only at the read deadline.
 fn assert_gate_rejected(client: &McpClient, id: i64) {
     assert!(
         !client.seen_lines.is_empty(),

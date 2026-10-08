@@ -15,10 +15,11 @@
 //! # Two observation channels, and why both are needed
 //!
 //! * `request_raw` CORRELATES BY ID and RETURNS. That is the strongest possible proof for the
-//!   recovered arm: before D47 that call could not return at all, because nothing was ever written
-//!   for that id. This is the cell that proves the hang is over.
+//!   recovered arm: the call returns only if a reply for that id was written, and without one it
+//!   fails at the read deadline. This is the cell that proves the hang is over.
 //! * A reply whose id is OMITTED is INVISIBLE to any id-correlating reader, so the ambiguous arm is
-//!   observed by SENTINEL FOLLOW plus a scan of `seen_lines`. No sleeps, no timeouts, no threads.
+//!   observed by SENTINEL FOLLOW plus a scan of `seen_lines`. The sentinel's reply proves the
+//!   negative, so no cell waits out a deadline.
 //!
 //! NFR-14 rides along for free everywhere here: `read_response` panics on any stdout line that is
 //! not valid JSON.
@@ -61,7 +62,7 @@ fn sentinel(client: &mut McpClient) {
 /// **D-P1** — the RECOVERED id is answered over real stdio, and the hang is provably over.
 ///
 /// `request_raw` correlates by id, so it can only return if a reply carrying id 90001 actually
-/// arrived. On `main` this call cannot return at all: nothing is ever written for that frame.
+/// arrived. If nothing is written for that frame, the call fails at the read deadline.
 ///
 /// Mutant: passing `None` instead of `Some(id)` on the recovered arm.
 #[test]
