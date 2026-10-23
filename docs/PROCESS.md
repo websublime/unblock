@@ -18,7 +18,7 @@ tool. **Never simplify the solution to make progress; if you reach that point, s
 `understand → decide → spec/plan → review → implement → verify → track`.
 - **Spec-first on drift:** when reality diverges from the docs, fix the authoritative doc FIRST (spine for
   interfaces, PRD for product), then implement. Never let code and docs drift silently.
-- Pick the next **ready** task from **unblock** via the `query` tool (`ready` action; ready = all its deps are
+- Pick the next **ready** task from **unblock** via the `query` tool (`kind: ready`; ready = all its deps are
   satisfied); register/update it via the `issue` (+ `comment`) tools and re-export the git record
   `.unblock/issues.jsonl` (the `sync` tool's `export` action) in the **same commit** as the work — plus the
   wiki run-report (§8) when the work is substantive; a task is done only

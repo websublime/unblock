@@ -500,6 +500,15 @@ work the tracker labels `v1-0-2`:
   writes a correlatable reply (`ub-46o`); `RawDuplexClient::read_response` in `unblock-mcp` fails at one 30-second
   deadline spanning every read when no correlatable reply arrives (`ub-f1k`). Still open: `McpClient` child spawns
   get serialised behind a process-wide mutex (`ub-vcp`).
+- **The `AGENTS.md` managed block hid each tool's discriminant key** (`ub-q2v`, PRD §4 D33 addendum). Its
+  `Action` column showed bare values, but `query` and `diagnostics` are keyed `kind`, so agents sent
+  `{"action":"ready"}` and were rejected. Each row now shows the exact wire pair (`kind: ready`,
+  `action: create`; `—` for the flat `claim`) from a typed `ToolAction.discriminant`, and the intro sentence
+  naming which tools use which key is derived from the digest by a pure `discriminant_intro` helper. No wire rename, no `CONTRACT_HASH` or
+  `contract_version` move.
+- **The `triage` prompt suggests a call the schema rejects** (`ub-kwh`, open). It tells agents to call `query`
+  `kind: stale` without the required `older_than`, and says `assignee:null` finds unassigned work, which applies
+  no filter.
 
 ---
 

@@ -261,7 +261,7 @@ fn field_clauses(props: Props<'_>, defs: Defs<'_>) -> String {
 /// The discriminant property name shared by every arm — the key that carries a string `const` in
 /// ALL of them. Returns `None` if the arms do not agree, in which case no arm can be selected and
 /// the index falls back rather than guessing.
-fn discriminant_of(arms: &[serde_json::Value]) -> Option<String> {
+pub(crate) fn discriminant_of(arms: &[serde_json::Value]) -> Option<String> {
     let first = arms.first()?.get("properties")?.as_object()?;
     let candidates = first
         .iter()

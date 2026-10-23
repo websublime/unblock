@@ -18,8 +18,8 @@ pub(crate) mod schema;
 use unblock_error::{ErrorCode, StructuredError};
 
 pub use agents_digest::{
-    AgentsDigest, ErrorCodeDigest, PromptDigest, ResourceDigest, ToolAction, ToolDigest,
-    agents_digest,
+    AgentsDigest, Discriminant, ErrorCodeDigest, PromptDigest, ResourceDigest, ToolAction,
+    ToolDigest, agents_digest,
 };
 pub use capabilities::{
     Capabilities, ErrorCodeDescriptor, PromptDescriptor, ResourceDescriptor, ToolDescriptor,
