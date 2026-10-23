@@ -53,9 +53,9 @@ pub mod envelope_id_corpus;
 pub use error::McpServerError;
 pub use options::{CONTRACT_HASH, CONTRACT_VERSION, McpServerOptions, Quotas};
 pub use resources::{
-    AgentsDigest, Capabilities, ErrorCodeDescriptor, ErrorCodeDigest, PromptDescriptor,
-    PromptDigest, ResourceDescriptor, ResourceDigest, SchemaBundle, ToolAction, ToolDescriptor,
-    ToolDigest, ToolSchemas, agents_digest, capabilities, schema_bundle,
+    AgentsDigest, Capabilities, Discriminant, ErrorCodeDescriptor, ErrorCodeDigest,
+    PromptDescriptor, PromptDigest, ResourceDescriptor, ResourceDigest, SchemaBundle, ToolAction,
+    ToolDescriptor, ToolDigest, ToolSchemas, agents_digest, capabilities, schema_bundle,
 };
 pub use server::run_mcp_server;
 
