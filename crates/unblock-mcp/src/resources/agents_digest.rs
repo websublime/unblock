@@ -21,6 +21,7 @@ use serde_json::Value;
 
 use super::capabilities::capabilities;
 use super::schema::schema_bundle;
+use crate::tools::args::discriminant_of;
 
 /// A CLI-facing, fully-typed digest of the MCP contract surface (spine §5.4, D33): a pure DERIVED VIEW
 /// over `capabilities()` + `schema_bundle()` that never alters their bytes. Rendered by `unblock agents`
@@ -48,20 +49,33 @@ pub struct ToolDigest {
     /// The tool one-line description (from `capabilities()`).
     pub description: String,
     /// The actions this tool exposes, from `schema_bundle().<tool>.input`'s root `oneOf` (captures
-    /// `create_bulk`). A FLAT input (`claim`) yields exactly one action with `name == None`.
+    /// `create_bulk`). A FLAT input (`claim`) yields exactly one action with `discriminant == None`.
     pub actions: Vec<ToolAction>,
 }
 
-/// A single action: its discriminant name + its FULL parameter surface (required and optional).
+/// A single action: its wire discriminant pair + its FULL parameter surface (required and optional).
 #[derive(Debug, Clone)]
 pub struct ToolAction {
-    /// The discriminant `const` (e.g. `"create_bulk"`); `None` for a flat tool's single implicit action.
-    pub name: Option<String>,
+    /// The wire discriminant pair; `None` for a flat tool (`claim`), which has no `oneOf`.
+    pub discriminant: Option<Discriminant>,
     /// Required param names (effective `required[]` incl. a resolved arm-root `$ref`, minus the
     /// discriminant), sorted.
     pub required: Vec<String>,
     /// Optional param names (effective properties minus required minus the discriminant), sorted.
     pub optional: Vec<String>,
+}
+
+/// The exact wire discriminant of one action, e.g. `{ key: "kind", value: "ready" }` (ub-q2v).
+///
+/// The KEY is detected per TOOL (a serde tag belongs to the whole enum); the VALUE is the arm's
+/// `properties[key].const`. Deliberately NO `Serialize`/`JsonSchema`: the pair can never enter the
+/// hashed `(capabilities(), schema_bundle())` tuple.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discriminant {
+    /// The discriminant field on the wire: `"action"`, or `"kind"` for `query`/`diagnostics`.
+    pub key: String,
+    /// The arm's `const` for that field, e.g. `"create_bulk"`.
+    pub value: String,
 }
 
 /// A resource (uri + one-line description), copied from `capabilities()`.
@@ -174,9 +188,19 @@ pub fn agents_digest() -> AgentsDigest {
 /// Derive a tool's actions from its input. A TAGGED input carries a ROOT `oneOf` (one arm per action);
 /// a FLAT input (only `claim`) has no root `oneOf` and yields one implicit action. Reads ONLY the root
 /// `oneOf` — never `$defs` nor a nested property `oneOf`. Total: an unmatched shape -> the flat branch.
+///
+/// The discriminant KEY is detected ONCE per tool — the property carrying a string `const` in EVERY
+/// arm (`discriminant_of`) — never per arm, where the first const-bearing property in `BTreeMap`
+/// order could beat the real tag. Arms that agree on no key yield `discriminant: None`, which the
+/// `discriminant_key_is_carried_per_tool` test rejects for a tagged tool.
 fn tool_actions(input: &Value) -> Vec<ToolAction> {
     match input.get("oneOf").and_then(Value::as_array) {
-        Some(arms) => arms.iter().map(|arm| action_for_arm(arm, input)).collect(),
+        Some(arms) => {
+            let key = discriminant_of(arms);
+            arms.iter()
+                .map(|arm| action_for_arm(arm, input, key.as_deref()))
+                .collect()
+        }
         None => vec![flat_action(input)],
     }
 }
@@ -185,37 +209,29 @@ fn tool_actions(input: &Value) -> Vec<ToolAction> {
 fn flat_action(input: &Value) -> ToolAction {
     let (required, optional) = effective_params(input, input, None);
     ToolAction {
-        name: None,
+        discriminant: None,
         required,
         optional,
     }
 }
 
-/// One tagged-enum `oneOf` arm -> a [`ToolAction`]. The discriminant is the arm property whose schema
-/// carries a string `const` (field `action` OR `kind`, detected STRUCTURALLY — no hard-coded key list);
-/// its `const` is the action name, excluded from both the required and optional param lists.
-fn action_for_arm(arm: &Value, root: &Value) -> ToolAction {
-    let disc = discriminant(arm);
-    let exclude = disc.as_ref().map(|(field, _)| field.as_str());
-    let (required, optional) = effective_params(arm, root, exclude);
+/// One tagged-enum `oneOf` arm -> a [`ToolAction`]. `key` is the tool's discriminant field (`action`
+/// OR `kind`, detected STRUCTURALLY — no hard-coded key list); the arm's `properties[key].const` is
+/// the action's value, and `key` is excluded from both the required and optional param lists.
+fn action_for_arm(arm: &Value, root: &Value, key: Option<&str>) -> ToolAction {
+    let (required, optional) = effective_params(arm, root, key);
+    let discriminant = key.and_then(|key| {
+        let value = arm.get("properties")?.get(key)?.get("const")?.as_str()?;
+        Some(Discriminant {
+            key: key.to_string(),
+            value: value.to_string(),
+        })
+    });
     ToolAction {
-        name: disc.map(|(_, value)| value),
+        discriminant,
         required,
         optional,
     }
-}
-
-/// The discriminant of a tagged-enum arm: the first `properties.<field>` whose schema carries a string
-/// `const`. Returns `(field_name, const_value)`, or `None` (defensive — every v1 arm has one, but the
-/// walk stays total). Order-independent: exactly one property is a `const` discriminant per arm.
-fn discriminant(node: &Value) -> Option<(String, String)> {
-    let props = node.get("properties").and_then(Value::as_object)?;
-    props.iter().find_map(|(field, schema)| {
-        schema
-            .get("const")
-            .and_then(Value::as_str)
-            .map(|c| (field.clone(), c.to_string()))
-    })
 }
 
 /// The FULL parameter surface for one node (an arm or a flat input): its required and optional param
@@ -292,8 +308,15 @@ fn resolve_arm_root_ref(
 
 #[cfg(test)]
 mod tests {
-    use super::agents_digest;
+    use serde_json::json;
+
+    use super::{Discriminant, ToolAction, agents_digest, tool_actions};
     use crate::options::CONTRACT_VERSION;
+
+    /// An action's discriminant VALUE (e.g. `"create_bulk"`), or `None` for a flat action.
+    fn value(a: &ToolAction) -> Option<&str> {
+        a.discriminant.as_ref().map(|d| d.value.as_str())
+    }
 
     /// **THE DRIFT GUARD for the `inputs` pairs array.** Every tool in `capabilities()` MUST resolve
     /// to a schema pair and therefore to a NON-EMPTY action list.
@@ -332,11 +355,7 @@ mod tests {
             .iter()
             .find(|t| t.name == "comment")
             .expect("the comment tool must be in the digest");
-        let names: Vec<&str> = comment
-            .actions
-            .iter()
-            .filter_map(|a| a.name.as_deref())
-            .collect();
+        let names: Vec<&str> = comment.actions.iter().filter_map(value).collect();
         for action in ["add", "list", "update", "delete"] {
             assert!(
                 names.contains(&action),
@@ -355,11 +374,7 @@ mod tests {
             .iter()
             .find(|t| t.name == "issue")
             .expect("issue tool present");
-        let names: Vec<&str> = issue
-            .actions
-            .iter()
-            .filter_map(|a| a.name.as_deref())
-            .collect();
+        let names: Vec<&str> = issue.actions.iter().filter_map(value).collect();
         assert!(names.contains(&"create"));
         assert!(names.contains(&"create_bulk"));
     }
@@ -378,7 +393,7 @@ mod tests {
         let create = issue
             .actions
             .iter()
-            .find(|a| a.name.as_deref() == Some("create"))
+            .find(|a| value(a) == Some("create"))
             .expect("create action present");
         assert_eq!(create.required, vec!["title".to_string()]);
         assert!(create.optional.contains(&"description".to_string()));
@@ -401,7 +416,7 @@ mod tests {
         let delete = issue
             .actions
             .iter()
-            .find(|a| a.name.as_deref() == Some("delete"))
+            .find(|a| value(a) == Some("delete"))
             .expect("delete action present");
         assert!(delete.optional.contains(&"mode".to_string()));
         for variant in ["tombstone", "cascade", "hard", "dry_run"] {
@@ -413,7 +428,7 @@ mod tests {
         }
     }
 
-    /// `claim` is the one FLAT tool (no root `oneOf`): a single implicit action (`name == None`)
+    /// `claim` is the one FLAT tool (no root `oneOf`): a single implicit action (no discriminant)
     /// carrying the full top-level required/optional split, sorted.
     #[test]
     fn flat_input_tool_single_implicit_action() {
@@ -425,7 +440,7 @@ mod tests {
             .expect("claim tool present");
         assert_eq!(claim.actions.len(), 1);
         let action = &claim.actions[0];
-        assert!(action.name.is_none());
+        assert!(action.discriminant.is_none());
         assert_eq!(
             action.required,
             vec!["assignee".to_string(), "id".to_string()]
@@ -450,11 +465,7 @@ mod tests {
             .iter()
             .find(|t| t.name == "query")
             .expect("query tool present");
-        let names: Vec<&str> = query
-            .actions
-            .iter()
-            .filter_map(|a| a.name.as_deref())
-            .collect();
+        let names: Vec<&str> = query.actions.iter().filter_map(value).collect();
         for expected in ["list", "ready", "blocked", "search", "count", "stale"] {
             assert!(names.contains(&expected));
         }
@@ -462,6 +473,74 @@ mod tests {
             assert!(!action.required.iter().any(|p| p == "kind"));
             assert!(!action.optional.iter().any(|p| p == "kind"));
         }
+    }
+
+    /// The digest carries the wire discriminant KEY per tool (ub-q2v): every `query`/`diagnostics`
+    /// action is keyed `kind` (not `action`), every other tagged tool's action `action`, and flat
+    /// `claim` has none. A tagged tool whose arms agree on no key yields `None` and FAILS here — it
+    /// must never render `—`. An unlisted tool fails too, so a new tool's key gets pinned.
+    #[test]
+    fn discriminant_key_is_carried_per_tool() {
+        let digest = agents_digest();
+        for tool in &digest.tools {
+            for a in &tool.actions {
+                match tool.name.as_str() {
+                    "query" | "diagnostics" => assert!(
+                        a.discriminant.as_ref().map(|d| d.key.as_str()) == Some("kind"),
+                        "tool {} must be keyed `kind`: {a:?}",
+                        tool.name
+                    ),
+                    "issue" | "defer" | "dep" | "sync" | "comment" => assert!(
+                        a.discriminant.as_ref().map(|d| d.key.as_str()) == Some("action"),
+                        "tool {} must be keyed `action`: {a:?}",
+                        tool.name
+                    ),
+                    "claim" => assert!(a.discriminant.is_none(), "claim is flat: {a:?}"),
+                    other => panic!("tool `{other}` has no pinned discriminant key"),
+                }
+            }
+        }
+    }
+
+    /// The key is the property carrying a string `const` in EVERY arm, not the first const-bearing
+    /// property of one arm in `BTreeMap` order: `agent` sorts before `kind` but is const in one arm
+    /// only. Arms that agree on no key yield `None` for every action.
+    #[test]
+    fn discriminant_key_is_detected_across_all_arms() {
+        let tagged = json!({"oneOf": [
+            {"properties": {"agent": {"const": "x"}, "kind": {"const": "ready"}, "limit": {}}},
+            {"properties": {"kind": {"const": "stale"}}},
+        ]});
+        let actions = tool_actions(&tagged);
+        let pairs: Vec<Option<Discriminant>> =
+            actions.iter().map(|a| a.discriminant.clone()).collect();
+        assert_eq!(
+            pairs,
+            vec![
+                Some(Discriminant {
+                    key: "kind".to_string(),
+                    value: "ready".to_string()
+                }),
+                Some(Discriminant {
+                    key: "kind".to_string(),
+                    value: "stale".to_string()
+                }),
+            ]
+        );
+        assert_eq!(
+            actions[0].optional,
+            vec!["agent".to_string(), "limit".to_string()]
+        );
+
+        let disagreeing = json!({"oneOf": [
+            {"properties": {"action": {"const": "a"}}},
+            {"properties": {"kind": {"const": "b"}}},
+        ]});
+        assert!(
+            tool_actions(&disagreeing)
+                .iter()
+                .all(|a| a.discriminant.is_none())
+        );
     }
 
     /// The full error-code map is copied verbatim (non-empty, one entry per `ErrorCode`).

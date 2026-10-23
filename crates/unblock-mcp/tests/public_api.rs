@@ -2,7 +2,7 @@
 //! without a `Session` (FR-12). Each `use`/reference only compiles if the item is public.
 
 use unblock_mcp::{
-    AgentsDigest, CONTRACT_HASH, CONTRACT_VERSION, Capabilities, ErrorCodeDescriptor,
+    AgentsDigest, CONTRACT_HASH, CONTRACT_VERSION, Capabilities, Discriminant, ErrorCodeDescriptor,
     ErrorCodeDigest, McpServerError, McpServerOptions, PromptDescriptor, PromptDigest, Quotas,
     ResourceDescriptor, ResourceDigest, SchemaBundle, ToolAction, ToolDescriptor, ToolDigest,
     ToolSchemas, agents_digest, capabilities, run_mcp_server, schema_bundle,
@@ -46,7 +46,9 @@ fn public_types_and_consts_resolve() {
     let digest: AgentsDigest = agents_digest();
     assert_eq!(digest.contract_version, CONTRACT_VERSION);
     let first_tool: Option<ToolDigest> = digest.tools.into_iter().next();
-    let _action: Option<ToolAction> = first_tool.and_then(|t| t.actions.into_iter().next());
+    let action: Option<ToolAction> = first_tool.and_then(|t| t.actions.into_iter().next());
+    // `Discriminant` (ub-q2v) is nameable: the typed `key: value` wire pair of an action.
+    let _discriminant: Option<Discriminant> = action.and_then(|a| a.discriminant);
     let _resource: Option<ResourceDigest> = digest.resources.into_iter().next();
     let _prompt: Option<PromptDigest> = digest.prompts.into_iter().next();
     let _error_code: Option<ErrorCodeDigest> = digest.error_codes.into_iter().next();
