@@ -24,49 +24,52 @@ Descriptors (from `unblock://capabilities`):
 | `diagnostics` | Diagnostics: stats, info, where, version, lint, changelog, orphans, or dangling. |
 | `comment` | Comment on issues: add, list, update, or delete (soft-redact). Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
 
-Actions (structural — derived from the `unblock://schema` `oneOf` discriminants; each row
-lists an action's FULL parameter surface, required AND optional):
+Actions (structural — derived from the `unblock://schema` `oneOf` discriminants; the
+Discriminant cell is the exact `key: value` pair to send, and each row lists the FULL
+parameter surface, required AND optional):
 
-| Tool | Action | Required params | Optional params |
+Discriminant keys: `action` — `issue`, `defer`, `dep`, `sync`, `comment`; `kind` — `query`, `diagnostics`; none (flat) — `claim`.
+
+| Tool | Discriminant | Required params | Optional params |
 |---|---|---|---|
-| `issue` | `create` | `title` | `acceptance_criteria`, `agent_context`, `agent_name`, `assignee`, `defer_until`, `deps`, `description`, `design`, `due_at`, `ephemeral`, `estimated_minutes`, `harness`, `issue_type`, `labels`, `model`, `parent`, `priority`, `quick`, `slug` |
-| `issue` | `create_bulk` | `markdown` | — |
-| `issue` | `show` | `id` | — |
-| `issue` | `update` | `ids` | `acceptance_criteria`, `agent_name`, `assignee`, `close_reason`, `description`, `design`, `due_at`, `estimated_minutes`, `external_ref`, `harness`, `issue_type`, `labels_add`, `labels_remove`, `labels_set`, `model`, `notes`, `owner`, `parent`, `priority`, `status`, `title` |
-| `issue` | `close` | `id` | `agent_name`, `harness`, `model`, `reason`, `suggest_next` |
-| `issue` | `reopen` | `id` | `agent_name`, `harness`, `model` |
-| `issue` | `delete` | `ids` | `agent_name`, `harness`, `mode`, `model` |
-| `issue` | `restore` | `id` | `agent_name`, `harness`, `model` |
+| `issue` | `action: create` | `title` | `acceptance_criteria`, `agent_context`, `agent_name`, `assignee`, `defer_until`, `deps`, `description`, `design`, `due_at`, `ephemeral`, `estimated_minutes`, `harness`, `issue_type`, `labels`, `model`, `parent`, `priority`, `quick`, `slug` |
+| `issue` | `action: create_bulk` | `markdown` | — |
+| `issue` | `action: show` | `id` | — |
+| `issue` | `action: update` | `ids` | `acceptance_criteria`, `agent_name`, `assignee`, `close_reason`, `description`, `design`, `due_at`, `estimated_minutes`, `external_ref`, `harness`, `issue_type`, `labels_add`, `labels_remove`, `labels_set`, `model`, `notes`, `owner`, `parent`, `priority`, `status`, `title` |
+| `issue` | `action: close` | `id` | `agent_name`, `harness`, `model`, `reason`, `suggest_next` |
+| `issue` | `action: reopen` | `id` | `agent_name`, `harness`, `model` |
+| `issue` | `action: delete` | `ids` | `agent_name`, `harness`, `mode`, `model` |
+| `issue` | `action: restore` | `id` | `agent_name`, `harness`, `model` |
 | `claim` | — | `assignee`, `id` | `agent_name`, `harness`, `model` |
-| `defer` | `defer` | `id`, `until` | `agent_name`, `harness`, `model` |
-| `defer` | `undefer` | `id` | `agent_name`, `harness`, `model` |
-| `query` | `list` | — | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
-| `query` | `ready` | — | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
-| `query` | `blocked` | — | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
-| `query` | `search` | `query` | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
-| `query` | `count` | — | `assignee`, `group_by`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
-| `query` | `stale` | `older_than` | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
-| `dep` | `add` | `dep_type`, `depends_on_id`, `issue_id` | `agent_name`, `harness`, `metadata`, `model` |
-| `dep` | `remove` | `dep_type`, `depends_on_id`, `issue_id` | `agent_name`, `harness`, `model` |
-| `dep` | `list` | `id` | — |
-| `dep` | `tree` | `id` | — |
-| `dep` | `cycles` | — | `blocking_only` |
-| `dep` | `graph` | — | `roots` |
-| `sync` | `export` | — | `path` |
-| `sync` | `import` | `path` | `dry_run` |
-| `sync` | `import_bd` | `path` | — |
-| `diagnostics` | `stats` | — | — |
-| `diagnostics` | `info` | — | — |
-| `diagnostics` | `where` | — | — |
-| `diagnostics` | `version` | — | — |
-| `diagnostics` | `lint` | — | — |
-| `diagnostics` | `changelog` | — | `since` |
-| `diagnostics` | `orphans` | — | — |
-| `diagnostics` | `dangling` | — | — |
-| `comment` | `add` | `body`, `issue_id` | `agent_name`, `harness`, `model` |
-| `comment` | `list` | `issue_id` | — |
-| `comment` | `update` | `body`, `comment_id` | `agent_name`, `harness`, `model` |
-| `comment` | `delete` | `comment_id` | `agent_name`, `harness`, `model` |
+| `defer` | `action: defer` | `id`, `until` | `agent_name`, `harness`, `model` |
+| `defer` | `action: undefer` | `id` | `agent_name`, `harness`, `model` |
+| `query` | `kind: list` | — | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
+| `query` | `kind: ready` | — | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
+| `query` | `kind: blocked` | — | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
+| `query` | `kind: search` | `query` | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
+| `query` | `kind: count` | — | `assignee`, `group_by`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
+| `query` | `kind: stale` | `older_than` | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
+| `dep` | `action: add` | `dep_type`, `depends_on_id`, `issue_id` | `agent_name`, `harness`, `metadata`, `model` |
+| `dep` | `action: remove` | `dep_type`, `depends_on_id`, `issue_id` | `agent_name`, `harness`, `model` |
+| `dep` | `action: list` | `id` | — |
+| `dep` | `action: tree` | `id` | — |
+| `dep` | `action: cycles` | — | `blocking_only` |
+| `dep` | `action: graph` | — | `roots` |
+| `sync` | `action: export` | — | `path` |
+| `sync` | `action: import` | `path` | `dry_run` |
+| `sync` | `action: import_bd` | `path` | — |
+| `diagnostics` | `kind: stats` | — | — |
+| `diagnostics` | `kind: info` | — | — |
+| `diagnostics` | `kind: where` | — | — |
+| `diagnostics` | `kind: version` | — | — |
+| `diagnostics` | `kind: lint` | — | — |
+| `diagnostics` | `kind: changelog` | — | `since` |
+| `diagnostics` | `kind: orphans` | — | — |
+| `diagnostics` | `kind: dangling` | — | — |
+| `comment` | `action: add` | `body`, `issue_id` | `agent_name`, `harness`, `model` |
+| `comment` | `action: list` | `issue_id` | — |
+| `comment` | `action: update` | `body`, `comment_id` | `agent_name`, `harness`, `model` |
+| `comment` | `action: delete` | `comment_id` | `agent_name`, `harness`, `model` |
 
 ### Resources
 

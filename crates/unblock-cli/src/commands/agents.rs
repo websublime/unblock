@@ -58,7 +58,8 @@ pub(crate) fn agents_path(workspace_dir: &Path) -> PathBuf {
 /// Returns the I/O error if reading or writing `path` fails. A missing file is not an error.
 pub(crate) async fn write_managed_block(path: &Path) -> std::io::Result<()> {
     let existing = read_existing(path).await?;
-    let merged = merge_managed_block(existing.as_deref(), &managed_block());
+    let digest = unblock_mcp::agents_digest();
+    let merged = merge_managed_block(existing.as_deref(), &managed_block(&digest));
     tokio::fs::write(path, merged).await?;
     output::diag(&format!("wrote {}", path.display()));
     Ok(())
@@ -74,10 +75,10 @@ async fn read_existing(path: &Path) -> std::io::Result<Option<String>> {
 }
 
 /// The managed block content (between the markers, exclusive): a FULL capabilities table rendered
-/// from the pure typed [`unblock_mcp::agents_digest`] (Option C, D33). It takes no argument and
-/// calls `agents_digest()` itself, so [`write_managed_block`] and the merge tests below pass none.
-fn managed_block() -> String {
-    let digest = unblock_mcp::agents_digest();
+/// from `digest`, the pure typed [`unblock_mcp::agents_digest`] (Option C, D33). Every table and
+/// the discriminant intro come from `digest`, so a synthetic digest exercises the same path as the
+/// live one; [`write_managed_block`] calls `agents_digest()` once and passes it.
+fn managed_block(digest: &unblock_mcp::AgentsDigest) -> String {
     let mut out = String::new();
 
     out.push_str("## unblock (MCP)\n\n");
@@ -101,17 +102,21 @@ fn managed_block() -> String {
     out.push('\n');
 
     out.push_str(
-        "Actions (structural — derived from the `unblock://schema` `oneOf` discriminants; each row\n\
-         lists an action's FULL parameter surface, required AND optional):\n\n",
+        "Actions (structural — derived from the `unblock://schema` `oneOf` discriminants; the\n\
+         Discriminant cell is the exact `key: value` pair to send, and each row lists the FULL\n\
+         parameter surface, required AND optional):\n\n",
     );
-    out.push_str("| Tool | Action | Required params | Optional params |\n|---|---|---|---|\n");
+    out.push_str(&discriminant_intro(&digest.tools));
+    out.push_str("\n\n");
+    out.push_str("| Tool | Discriminant | Required params | Optional params |\n");
+    out.push_str("|---|---|---|---|\n");
     for tool in &digest.tools {
         for action in &tool.actions {
             let _ = writeln!(
                 out,
                 "| `{}` | {} | {} | {} |",
                 tool.name,
-                action_cell(action.name.as_deref()),
+                discriminant_cell(action.discriminant.as_ref()),
                 params_cell(&action.required),
                 params_cell(&action.optional),
             );
@@ -148,9 +153,53 @@ fn managed_block() -> String {
     out
 }
 
-/// Render an action's discriminant cell: `` `name` `` or `—` for a flat tool's implicit action.
-fn action_cell(name: Option<&str>) -> String {
-    name.map_or_else(|| "—".to_string(), |n| format!("`{n}`"))
+/// The ONE intro sentence naming which tools use which discriminant key (ub-q2v, spine §5b), derived
+/// from the digest, never hard-coded. Shape: ``Discriminant keys: `<key>` — `<tool>`, `<tool>`;
+/// none (flat) — `<tool>`.`` Keyed groups follow first appearance in digest tool order, tools keep
+/// digest order, every group (the flat one included) is joined by `; `, the `none (flat)` group comes
+/// LAST and is omitted when no flat tool exists, and a tool with no actions is skipped.
+fn discriminant_intro(tools: &[unblock_mcp::ToolDigest]) -> String {
+    let mut keyed: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut flat: Vec<&str> = Vec::new();
+    for tool in tools {
+        let Some(action) = tool.actions.first() else {
+            continue;
+        };
+        match &action.discriminant {
+            Some(discriminant) => {
+                let key = discriminant.key.as_str();
+                match keyed.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, names)) => names.push(&tool.name),
+                    None => keyed.push((key, vec![&tool.name])),
+                }
+            }
+            None => flat.push(&tool.name),
+        }
+    }
+
+    let mut groups: Vec<String> = keyed
+        .iter()
+        .map(|(key, names)| format!("`{key}` — {}", backticked(names)))
+        .collect();
+    if !flat.is_empty() {
+        groups.push(format!("none (flat) — {}", backticked(&flat)));
+    }
+    format!("Discriminant keys: {}.", groups.join("; "))
+}
+
+/// Backtick each name and join with `, `.
+fn backticked(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Render an action's discriminant cell: the exact wire pair `` `key: value` ``, or `—` for a flat
+/// tool's implicit action.
+fn discriminant_cell(discriminant: Option<&unblock_mcp::Discriminant>) -> String {
+    discriminant.map_or_else(|| "—".to_string(), |d| format!("`{}: {}`", d.key, d.value))
 }
 
 /// Render a sorted param list as backtick-joined, comma-separated names, or `—` when empty.
@@ -210,11 +259,13 @@ fn merge_managed_block(existing: Option<&str>, block: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BEGIN_MARKER, END_MARKER, managed_block, merge_managed_block};
+    use unblock_mcp::{Discriminant, ToolAction, ToolDigest};
+
+    use super::{BEGIN_MARKER, END_MARKER, discriminant_intro, managed_block, merge_managed_block};
 
     #[test]
     fn managed_block_mentions_mcp_and_contract() {
-        let block = managed_block();
+        let block = managed_block(&unblock_mcp::agents_digest());
         assert!(block.contains("unblock mcp"));
         assert!(block.contains(unblock_mcp::CONTRACT_VERSION));
         // The four capabilities-table sections (D33).
@@ -236,9 +287,9 @@ mod tests {
     /// structural `oneOf` walk drives the render, not a scrape of the description prose.
     #[test]
     fn managed_block_lists_every_tool_action() {
-        let block = managed_block();
+        let block = managed_block(&unblock_mcp::agents_digest());
         assert!(
-            block.contains("| `issue` | `create_bulk` |"),
+            block.contains("| `issue` | `action: create_bulk` |"),
             "create_bulk action must render under `issue` (structural oneOf walk)"
         );
         for action in [
@@ -252,10 +303,157 @@ mod tests {
             "restore",
         ] {
             assert!(
-                block.contains(&format!("| `issue` | `{action}` |")),
+                block.contains(&format!("| `issue` | `action: {action}` |")),
                 "missing issue action {action}"
             );
         }
+    }
+
+    /// ub-q2v: every row names the WIRE discriminant key. `query` and `diagnostics` are keyed `kind`
+    /// (their schemas reject `action`), so a row rendered as `action: …` would mislead agents into a
+    /// rejected call; flat `claim` renders `—`.
+    #[test]
+    fn managed_block_names_query_discriminant_kind() {
+        let block = managed_block(&unblock_mcp::agents_digest());
+        for kind in ["list", "ready", "blocked", "search", "count", "stale"] {
+            assert!(
+                block.contains(&format!("| `query` | `kind: {kind}` |")),
+                "query {kind} must render keyed `kind`"
+            );
+        }
+        assert!(block.contains("| `diagnostics` | `kind: stats` |"));
+        // Every row of the Actions table (header through the next blank line).
+        let rows: Vec<&str> = block
+            .lines()
+            .skip_while(|line| !line.starts_with("| Tool | Discriminant |"))
+            .skip(2)
+            .take_while(|line| !line.is_empty())
+            .collect();
+        let mut kind_rows = 0;
+        let mut claim_rows = 0;
+        for row in &rows {
+            if row.starts_with("| `query` |") || row.starts_with("| `diagnostics` |") {
+                kind_rows += 1;
+                assert!(
+                    row.contains(" | `kind: "),
+                    "row must be keyed `kind`: {row}"
+                );
+                assert!(
+                    !row.contains("`action:"),
+                    "row must not be keyed `action`: {row}"
+                );
+            }
+            if row.starts_with("| `claim` |") {
+                claim_rows += 1;
+                assert!(row.starts_with("| `claim` | — |"), "claim is flat: {row}");
+            }
+        }
+        assert!(kind_rows > 0, "no query/diagnostics action rows rendered");
+        assert_eq!(claim_rows, 1, "claim renders exactly one flat row");
+    }
+
+    /// A synthetic tool whose every action carries `key` (or none for a flat tool), `actions` long.
+    fn tool(name: &str, key: Option<&str>, actions: usize) -> ToolDigest {
+        ToolDigest {
+            name: name.to_string(),
+            description: String::new(),
+            actions: (0..actions)
+                .map(|i| ToolAction {
+                    discriminant: key.map(|key| Discriminant {
+                        key: key.to_string(),
+                        value: format!("v{i}"),
+                    }),
+                    required: Vec::new(),
+                    optional: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    /// ub-q2v: the intro sentence is DERIVED from the digest, so a hard-coded sentence fails here.
+    /// A SYNTHETIC digest moves `query` to `action`, adds a third key (`verb`), puts the first `kind`
+    /// tool and the flat tool ahead of the `action` tools, and adds a tool with no actions: keyed
+    /// groups follow first appearance, tools keep digest order, `none (flat)` comes last, and the
+    /// actionless tool is skipped. A digest with no keyed group, and one with no flat tool, keep the
+    /// same separators.
+    #[test]
+    fn managed_block_intro_derives_discriminant_keys() {
+        let tools = [
+            tool("diagnostics", Some("kind"), 2),
+            tool("claim", None, 1),
+            tool("issue", Some("action"), 3),
+            tool("empty", Some("kind"), 0),
+            tool("query", Some("action"), 2),
+            tool("plan", Some("verb"), 1),
+            tool("lock", None, 1),
+        ];
+        assert_eq!(
+            discriminant_intro(&tools),
+            "Discriminant keys: `kind` — `diagnostics`; `action` — `issue`, `query`; \
+             `verb` — `plan`; none (flat) — `claim`, `lock`."
+        );
+
+        let flat_only = [tool("claim", None, 1), tool("empty", None, 0)];
+        assert_eq!(
+            discriminant_intro(&flat_only),
+            "Discriminant keys: none (flat) — `claim`."
+        );
+
+        let keyed_only = [
+            tool("issue", Some("action"), 1),
+            tool("dep", Some("action"), 1),
+        ];
+        assert_eq!(
+            discriminant_intro(&keyed_only),
+            "Discriminant keys: `action` — `issue`, `dep`."
+        );
+
+        // The live block carries the derived sentence directly after the lead-in, which names no
+        // tool or key.
+        let block = managed_block(&unblock_mcp::agents_digest());
+        let intro = discriminant_intro(&unblock_mcp::agents_digest().tools);
+        assert_eq!(
+            intro,
+            "Discriminant keys: `action` — `issue`, `defer`, `dep`, `sync`, `comment`; \
+             `kind` — `query`, `diagnostics`; none (flat) — `claim`."
+        );
+        assert!(
+            block.contains(&format!(
+                "required AND optional):\n\n{intro}\n\n| Tool | Discriminant |"
+            )),
+            "the intro must sit directly after the Actions lead-in"
+        );
+
+        // The rendered block is driven by its digest argument, not by the live digest: a synthetic
+        // digest (`query` moved to `action`, a third key `verb`) renders its own derived sentence.
+        let synthetic = unblock_mcp::AgentsDigest {
+            contract_version: "test".to_string(),
+            tools: vec![
+                tool("issue", Some("action"), 1),
+                tool("query", Some("action"), 1),
+                tool("diagnostics", Some("kind"), 1),
+                tool("plan", Some("verb"), 1),
+                tool("claim", None, 1),
+            ],
+            resources: Vec::new(),
+            prompts: Vec::new(),
+            error_codes: Vec::new(),
+        };
+        let synthetic_block = managed_block(&synthetic);
+        let synthetic_intro = synthetic_block
+            .lines()
+            .find(|line| line.starts_with("Discriminant keys:"))
+            .expect("rendered block carries an intro line");
+        assert_eq!(
+            synthetic_intro,
+            "Discriminant keys: `action` — `issue`, `query`; `kind` — `diagnostics`; \
+             `verb` — `plan`; none (flat) — `claim`."
+        );
+        assert_eq!(synthetic_intro, discriminant_intro(&synthetic.tools));
+        assert_ne!(
+            synthetic_intro, intro,
+            "synthetic intro must differ from the live one"
+        );
     }
 
     /// Drift-guard (D33, Miguel's ruling): the `issue`/`create` row lists `title` as a REQUIRED param —
@@ -263,16 +461,16 @@ mod tests {
     /// walk that ignored the arm-root `$ref` would show `—` in the Required-params column instead.
     #[test]
     fn managed_block_shows_create_title_param() {
-        let block = managed_block();
+        let block = managed_block(&unblock_mcp::agents_digest());
         assert!(
-            block.contains("| `issue` | `create` | `title` |"),
+            block.contains("| `issue` | `action: create` | `title` |"),
             "issue create must list `title` as its required param (arm-root $ref resolved)"
         );
     }
 
     #[test]
     fn fresh_file_gets_a_wrapped_block() {
-        let out = merge_managed_block(None, &managed_block());
+        let out = merge_managed_block(None, &managed_block(&unblock_mcp::agents_digest()));
         assert!(out.starts_with(BEGIN_MARKER));
         assert!(out.contains(END_MARKER));
         assert!(out.contains("unblock mcp"));
@@ -281,7 +479,10 @@ mod tests {
     #[test]
     fn append_preserves_existing_content() {
         let existing = "# My project\n\nSome notes.\n";
-        let out = merge_managed_block(Some(existing), &managed_block());
+        let out = merge_managed_block(
+            Some(existing),
+            &managed_block(&unblock_mcp::agents_digest()),
+        );
         assert!(out.starts_with("# My project"));
         assert!(out.contains(BEGIN_MARKER));
         assert!(out.contains("Some notes."));
@@ -289,8 +490,12 @@ mod tests {
 
     #[test]
     fn rerun_replaces_only_the_block_idempotently() {
-        let first = merge_managed_block(Some("# Header\n"), &managed_block());
-        let second = merge_managed_block(Some(&first), &managed_block());
+        let first = merge_managed_block(
+            Some("# Header\n"),
+            &managed_block(&unblock_mcp::agents_digest()),
+        );
+        let second =
+            merge_managed_block(Some(&first), &managed_block(&unblock_mcp::agents_digest()));
         // Idempotent: a second merge with the same block yields identical bytes.
         assert_eq!(first, second);
         // Exactly one managed block (markers appear once).
