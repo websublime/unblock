@@ -4,7 +4,7 @@ description: Carrying the exact wire discriminant pair through the AGENTS.md dig
 type: run
 date: 2026-10-23
 branch: ub-q2v-agents-discriminant
-pr: '-'
+pr: '464'
 issues: [ub-q2v, ub-kwh]
 ---
 
@@ -15,7 +15,7 @@ issues: [ub-q2v, ub-kwh]
 Issue `ub-q2v`: the managed `AGENTS.md` block rendered every tagged-tool action as `action: <value>`,
 although `query` and `diagnostics` tag on `kind`. Full lifecycle (Understand, Decide, Design Review,
 Implement, Verify, Track) on branch `ub-q2v-agents-discriminant` in an isolated worktree; team run —
-a coordinator, an implementer and parallel reviewers (QA, Rust, code-review) per gate. PR not yet opened.
+a coordinator, an implementer and parallel reviewers (QA, Rust, code-review) per gate. PR #464.
 
 ## What & why
 
