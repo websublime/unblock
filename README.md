@@ -224,9 +224,13 @@ clients.
 
 The contract (`unblock.mcp.v1.10`) exposes **8 tools**, **5 resources**, and **3 prompts**.
 
+The values below are sent under the tool's discriminant key: `action` for `issue`, `defer`, `dep`,
+`sync` and `comment`, but **`kind` for `query` and `diagnostics`** (e.g. `{"kind": "ready"}`, never
+`{"action": "ready"}`). `claim` is flat and takes no discriminant; its row describes what it does.
+
 | Tool | Actions |
 |---|---|
-| `issue` | `create` · `show` · `update` · `close` · `reopen` · `delete` · `restore` (plus `create_bulk` from markdown, quick-create) |
+| `issue` | `create` · `show` · `update` · `close` · `reopen` · `delete` · `restore` (plus `create_bulk` from markdown; quick-create is `create` with `quick: true`, not a separate value) |
 | `claim` | atomic assignee + flip to `in_progress` |
 | `defer` | `defer` · `undefer` |
 | `query` | `list` · `ready` · `blocked` · `search` · `count` · `stale` (with filters) |

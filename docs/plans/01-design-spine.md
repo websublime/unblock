@@ -19,7 +19,7 @@
 
 `unblock-cli` **depends on** `unblock-mcp`. The CLI owns the `unblock` binary (incl. `unblock mcp`); `unblock-mcp` is a **library** that exposes `run_mcp_server(session: Arc<Session>, opts: McpServerOptions) -> Result<(), McpServerError>` and the tool/resource/prompt registry. **`run_mcp_server` signature (LIVE — D27/AD-4, reconciled spine-first against T2.2/PR #387):** it is the **2-arg** `run_mcp_server(Arc<Session>, McpServerOptions)` — the transport is bound **internally** to `stdio()` (the caller does NOT pass a transport). **Since D43 that internal binding is a DUPLICATE-KEY-SCANNING transport wrapping the stdio byte streams** (it owns the read framing, because detection must happen before `serde_json` collapses a duplicated key); the **public 2-arg contract is UNCHANGED** — the byte-level bound change is confined to the private `run_mcp_server_handler` and the two `test-util` duplex helpers, and shutdown is a `tokio_util::sync::CancellationToken` carried in `McpServerOptions.cancel`. **Cancel semantics (NORMATIVE — D38, corrects the earlier unconditional "`.cancel()` … returns `Ok(())`" claim):** `.cancel()` drains in-flight work and returns `Ok(())` **only if the rmcp `initialize` handshake already completed**; rmcp's `serve_server_with_ct` wraps the WHOLE handshake in a `select!` against `ct.cancelled()`, so a cancel landing **during** the handshake returns `Err(ServerInitializeError::Cancelled)` → surfaces as `McpServerError::Transport`. The contract is therefore: **`run_mcp_server` returns `Ok(())` OR `Err(Transport(Cancelled))` on cancel, depending on the handshake phase — BOTH are normal cooperative-shutdown outcomes**, both MUST reach `session.shutdown()`, and the caller MUST NOT treat the `Err` as an independent fault (see §5b `mcp` for the exit rule + the no-hang invariant). The earlier 3-arg `run_mcp_server(session, transport, shutdown)` / bespoke `ShutdownToken` sketch **never shipped** and is superseded here. The direction is fixed **cli → mcp** and **never mcp → cli** — this is the single L7↔L7 edge that determines acyclicity, and it is now a decision (not an assumption). The cli plan's Open Question Q1 is **RESOLVED** by this line. README §2 and §0 draw this edge as settled and are correct.
 
-The same edge also carries `pub fn agents_digest() -> AgentsDigest` (+ its `ToolDigest`/`ToolAction`/`ResourceDigest`/`PromptDigest`/`ErrorCodeDigest` sub-types, §5.4, D33) — a pure derived-view helper consumed only by `unblock-cli`'s managed-block renderer, which `unblock agents` and, since v1.1, `unblock init --agents` run; it is NOT a new edge (same `cli → mcp` direction) and is NOT part of the hashed `CONTRACT_HASH` tuple.
+The same edge also carries `pub fn agents_digest() -> AgentsDigest` (+ its `ToolDigest`/`ToolAction`/`Discriminant`/`ResourceDigest`/`PromptDigest`/`ErrorCodeDigest` sub-types, §5.4, D33) — a pure derived-view helper consumed only by `unblock-cli`'s managed-block renderer, which `unblock agents` and, since v1.1, `unblock init --agents` run; it is NOT a new edge (same `cli → mcp` direction) and is NOT part of the hashed `CONTRACT_HASH` tuple.
 
 ---
 
@@ -3216,10 +3216,10 @@ description are both schema bytes, so `schema_bundle()` moves → `CONTRACT_HASH
 `schema_bundle` golden re-blessed. `capabilities()` moves only by its `contract_version` field (a FIELD
 description is not a TOOL description). `agents_digest()` is a pure derived view (D33, below), and the managed `AGENTS.md` capabilities table is
 BYTE-IDENTICAL after D44 — it does NOT regenerate. `effective_params`
-(`crates/unblock-mcp/src/resources/agents_digest.rs:232-253`) merges a node's own
+(`crates/unblock-mcp/src/resources/agents_digest.rs:248-269`) merges a node's own
 `properties`/`required[]` with the arm-ROOT `$ref` only; a PROPERTY-level `$ref` — which is what
 `create.deps`'s items are — is never resolved, only the property KEY is collected (its own doc-comment
-says so at `:224-228`). So the digest never descends into `$defs`, `AGENTS.md:32` already lists `deps`
+says so at `:242-244`). So the digest never descends into `$defs`, `AGENTS.md:35` already lists `deps`
 as an OPTIONAL param of `issue create` and has never published `DepInput`'s internal fields, and D44
 moves only `$defs/DepInput`'s requiredness. The ONE `AGENTS.md` byte that moves is the contract line
 (`AGENTS.md:8`), via `AgentsDigest.contract_version` — derived, therefore NOT an extra version event. D44 mints **no** `ErrorCode` (the rejection rides the
@@ -3330,7 +3330,7 @@ So `CONTRACT_HASH` is re-pinned and `CONTRACT_VERSION` bumps to `unblock.mcp.v1.
 `contract_version` line, and unblock-error's independent quadruple golden (`tests/exit_code_table.rs`)
 re-blessed for the one moved `hint_shape` — that suite's shape TALLY moves with it (`ContextualText` 1→2,
 `None` 31→30). **`agents_digest()` does NOT move — the D44 case, not the D45 one, and for a stated reason:**
-its `ErrorCodeDigest` deliberately omits `hint_shape` (`crates/unblock-mcp/src/resources/agents_digest.rs:88`),
+its `ErrorCodeDigest` deliberately omits `hint_shape` (`crates/unblock-mcp/src/resources/agents_digest.rs:102`),
 publishing only `code`/`exit_code`/`retryable`, so the managed `AGENTS.md` error table is byte-identical;
 the ONE `AGENTS.md` byte that moves is the derived contract line, so `unblock agents` is re-run and its
 snapshot twin re-blessed, but no table row changes. D46 mints **no** `ErrorCode` (the hint rides the
@@ -3386,12 +3386,44 @@ optional params, derived structurally from the `oneOf` arm and resolving an arm-
 the delegated payload, e.g. `issue create` → `title` + its optional fields — the 5 resources, the 3
 prompts, and the `error_codes` map) computed STRUCTURALLY from `capabilities()` + `schema_bundle()`. It is
 NOT an `unblock://` resource and carries NO URI; its only consumer is the CLI's managed-block renderer
-(`managed_block()`), which renders the managed `AGENTS.md` capabilities table (FR-14). `unblock agents` runs that
+(`managed_block(&AgentsDigest)`), which renders the managed `AGENTS.md` capabilities table (FR-14). `unblock agents` runs that
 renderer, and since v1.1 `unblock init --agents` runs it too, through the same shared merge (`ub-lp9.14`, §5b).
 Being a pure derived view over the two hashed
 discovery documents, it is drift-free BY CONSTRUCTION and is explicitly OUTSIDE the `CONTRACT_HASH`
 version-coupled set (like the §5.5 golden-only prompt snapshots) — adding or changing it does NOT bump
 `CONTRACT_VERSION`.
+
+**Each action carries its WIRE DISCRIMINANT as a typed pair (`ub-q2v`, PRD §4 D33 addendum).** The tagged
+tools do not share one key: `issue`/`defer`/`dep`/`sync`/`comment` are keyed `action`, `query`/`diagnostics`
+are keyed `kind`, and `claim` is flat. A serde tag belongs to the whole enum, so the KEY is detected PER
+TOOL, not per arm: it is the property carrying a string `const` in EVERY root `oneOf` arm, found by reusing
+`crates/unblock-mcp/src/tools/args.rs` `discriminant_of` (made `pub(crate)`) — never the first const-bearing
+property of one arm in `BTreeMap` order, where `kind` could lose to `action`/`agent_name`. Each arm's VALUE is
+`properties[key].const`. `discriminant: None` means ONLY "no root `oneOf`" (the flat `claim`); a tagged tool
+whose arms agree on no key is a defect that FAILS a digest unit test — it never renders `—`:
+
+```rust
+pub struct ToolAction {
+    /// The wire discriminant pair; `None` for a flat tool (`claim`), which has no `oneOf`.
+    pub discriminant: Option<Discriminant>,
+    pub required: Vec<String>,
+    pub optional: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)] // deliberately NO Serialize / JsonSchema
+pub struct Discriminant { pub key: String, pub value: String } // e.g. { key: "kind", value: "ready" }
+```
+
+`Discriminant` derives no `Serialize`/`JsonSchema`, which is the structural reason it cannot enter the
+`(capabilities(), schema_bundle())` hashed tuple. It is re-exported beside `ToolAction` from
+`resources/mod.rs` and `lib.rs`, and named in `tests/public_api.rs`. Track refreshed the line citations to
+`agents_digest.rs` `:102`, `:242-244`, `:248-269` (this file :3219/:3222/:3333, unblock-mcp.md:59) and
+`AGENTS.md:35`. Tests compare by value, e.g.
+`a.discriminant.as_ref().map(|d| d.key.as_str()) == Some("kind")`.
+
+`discriminant` REPLACES the former `name: Option<String>` (the bare value); there is no separate `key`
+field, so a value without its key cannot be represented. The renderer prints each pair verbatim and derives
+its key-to-tools intro sentence from these fields through the pure `discriminant_intro` helper (§5b). The two discovery documents are untouched, so
+`CONTRACT_HASH`/`CONTRACT_VERSION` do not move.
 
 ### 5.5 Prompts
 
@@ -3461,7 +3493,7 @@ stdout carries ONLY MCP framing (logging is stderr-only, NFR-14). **Supported to
 - **Next-step hint (v1.1).** After a bare `init` report renders, one stderr line through `output::diag` starts `hint: ` and ends with the retry text. `--agents` suppresses it, `-q` suppresses it (the `-q` contract admits error-level diagnostics only), and no failure path prints it. `output::diag` never panics, so a broken stderr cannot turn a completed `init` into exit 101.
 - **Invariants.** The flag, the hint and the refusal suffix move no byte of a bare `init`'s stdout report and no exit code (NFR-14, additive under D35). None of them mints an `ErrorCode` or moves a contract byte, since `AlreadyInitialized` and `IoError` keep `hint_shape: none` and the retry text rides the message.
 
-**agents (FR-14, D33).** It is a pure file op and a SEPARATE command. It opens resolve-only (`open_workspace_with_cli`, no DB) to find `workspace_dir`, then merges an idempotent managed AGENTS.md block (delimited markers) describing the MCP wiring (`unblock mcp`, stdio transport, tool set). The block is a FULL capabilities table rendered by the zero-arg `managed_block() -> String`, a THIN markdown renderer over `unblock_mcp::agents_digest()` (§5.4) — descriptor tables for the 8 tools / 5 resources / 3 prompts, per-tool actions with their FULL required+optional parameter surface, the error-code → exit-code/retryable map, and pointers to `unblock://schema` + `unblock://capabilities`. Writes a terse "wrote X" note to stderr. Since v1.1 (`ub-lp9.14`) the read-merge-write and that note are ONE shared async CLI function that takes the target `AGENTS.md` path and returns the raw I/O error, so each caller attaches its own error. `agents` passes the path under the root its resolve-only open found and maps a failure to `Io` (exit 8, message unchanged). `init --agents` passes the path under the root of the scaffold it just created and maps a failure to `InitAgentsWrite`. The two commands therefore cannot drift.
+**agents (FR-14, D33).** It is a pure file op and a SEPARATE command. It opens resolve-only (`open_workspace_with_cli`, no DB) to find `workspace_dir`, then merges an idempotent managed AGENTS.md block (delimited markers) describing the MCP wiring (`unblock mcp`, stdio transport, tool set). The block is a FULL capabilities table rendered by `managed_block(digest: &unblock_mcp::AgentsDigest) -> String`, a THIN pure markdown renderer over the digest its caller obtains from `unblock_mcp::agents_digest()` (§5.4; D33 ub-q2v addendum) — descriptor tables for the 8 tools / 5 resources / 3 prompts, per-tool actions with their FULL required+optional parameter surface — each action's wire discriminant rendered as the exact pair `` `key: value` `` in a `Discriminant` column (flat `claim` → `—`) — the error-code → exit-code/retryable map, and pointers to `unblock://schema` + `unblock://capabilities`. Directly after the 'Actions (structural …)' lead-in, which names no tool or key, the block carries ONE intro sentence naming which tools use which key, DERIVED from the digest's `ToolAction.discriminant` fields and never hard-coded (`ub-q2v`). The pure, private, unit-tested helper `fn discriminant_intro(tools: &[unblock_mcp::ToolDigest]) -> String` in `crates/unblock-cli/src/commands/agents.rs` builds it in this NORMATIVE shape: `` Discriminant keys: `<key>` — `<tool>`, `<tool>`; `<key>` — `<tool>`; none (flat) — `<tool>`. `` — exactly the prefix `Discriminant keys: `, then one group per key — the backticked key, then ` — ` (space, U+2014 em dash, space), then that key's backticked tool names joined by `, ` — then a final `none (flat) — ` group listing the flat tools the same way, with every group, the `none (flat)` one included, joined by `; `, then one terminating `.`. Keyed groups are ordered by first appearance in the digest's tool order (§5.1), tools within a group in digest order; the `none (flat)` group comes LAST and is OMITTED when no flat tool exists, and a tool with no actions is skipped. Today it renders "Discriminant keys: `action` — `issue`, `defer`, `dep`, `sync`, `comment`; `kind` — `query`, `diagnostics`; none (flat) — `claim`." Writes a terse "wrote X" note to stderr. Since v1.1 (`ub-lp9.14`) the read-merge-write and that note are ONE shared async CLI function that takes the target `AGENTS.md` path and returns the raw I/O error, so each caller attaches its own error. `agents` passes the path under the root its resolve-only open found and maps a failure to `Io` (exit 8, message unchanged). `init --agents` passes the path under the root of the scaffold it just created and maps a failure to `InitAgentsWrite`. The two commands therefore cannot drift.
 
 **error boundary (D27/AF-4).** `exit.rs` owns the 0–8 cast (there is no `From<ExitCode> for std::process::ExitCode` in `unblock-error`). Transparent-`CodedError` sources (`EngineError`/`ConfigError`/, with AF-4, `RenderError`) bridge via `(&err).into()`. `McpServerError` (`Transport`/`RunLoop`, `#[non_exhaustive]`) is mapped EXPLICITLY to `ErrorCode::InternalError` (exit 1) — an MCP-server failure is internal, not a user IoError (NOT exit 8) — **absent a recorded signal: once `signal_exit_code()` is `Some`, the `mcp` command yields `128+signo` for its two cooperative-shutdown returns (`run_mcp_server`, `session.shutdown()`) and this 0–8 cast is NOT consulted for them — it IS still consulted for a pre-run-loop failure (e.g. `Session::open`), which a coinciding signal must not mask (D38; see the `mcp` paragraph above)**. **D40 carve-out:** even with NO signal, `resolve_mcp_exit` intercepts a `Transport{ServerInitializeError::ConnectionClosed(_)}` (the pre-`initialize` peer disconnect, `is_pre_handshake_disconnect()`) BEFORE this cast and delegates the code to the teardown → exit 0 on a clean `session.shutdown()`; a failing teardown still casts via its own 0–8 code (never masked). CLI-local variants: `AlreadyInitialized` (exit 2; under `init --agents` its message also ends with the retry text, see `init` above), `SiblingBindsFirst` (exit 2 through `ALREADY_INITIALIZED`, v1.1; the binds-first check refused a target because discovery binds a `.unblock` directory that holds no scaffold first, see the sibling guard above), `Io` (exit 8; a CLI-local I/O failure in the scaffold, `agents` or the report write), `InitAgentsWrite` (exit 8, v1.1; `init --agents` scaffolded the workspace but could not update `AGENTS.md`, and its message names the canonical `.unblock` (or `_unblock`) dir, the `AGENTS.md` path, the OS error and, last, the retry text), and three behind the `self-update` feature: `Update` (exit 1, every update failure not named next), `UpdateRateLimited` (exit 2 through `RATE_LIMITED`, `retryable:true`, v1.0.2/D55; GitHub answered the release query 403 or 429) and `UpdateUnauthorized` (exit 7 through `CONFIG_ERROR`, v1.0.2/D55; GitHub answered 401). The HTTP status alone picks among the three; whether `AXOUPDATER_GITHUB_TOKEN` is set only picks the message, which names that variable and never renders the token. All three share the snafu display `"self-update failed: {message}"`, so the prefix belongs to the variant, and `update.rs`'s `refusal_message` builds only the text after it. **NFR-14 + FR-11 split:** in json/robot the structured error renders to STDOUT (always valid JSON even on error); in plain/csv/markdown a human `error[CODE]: message` line goes to STDERR. **D48 carve-out (NORMATIVE):** for a command that owns stdout as a PROTOCOL channel the json/robot document goes to **STDERR** instead, whole and undegraded (`hint` retained) — `into_exit` takes a two-valued classification of the PARSED command (resolved at `crates/unblock-cli/src/lib.rs:73-75`, where `cli` is still in scope, and threaded into `into_exit`), and its `Json|Robot` arm picks the stream from it. `unblock mcp` is the only member; `version`/`migrate`/`doctor`/`init`/`agents`/`update` are byte-unchanged. **D48 moves the STREAM only — every 0–8 exit code on this command is unaffected** (handshake failure exit 1; a pre-run-loop failure keeps its own code).
 

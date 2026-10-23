@@ -97,7 +97,7 @@ Essentials: every lifecycle phase runs as a **hand-picked team** (PROCESS.md §4
 it assigns teams (incl. **Implement**), awaits outcomes, and decides/acts — it hand-writes only conversational or
 one-line/trivial edits. Substantive, multi-file, and multi-crate work (including scaffolding) is **always** a spawned
 team, which writes in an **isolated worktree** (never in the shared tree). **Track work in unblock over MCP**
-(configured in `.mcp.json` + `AGENTS.md`): take the next **ready** task via the `query` tool (`ready` action; ready =
+(configured in `.mcp.json` + `AGENTS.md`): take the next **ready** task via the `query` tool (`kind: ready`; ready =
 all deps satisfied) and register/update it via the `issue` (+ `comment`) tools — **not** in a doc. **Every outcome is
 a comment on the task's issue** — each phase result (Understand map, Decide rationale + Miguel's forks, each gate
 verdict + must-fixes, Implement summary, findings, Track/merge result) lands as a `comment`; that thread IS the
