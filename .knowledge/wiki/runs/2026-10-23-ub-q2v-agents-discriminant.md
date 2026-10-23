@@ -45,9 +45,9 @@ unrelated triage-prompt defect to `ub-kwh`. Authoritative text: spine §5.4 / D3
 ## Gotchas
 
 - The first Verify launch was lost to an API 429 rate limit; the round was relaunched, not counted.
-- The unblock MCP server disconnected mid-run: the issue comments for Verify rounds 1-2, the D33
-  amendment and the Verify pass are pending and get recorded from comment 302 onward once reconnected;
-  the `.unblock/issues.jsonl` re-export follows then.
+- The unblock MCP server became unreachable mid-run: `.mcp.json` starts it with `cargo run`, whose
+  startup waited on the shared `target/` build lock held by gate builds. Once the build was warm it
+  reconnected; the pending Verify/D33 record landed as comment 302, then the re-export.
 - A zero-arg render entry point lets a constant replace derived text undetected; only taking the digest
   as a parameter makes the derivation structural (`managed_block(&AgentsDigest)`).
 - Never draft a fix on `main` in the shared tree — the reset cost a full restart of the lifecycle.
