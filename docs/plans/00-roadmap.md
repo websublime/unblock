@@ -509,6 +509,11 @@ work the tracker labels `v1-0-2`:
 - **The `triage` prompt suggests a call the schema rejects** (`ub-kwh`, open). It tells agents to call `query`
   `kind: stale` without the required `older_than`, and says `assignee:null` finds unassigned work, which applies
   no filter.
+- **`query kind: ready` ignored its filters** (`ub-m07`, PRD §4 D18 addendum). `ready` ignored `labels_any`,
+  `labels_all`, `text_contains`, `status` and `offset`, and `blocked` ignored `offset`. `ready` now composes the
+  same narrowing filters as `blocked` (a `status` filter intersects its `open` baseline; `include_deferred` and
+  `include_closed` stay no-ops), storage orders it by the `cmp_ready` key and pages after the blocked-set filter,
+  and `blocked` honours `offset`. No schema bytes change: no `CONTRACT_HASH` re-pin, `unblock.mcp.v1.10` stands.
 
 ---
 
