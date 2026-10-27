@@ -4,7 +4,7 @@ description: Making `query kind:ready` honour its filters (tracker ub-m07) — r
 type: run
 date: 2026-10-27
 branch: ub-m07-ready-filters
-pr: '-'
+pr: '465'
 issues: [ub-m07]
 ---
 
@@ -18,7 +18,7 @@ Spec/Plan, Implement, Verify, Track) on branch `ub-m07-ready-filters` in the iso
 `../unblock-ub-m07`; team run — an orchestrator, one implementer, and parallel read-only reviewers per
 gate (design Review: architecture/spec, Rust-correctness and QA lenses; Verify: code review, QA mutation,
 Rust engineering and security). Design Review passed after round 3 by Miguel's delegated approval;
-Verify passed in round 2 (final 4/4). PR: pending (field filled after the PR opens).
+Verify passed in round 2 (final 4/4). PR: https://github.com/websublime/unblock/pull/465.
 
 ## What & why
 
