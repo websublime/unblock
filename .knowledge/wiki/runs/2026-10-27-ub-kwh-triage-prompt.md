@@ -4,7 +4,7 @@ description: Making the `triage` prompt's suggested calls valid and true (tracke
 type: run
 date: 2026-10-27
 branch: ub-kwh-triage-prompt
-pr: ''
+pr: '467'
 issues: [ub-kwh]
 ---
 
