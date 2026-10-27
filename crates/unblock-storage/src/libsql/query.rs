@@ -51,8 +51,18 @@ pub(super) async fn list_issues(
 }
 
 /// `ready_issues`: `status='open'` + `id NOT IN <live blocked set>` + defer null-or-past + not
-/// pinned/ephemeral/template, mirroring `idx_issues_ready` (wisp filter DROPPED). Ordered
-/// `priority ASC, created_at ASC, id ASC`; default-complete unless `limit` set.
+/// pinned/ephemeral/template, mirroring `idx_issues_ready` (wisp filter DROPPED). Ordered in SQL by
+/// the mirrored `unblock_policy::cmp_ready` key — `CASE WHEN priority <= 1 THEN 0 ELSE 1 END ASC,
+/// created_at ASC, id ASC` (D18 addendum; CF-11 intact: no policy dependency, pinned by the engine
+/// parity test + the testkit literal-order contract; relies on the spine §3.3 `issues.created_at`
+/// `to_rfc3339()` encoding invariant). Default-complete unless `limit` set.
+///
+/// **Composes the `list` narrowing facets (D18, spine §3.2.1)** exactly as [`blocked_issues`]
+/// does, via [`compose_facets`]: status-OR, `issue_type`-OR, priority range, `assignee`,
+/// `text_contains`, `labels_all`/`labels_any`. The status-OR facet intersects the `open`
+/// baseline (so a status filter without `open` yields the empty set). `include_closed`/
+/// `include_deferred` are no-ops: ready always excludes deferred and closed. Because the SQL order
+/// is final, `offset` then `limit` page the id list AFTER the in-Rust blocked-set filter.
 pub(super) async fn ready_issues(
     conn: &Connection,
     filters: &ListFilters,
@@ -66,10 +76,10 @@ pub(super) async fn ready_issues(
          AND (ephemeral = 0 OR ephemeral IS NULL) \
          AND (is_template = 0 OR is_template IS NULL)",
     );
-    // Storage applies the same filter facets as list (type/priority/assignee) for parity.
-    let (facet_sql, params) = build_facet_where(filters);
-    sql.push_str(&facet_sql);
-    sql.push_str(" ORDER BY priority ASC, created_at ASC, id ASC");
+    // Same narrowing facets as list/blocked; no visibility branch (ready owns its predicate).
+    let mut params: Vec<Value> = Vec::new();
+    compose_facets(filters, &mut sql, &mut params);
+    sql.push_str(" ORDER BY CASE WHEN priority <= 1 THEN 0 ELSE 1 END ASC, created_at ASC, id ASC");
 
     // Build the candidate set, then drop blocked ids in Rust (the blocked set is computed live).
     let mut rows = conn
@@ -84,6 +94,9 @@ pub(super) async fn ready_issues(
             ids.push(id);
         }
     }
+    if let Some(offset) = filters.offset {
+        ids.drain(..offset.min(ids.len()));
+    }
     if let Some(limit) = filters.limit {
         ids.truncate(limit);
     }
@@ -93,7 +106,8 @@ pub(super) async fn ready_issues(
 }
 
 /// `blocked_issues`: `status NOT IN ('closed','tombstone')` (INCLUDES `in_progress/deferred`) filtered
-/// to the live blocked set. Ordered `priority ASC, created_at DESC, id ASC`.
+/// to the live blocked set. Ordered `priority ASC, created_at DESC, id ASC`; `offset` then `limit`
+/// page the id list AFTER the in-Rust membership test, never in SQL before it (D18 addendum).
 ///
 /// **Composes the `list` narrowing facets (D18, spine §3.2.1).** The same narrowing facet set as
 /// `list_issues` — status-OR, `issue_type`-OR, inclusive priority range, `assignee`, `labels_all`
@@ -132,6 +146,9 @@ pub(super) async fn blocked_issues(
         {
             ids.push(id);
         }
+    }
+    if let Some(offset) = filters.offset {
+        ids.drain(..offset.min(ids.len()));
     }
     if let Some(limit) = filters.limit {
         ids.truncate(limit);
@@ -398,9 +415,10 @@ async fn propagate_blocked_to_children(
 /// **Byte-identical** to the historical emit order for its four callers (list/search/count/stale):
 /// `facets_into` → `text_contains` → visibility branch → labels. The visibility branch binds no
 /// params, so the param-bearing fragments still emit in the order facets → text → labels and every
-/// `?N` index is unchanged. `blocked_issues` does NOT use this helper — it owns its own
-/// deferred-inclusive status predicate and uses [`compose_facets`] (the narrowing facets *without*
-/// the visibility branch) — D18, spine §3.2.1.
+/// `?N` index is unchanged. `blocked_issues` and `ready_issues` do NOT use this helper — each owns
+/// its own status predicate (blocked: deferred-inclusive; ready: `open` + defer null-or-past) and
+/// uses [`compose_facets`] (the narrowing facets *without* the visibility branch) — D18 + addendum,
+/// spine §3.2.1.
 fn build_filter_where(filters: &ListFilters) -> (String, Vec<Value>) {
     let mut sql = String::new();
     let mut params: Vec<Value> = Vec::new();
@@ -415,8 +433,9 @@ fn build_filter_where(filters: &ListFilters) -> (String, Vec<Value>) {
 
 /// Emit the **narrowing** facets (status-OR, type-OR, priority range, assignee, `text_contains`,
 /// labels AND/OR) into `sql`/`params`. Does **NOT** emit the closed/deferred visibility branch —
-/// callers that own their own status predicate (`blocked_issues`) append nothing for visibility;
-/// list/search/count/stale add visibility separately via [`build_filter_where`] (D18, spine §3.2.1).
+/// callers that own their own status predicate (`blocked_issues`, `ready_issues`) append nothing
+/// for visibility; list/search/count/stale add visibility separately via [`build_filter_where`]
+/// (D18 + addendum, spine §3.2.1).
 ///
 /// Param-emit order matches [`build_filter_where`] (`facets_into` → `text_contains` → labels), so a
 /// caller composing this directly produces the same `?N` indices the full helper would.
@@ -486,23 +505,6 @@ fn labels_filters(filters: &ListFilters, sql: &mut String, params: &mut Vec<Valu
             params.push(Value::Text(label.clone()));
         }
     }
-}
-
-/// Build the facet-only `WHERE` fragment (status/type OR, priority range, assignee) for `ready`
-/// (which has its own status/defer predicate and must not re-apply closed/deferred visibility).
-fn build_facet_where(filters: &ListFilters) -> (String, Vec<Value>) {
-    let mut sql = String::new();
-    let mut params: Vec<Value> = Vec::new();
-    // ready is open-only by definition, so the status-OR facet is not applied; only type/priority/
-    // assignee narrow the candidate set.
-    type_filter(filters, &mut sql, &mut params);
-    priority_range(filters, &mut sql, &mut params);
-    if let Some(assignee) = &filters.assignee {
-        let idx = params.len() + 1;
-        let _ = write!(sql, " AND assignee = ?{idx}");
-        params.push(Value::Text(assignee.clone()));
-    }
-    (sql, params)
 }
 
 /// status-OR + type-OR + priority range + assignee facets shared by list/search/count/stale.
