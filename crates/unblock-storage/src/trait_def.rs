@@ -41,7 +41,8 @@ use crate::filters::{DeletePlan, IssuePatch};
 /// - **Reads never serialize:** the write-serialization permit lives in `unblock-engine` (D14);
 ///   storage reads run concurrently against WAL readers (FR-10).
 /// - **Storage never imports policy (CF-11):** ready/blocked ordering is deterministic for stable
-///   snapshots, but the hybrid re-rank is applied by the engine via policy.
+///   snapshots. `ready_issues` mirrors the policy `cmp_ready` key as SQL without importing policy
+///   (D18 addendum); the engine's `cmp_ready` re-sort must agree with it.
 #[async_trait]
 pub trait Storage: Send + Sync {
     // ---------------------------------------------------------------------------------------------
@@ -407,10 +408,18 @@ pub trait Storage: Send + Sync {
     /// Return the **ready** candidate set: open, undeferred, and not blocked by any unresolved
     /// gating dependency.
     ///
-    /// The set is **default-complete** (unlimited unless `filters.limit` is set) and returned in a
-    /// **deterministic order** — `priority` ASC, then `created_at` ASC, then `id` ASC — so output
-    /// snapshots are stable (NFR-14). Storage does **not** import policy (CF-11): the engine
-    /// re-ranks this candidate set with the hybrid sort; storage only guarantees the stable order.
+    /// The set is **default-complete** (unlimited unless `filters.limit` is set) and returned in the
+    /// **final ready order**, mirroring `unblock_policy::cmp_ready` as SQL — `CASE WHEN priority <=
+    /// 1 THEN 0 ELSE 1 END` ASC, then `created_at` ASC, then `id` ASC (D18 addendum) — so output
+    /// snapshots are stable (NFR-14). Storage does **not** import policy (CF-11); the engine
+    /// re-sorts with `cmp_ready` and must agree. The key relies on the spine §3.3
+    /// `issues.created_at` `to_rfc3339()` encoding invariant.
+    ///
+    /// `filters` **compose** (D18 addendum, spine §3.2.1): the same narrowing facets
+    /// `blocked_issues` applies narrow the candidate rows before the live membership test; the
+    /// status-OR facet intersects the `open` baseline (no `open` ⇒ empty), and
+    /// `include_closed`/`include_deferred` are **no-ops** (ready always excludes deferred/closed).
+    /// `offset` then `limit` page the result AFTER the blocked-set filter.
     async fn ready_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError>;
 
     /// Return the **blocked** set: non-terminal issues (`status NOT IN ('closed','tombstone')`,
@@ -422,7 +431,8 @@ pub trait Storage: Send + Sync {
     /// (status-OR, `issue_type`-OR, priority range, `assignee`, `labels_all`/`labels_any`,
     /// `text_contains`) narrow the candidate rows before the live membership test. The baseline is
     /// deferred-inclusive and does NOT inherit `list`'s default visibility, so
-    /// `include_closed`/`include_deferred` are **no-ops** here.
+    /// `include_closed`/`include_deferred` are **no-ops** here. `offset` then `limit` page the
+    /// result AFTER the membership test.
     ///
     /// Ready and blocked are **disjoint** but not jointly exhaustive (a closed issue is neither; a
     /// deferred issue is blocked only if it has an unresolved gating edge).

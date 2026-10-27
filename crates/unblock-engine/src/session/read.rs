@@ -1,11 +1,11 @@
 //! `impl Session` read methods — **never acquire the write permit** (FR-10, conformance rule 4).
 //!
 //! Each delegates to `Storage`, mapping `StorageError → EngineError` transparently (the `?` on the
-//! transparent source). `ready()` re-ranks `storage.ready_issues` (the candidate pre-sort, spine
-//! §3.2.1) via the `unblock_policy::cmp_ready` **free function** (the pinned bucket-hybrid
-//! comparator; no policy handle — OQ-1) — `issues.sort_by(unblock_policy::cmp_ready)` after the
-//! storage call (spine §4.1 NORMATIVE). `diagnostics()` dispatches a `DiagnosticKind` over pure-DB
-//! storage calls (FR-15; no git, NFR-6).
+//! transparent source). `ready()` re-sorts `storage.ready_issues` (already in the final order — the
+//! SQL mirrors `cmp_ready`, D18 addendum — and paged) via the `unblock_policy::cmp_ready` **free
+//! function** (the pinned bucket-hybrid comparator; no policy handle — OQ-1) —
+//! `issues.sort_by(unblock_policy::cmp_ready)` after the storage call (spine §4.1 NORMATIVE).
+//! `diagnostics()` dispatches a `DiagnosticKind` over pure-DB storage calls (FR-15; no git, NFR-6).
 
 use chrono::{DateTime, Utc};
 use unblock_model::{
@@ -34,11 +34,14 @@ impl Session {
         Ok(self.storage.list_issues(filters).await?)
     }
 
-    /// The ready set, **re-ranked by the hybrid policy comparator** (spine §4.1 NORMATIVE).
+    /// The ready set, **re-sorted by the hybrid policy comparator** (spine §4.1 NORMATIVE).
     ///
-    /// Calls `storage.ready_issues` (the candidate set, pre-sorted `priority ASC, created_at ASC,
-    /// id ASC`) then re-ranks **in the engine** via `unblock_policy::cmp_ready` (which buckets P0/P1
-    /// together, so the final order differs from the SQL pre-sort) — CF-11. No write permit (FR-10).
+    /// Calls `storage.ready_issues` (already ordered in SQL by the mirrored `cmp_ready` key and
+    /// paged by `offset`/`limit` after the blocked-set filter — D18 addendum) then re-sorts **in the
+    /// engine** via `unblock_policy::cmp_ready` — CF-11 intact. No write permit (FR-10).
+    ///
+    /// On a conforming backend the re-sort is a no-op (storage already returns `cmp_ready` order);
+    /// it is kept as the defence spine §4.1 requires.
     ///
     /// # Errors
     /// Forwards any storage failure.

@@ -16,9 +16,10 @@
 //! **distinct** from the `list`-default order (`priority ASC, created_at DESC, id ASC` of
 //! `sort_list_default`, `sqlite.rs:3464`): ready is `created_at` **ASC**, NOT `DESC`.
 //!
-//! The §3.2.1 storage `ready_issues` SQL pre-sorts candidates by `priority ASC, created_at ASC,
-//! id ASC`; the **engine** then re-ranks that candidate set via [`cmp_ready`] (which buckets P0/P1
-//! together, so the final hybrid order differs from the SQL pre-sort) per CF-11 / spine §4.1.
+//! The §3.2.1 storage `ready_issues` SQL mirrors this key (`ORDER BY CASE WHEN priority <= 1 THEN 0
+//! ELSE 1 END ASC, created_at ASC, id ASC`, D18 addendum / policy Q1 amendment) without importing
+//! policy (CF-11 intact); the **engine** still re-sorts via [`cmp_ready`] per spine §4.1, and the
+//! two must agree.
 //!
 //! # The ready/blocked predicate
 //!
