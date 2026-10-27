@@ -1,6 +1,7 @@
 //! Read-path integration tests: ready semantics (FR-4/FR-5), hybrid sort (spine §4.1), diagnostics
 //! dispatch (FR-15), reads-succeed-while-a-write-holds-the-permit (FR-10), and the FR-4 query AC
-//! (filters compose on list/count/search/stale/blocked — D18; count dims; ordering determinism).
+//! (filters compose on list/count/search/stale/blocked/ready — D18 + addendum; ready/blocked paging
+//! and the ready storage↔`cmp_ready` parity; count dims; ordering determinism).
 
 mod common;
 
@@ -1196,8 +1197,8 @@ async fn orphans_surfaces_only_commit_hash_external_refs() {
 }
 
 // --------------------------------------------------------------------------------------------------
-// FR-4 query AC (T1.5): filters compose on list/count/search/stale/blocked (D18); count dims;
-// ordering determinism (NFR-14 ordering half). All over a real in-memory `Session` (no mock).
+// FR-4 query AC (T1.5): filters compose on list/count/search/stale/blocked/ready (D18 + addendum);
+// count dims; ordering determinism (NFR-14 ordering half). All over a real in-memory `Session`.
 // --------------------------------------------------------------------------------------------------
 
 /// Build a full [`Issue`] from the minimal corpus builder, overriding the FR-4 facet fields.
@@ -2182,4 +2183,559 @@ async fn list_comments_round_trips_in_canonical_order() {
     // The read paths hydrate Issue.comments (D37).
     let hydrated = session.get("ub-a").await.expect("get").expect("issue");
     assert_eq!(hydrated.comments.len(), 3, "get hydrates Issue.comments");
+}
+
+// --------------------------------------------------------------------------------------------------
+// ub-m07 (D18 addendum): ready composes the narrowing facets and pages after the blocked-set filter;
+// the storage SQL order mirrors `cmp_ready`; blocked honours `offset` after the membership test.
+// --------------------------------------------------------------------------------------------------
+
+/// The `search` needle every F-DECOY row shares in its description.
+const DECOY_NEEDLE: &str = "zork";
+
+/// The F-DECOY matching row (every single-facet filter in [`facet_decoys`] admits it).
+fn decoy_row(id: &str, secs: i64) -> Issue {
+    full_issue(
+        id,
+        "fix the parser",
+        IssueType::Task,
+        Priority::HIGH,
+        Some("alice"),
+        &["api", "v2", "web"],
+        Some(&format!("shared {DECOY_NEEDLE} body")),
+        secs,
+    )
+}
+
+/// **F-DECOY (facet decoys):** one decoy per facet, each differing from [`decoy_row`] in that field
+/// only, paired with the single-facet filter that must exclude it (separate `priority_min` /
+/// `priority_max` cases). The `status` decoy is skipped on `ready` (F-READY-STATUS carries it).
+fn facet_decoys() -> Vec<(Issue, ListFilters)> {
+    let none = ListFilters::default;
+    let mut out = Vec::new();
+    let mut d = decoy_row("ub-f-type", 1001);
+    d.issue_type = IssueType::Bug;
+    out.push((
+        d,
+        ListFilters {
+            issue_type: vec![IssueType::Task],
+            ..none()
+        },
+    ));
+    let mut d = decoy_row("ub-f-assignee", 1002);
+    d.assignee = Some("bob".to_string());
+    out.push((
+        d,
+        ListFilters {
+            assignee: Some("alice".to_string()),
+            ..none()
+        },
+    ));
+    let mut d = decoy_row("ub-f-labels-all", 1003);
+    d.labels = vec!["v2".to_string(), "web".to_string()];
+    out.push((
+        d,
+        ListFilters {
+            labels_all: vec!["api".to_string(), "v2".to_string()],
+            ..none()
+        },
+    ));
+    let mut d = decoy_row("ub-f-labels-any", 1004);
+    d.labels = vec!["api".to_string(), "v2".to_string()];
+    out.push((
+        d,
+        ListFilters {
+            labels_any: vec!["web".to_string(), "x".to_string()],
+            ..none()
+        },
+    ));
+    let mut d = decoy_row("ub-f-text", 1005);
+    d.title = "fix the lexer".to_string();
+    out.push((
+        d,
+        ListFilters {
+            text_contains: Some("parser".to_string()),
+            ..none()
+        },
+    ));
+    let mut d = decoy_row("ub-f-priority-min", 1006);
+    d.priority = Priority::CRITICAL;
+    out.push((
+        d,
+        ListFilters {
+            priority_min: Some(Priority::HIGH),
+            ..none()
+        },
+    ));
+    let mut d = decoy_row("ub-f-priority-max", 1007);
+    d.priority = Priority::LOW;
+    out.push((
+        d,
+        ListFilters {
+            priority_max: Some(Priority::HIGH),
+            ..none()
+        },
+    ));
+    let mut d = decoy_row("ub-f-status", 1008);
+    d.status = Status::InProgress;
+    out.push((
+        d,
+        ListFilters {
+            status: vec![Status::Open],
+            ..none()
+        },
+    ));
+    out
+}
+
+/// The id set `kind` returns over the `Session` under `filters` (`count` is asserted separately).
+async fn kind_ids(
+    session: &unblock_engine::Session,
+    kind: &str,
+    filters: &ListFilters,
+) -> HashSet<String> {
+    let issues = match kind {
+        "list" => session.list(filters).await,
+        "ready" => session.ready(filters).await,
+        "blocked" => session.blocked(filters).await,
+        "search" => session.search(DECOY_NEEDLE, filters).await,
+        "stale" => {
+            session
+                .stale(Utc::now() + chrono::Duration::days(365), filters)
+                .await
+        }
+        other => panic!("unknown query kind {other}"),
+    };
+    issues.expect("query").into_iter().map(|i| i.id).collect()
+}
+
+/// The `count` total under `filters`.
+async fn count_total(session: &unblock_engine::Session, filters: &ListFilters) -> usize {
+    session
+        .count(filters, None)
+        .await
+        .expect("count")
+        .into_iter()
+        .map(|b| b.count)
+        .sum()
+}
+
+/// The ordered ids of a query result.
+fn ordered_ids(issues: Vec<Issue>) -> Vec<String> {
+    issues.into_iter().map(|i| i.id).collect()
+}
+
+/// F-DECOY across `list`/`ready`/`blocked`/`search`/`count`/`stale` over `Session`.
+// One coherent F-DECOY proof across six kinds (single-facet + all-facets legs, then blocked).
+#[allow(clippy::too_many_lines)]
+async fn assert_f_decoy_every_kind() {
+    let session = session().await;
+    let decoys = facet_decoys();
+    session
+        .create(&decoy_row("ub-f-hit", 1000))
+        .await
+        .expect("create");
+    for (d, _) in &decoys {
+        session.create(d).await.expect("create");
+    }
+    let every: HashSet<String> = std::iter::once("ub-f-hit".to_string())
+        .chain(decoys.iter().map(|(d, _)| d.id.clone()))
+        .collect();
+    let hit = HashSet::from(["ub-f-hit".to_string()]);
+    let all_facets = ListFilters {
+        status: vec![Status::Open],
+        issue_type: vec![IssueType::Task],
+        priority_min: Some(Priority::HIGH),
+        priority_max: Some(Priority::HIGH),
+        assignee: Some("alice".to_string()),
+        labels_all: vec!["api".to_string(), "v2".to_string()],
+        labels_any: vec!["web".to_string(), "x".to_string()],
+        text_contains: Some("parser".to_string()),
+        ..ListFilters::default()
+    };
+
+    // Phase 1 (no edges): for every kind, unfiltered == hit + every eligible decoy (non-vacuity);
+    // each single-facet filter == that set minus its decoy.
+    for kind in ["list", "ready", "search", "stale"] {
+        let unfiltered = kind_ids(&session, kind, &ListFilters::default()).await;
+        let mut eligible = every.clone();
+        if kind == "ready" {
+            eligible.remove("ub-f-status");
+        }
+        assert_eq!(unfiltered, eligible, "{kind}: unfiltered non-vacuity");
+        for (decoy, filters) in &decoys {
+            if kind == "ready" && decoy.id == "ub-f-status" {
+                continue;
+            }
+            let mut expected = unfiltered.clone();
+            expected.remove(&decoy.id);
+            assert_eq!(
+                kind_ids(&session, kind, filters).await,
+                expected,
+                "{kind}: the facet excludes {}",
+                decoy.id
+            );
+        }
+        assert_eq!(
+            kind_ids(&session, kind, &all_facets).await,
+            hit,
+            "{kind}: all facets narrow to the hit"
+        );
+    }
+    assert_eq!(
+        count_total(&session, &ListFilters::default()).await,
+        every.len(),
+        "count: unfiltered non-vacuity"
+    );
+    for (decoy, filters) in &decoys {
+        assert_eq!(
+            count_total(&session, filters).await,
+            every.len() - 1,
+            "count: the facet excludes {}",
+            decoy.id
+        );
+    }
+    assert_eq!(
+        count_total(&session, &all_facets).await,
+        1,
+        "count: all facets narrow to the hit"
+    );
+
+    // Phase 2: a shared unresolved blocker gates EVERY row.
+    session
+        .create(&issue("ub-f-gate", Priority::MEDIUM, 900))
+        .await
+        .expect("create");
+    for id in &every {
+        add_blocks(&session, id, "ub-f-gate").await;
+    }
+    let unfiltered = kind_ids(&session, "blocked", &ListFilters::default()).await;
+    assert_eq!(unfiltered, every, "blocked: unfiltered non-vacuity");
+    for (decoy, filters) in &decoys {
+        let mut expected = unfiltered.clone();
+        expected.remove(&decoy.id);
+        assert_eq!(
+            kind_ids(&session, "blocked", filters).await,
+            expected,
+            "blocked: the facet excludes {}",
+            decoy.id
+        );
+    }
+    assert_eq!(
+        kind_ids(&session, "blocked", &all_facets).await,
+        hit,
+        "blocked: all facets narrow to the hit"
+    );
+}
+
+/// F-READY-STATUS over `Session::ready`: the status facet intersects the `open` baseline.
+async fn assert_f_ready_status() {
+    let session = session().await;
+    session
+        .create(&issue("ub-rs-open", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+    session
+        .create(&issue("ub-rs-wip", Priority::MEDIUM, 1001))
+        .await
+        .expect("create");
+    session.claim("ub-rs-wip", "bob").await.expect("claim");
+
+    let ready = |status: Vec<Status>| {
+        let session = &session;
+        async move {
+            ordered_ids(
+                session
+                    .ready(&ListFilters {
+                        status,
+                        ..ListFilters::default()
+                    })
+                    .await
+                    .expect("ready"),
+            )
+        }
+    };
+    assert_eq!(ready(Vec::new()).await, ["ub-rs-open"], "default ready");
+    assert!(
+        ready(vec![Status::InProgress]).await.is_empty(),
+        "ready(status=[in_progress]) is empty"
+    );
+    assert_eq!(
+        ready(vec![Status::Open, Status::InProgress]).await,
+        ["ub-rs-open"],
+        "ready(status=[open,in_progress]) keeps only the open row"
+    );
+}
+
+/// F-READY-NOOP over `Session::ready`: `include_deferred`/`include_closed` leave ready unchanged.
+async fn assert_f_ready_noop() {
+    let session = session().await;
+    for (id, secs) in [
+        ("ub-nn-ready", 1000),
+        ("ub-nn-status-deferred", 1001),
+        ("ub-nn-defer-until", 1002),
+        ("ub-nn-closed", 1003),
+    ] {
+        session
+            .create(&issue(id, Priority::MEDIUM, secs))
+            .await
+            .expect("create");
+    }
+    session
+        .update(
+            "ub-nn-status-deferred",
+            &IssuePatch {
+                status: Some(Status::Deferred),
+                ..IssuePatch::default()
+            },
+        )
+        .await
+        .expect("set deferred");
+    session
+        .defer("ub-nn-defer-until", Utc::now() + chrono::Duration::days(7))
+        .await
+        .expect("defer");
+    session
+        .close_with_suggestions("ub-nn-closed", None)
+        .await
+        .expect("close");
+
+    let default = ordered_ids(session.ready(&ListFilters::default()).await.expect("ready"));
+    assert_eq!(
+        default,
+        ["ub-nn-ready"],
+        "default ready is the ready row only"
+    );
+    for (label, filters) in [
+        (
+            "include_deferred",
+            ListFilters {
+                include_deferred: true,
+                ..ListFilters::default()
+            },
+        ),
+        (
+            "include_closed",
+            ListFilters {
+                include_closed: true,
+                ..ListFilters::default()
+            },
+        ),
+    ] {
+        assert_eq!(
+            ordered_ids(session.ready(&filters).await.expect("ready")),
+            default,
+            "{label} is a no-op on ready"
+        );
+    }
+}
+
+/// F-PAGE at BOTH `Storage::ready_issues` and `Session::ready`: paging follows the final order.
+async fn assert_f_page() {
+    use unblock_storage::Storage as _;
+
+    let storage = unblock_storage::LibsqlStorage::open_in_memory()
+        .await
+        .expect("open in-memory");
+    storage.migrate().await.expect("migrate");
+    let storage: Arc<dyn unblock_storage::Storage> = Arc::new(storage);
+    let session = session_over(storage.clone(), unblock_engine::SessionConfig::default()).await;
+
+    // The shared blocker is in_progress, so it is not itself ready.
+    session
+        .create(&issue("ub-pg-blocker", Priority::MEDIUM, 100))
+        .await
+        .expect("create");
+    session.claim("ub-pg-blocker", "bob").await.expect("claim");
+    for (id, priority, secs) in [
+        ("ub-pg-b0-blocked", Priority::CRITICAL, 900),
+        ("ub-pg-p1-older", Priority::HIGH, 930),
+        ("ub-pg-p0-newer", Priority::CRITICAL, 1000),
+        ("ub-pg-b1-blocked", Priority::MEDIUM, 1030),
+        ("ub-pg-p3-older", Priority::LOW, 1100),
+        ("ub-pg-p2-newer", Priority::MEDIUM, 1200),
+    ] {
+        session
+            .create(&issue(id, priority, secs))
+            .await
+            .expect("create");
+    }
+    add_blocks(&session, "ub-pg-b0-blocked", "ub-pg-blocker").await;
+    add_blocks(&session, "ub-pg-b1-blocked", "ub-pg-blocker").await;
+
+    let page = |offset: Option<usize>, limit: Option<usize>| ListFilters {
+        offset,
+        limit,
+        ..ListFilters::default()
+    };
+    for half in ["storage", "session"] {
+        let ready = |filters: ListFilters| {
+            let storage = storage.clone();
+            let session = &session;
+            async move {
+                if half == "storage" {
+                    ordered_ids(storage.ready_issues(&filters).await.expect("ready_issues"))
+                } else {
+                    ordered_ids(session.ready(&filters).await.expect("ready"))
+                }
+            }
+        };
+        let full = ready(page(None, None)).await;
+        assert_eq!(
+            full,
+            [
+                "ub-pg-p1-older",
+                "ub-pg-p0-newer",
+                "ub-pg-p3-older",
+                "ub-pg-p2-newer"
+            ],
+            "{half}: final ready order"
+        );
+        assert_eq!(
+            ready(page(None, Some(1))).await,
+            ["ub-pg-p1-older"],
+            "{half}: limit=1"
+        );
+        assert_eq!(
+            ready(page(Some(1), Some(1))).await,
+            ["ub-pg-p0-newer"],
+            "{half}: offset=1,limit=1"
+        );
+        let mut pages = Vec::new();
+        for offset in 0..full.len() {
+            pages.extend(ready(page(Some(offset), Some(1))).await);
+        }
+        assert_eq!(pages, full, "{half}: concatenated limit=1 pages == unpaged");
+        assert_eq!(
+            ready(page(Some(2), None)).await,
+            full[2..].to_vec(),
+            "{half}: offset without limit pages to the end"
+        );
+        assert!(
+            ready(page(Some(full.len() + 1), None)).await.is_empty(),
+            "{half}: offset = len + 1 ⇒ []"
+        );
+    }
+}
+
+/// `ready` composes the narrowing facets and pages after the blocked-set filter (ub-m07, D18
+/// addendum) — the ready counterpart of [`blocked_composes_facets_and_preserves_blocked_set`], on
+/// F-DECOY (all six kinds), F-READY-STATUS, F-READY-NOOP and F-PAGE.
+#[tokio::test]
+async fn ready_composes_facets_and_pages() {
+    assert_f_decoy_every_kind().await;
+    assert_f_ready_status().await;
+    assert_f_ready_noop().await;
+    assert_f_page().await;
+}
+
+/// **Ready parity (F-PARITY, CF-11):** the RAW `Storage::ready_issues` order equals the same fixture
+/// sorted by `unblock_policy::cmp_ready` — storage mirrors the policy key in SQL without importing
+/// policy. An older P1 next to a newer P0; inverted ages across P2/P3/P4 (P4 oldest, P2 newest); a
+/// `created_at` tie broken by `id`; a same-bucket sub-second pair `…T10:00:00+00:00` /
+/// `…T10:00:00.5+00:00` whose ids sort the opposite way. Red on `ORDER BY priority ASC, …` and on
+/// a `created_at` writer emitting `Z` or `SecondsFormat::Secs`.
+#[tokio::test]
+async fn ready_storage_order_matches_cmp_ready_parity() {
+    use unblock_storage::Storage as _;
+
+    let storage = unblock_storage::LibsqlStorage::open_in_memory()
+        .await
+        .expect("open in-memory");
+    storage.migrate().await.expect("migrate");
+
+    // 36_000 s = 1970-01-01T10:00:00+00:00.
+    let mut half = issue("ub-p-ss-a", Priority::MEDIUM, 36_000);
+    half.created_at += chrono::Duration::milliseconds(500);
+    half.updated_at = half.created_at;
+    let fixture = vec![
+        issue("ub-p-p2", Priority::MEDIUM, 43_200),
+        issue("ub-p-tie-b", Priority::LOW, 39_600),
+        issue("ub-p-tie-a", Priority::LOW, 39_600),
+        half,
+        issue("ub-p-ss-z", Priority::MEDIUM, 36_000),
+        issue("ub-p-p0", Priority::CRITICAL, 34_200),
+        issue("ub-p-p1", Priority::HIGH, 32_400),
+        issue("ub-p-p3", Priority::LOW, 30_600),
+        issue("ub-p-p4", Priority::BACKLOG, 28_800),
+    ];
+    for row in &fixture {
+        storage.create_issue(row, "tester").await.expect("create");
+    }
+
+    let raw = ordered_ids(
+        storage
+            .ready_issues(&ListFilters::default())
+            .await
+            .expect("ready_issues"),
+    );
+    let mut expected = fixture.clone();
+    expected.sort_by(unblock_policy::cmp_ready);
+    assert_eq!(
+        raw,
+        ordered_ids(expected),
+        "raw storage ready order == fixture sorted by cmp_ready"
+    );
+}
+
+/// **F-BLOCKED-OFFSET** over `Session::blocked`: `offset` then `limit` apply AFTER the membership
+/// test. The non-blocked P0 shared blocker sorts AHEAD of the second blocked row in
+/// `priority ASC, created_at DESC, id ASC`; SQL paging before the membership filter turns this red.
+#[tokio::test]
+async fn blocked_honours_offset_after_membership() {
+    let session = session().await;
+    for (id, priority, secs) in [
+        ("ub-bo-blocker", Priority::CRITICAL, 900),
+        ("ub-bo-b1", Priority::CRITICAL, 1000),
+        ("ub-bo-b2", Priority::HIGH, 930),
+        ("ub-bo-b3", Priority::MEDIUM, 930),
+    ] {
+        session
+            .create(&issue(id, priority, secs))
+            .await
+            .expect("create");
+    }
+    for blocked in ["ub-bo-b1", "ub-bo-b2", "ub-bo-b3"] {
+        add_blocks(&session, blocked, "ub-bo-blocker").await;
+    }
+
+    let blocked = |offset: Option<usize>, limit: Option<usize>| {
+        let session = &session;
+        async move {
+            ordered_ids(
+                session
+                    .blocked(&ListFilters {
+                        offset,
+                        limit,
+                        ..ListFilters::default()
+                    })
+                    .await
+                    .expect("blocked"),
+            )
+        }
+    };
+    let full = blocked(None, None).await;
+    assert_eq!(full, ["ub-bo-b1", "ub-bo-b2", "ub-bo-b3"], "blocked order");
+    assert_eq!(
+        blocked(Some(1), Some(1)).await,
+        ["ub-bo-b2"],
+        "offset=1,limit=1 ⇒ the second blocked row"
+    );
+    let mut pages = Vec::new();
+    for offset in 0..full.len() {
+        pages.extend(blocked(Some(offset), Some(1)).await);
+    }
+    assert_eq!(
+        pages, full,
+        "concatenated limit=1 pages == the unpaged result"
+    );
+    assert_eq!(
+        blocked(Some(1), None).await,
+        full[1..].to_vec(),
+        "offset without limit ⇒ the tail"
+    );
+    assert!(
+        blocked(Some(full.len() + 1), None).await.is_empty(),
+        "offset = len + 1 ⇒ []"
+    );
 }
