@@ -179,6 +179,12 @@ where
     contract_list_filters_compose(factory().await).await;
     contract_priority_range_inclusive(factory().await).await;
     contract_label_and_or(factory().await).await;
+    contract_every_kind_applies_every_facet(factory().await).await;
+    contract_ready_status_intersects_open(factory().await).await;
+    contract_ready_include_flags_are_noops(factory().await).await;
+    contract_ready_pages_after_blocked_filter(factory().await).await;
+    contract_ready_literal_order(factory().await).await;
+    contract_blocked_offset_after_membership(factory().await).await;
     contract_count_issues_sum_consistency(factory().await).await;
     contract_stale_issues(factory().await).await;
     contract_batch_hydration_determinism(factory().await).await;
@@ -1914,6 +1920,582 @@ pub async fn contract_label_and_or<S: Storage>(storage: S) {
     );
 }
 
+/// The `search` needle every F-DECOY row shares in its description, so the `text_contains` decoy is a
+/// `search` hit and only the (title) `text_contains` facet excludes it.
+const FACET_SEARCH_NEEDLE: &str = "zork";
+
+/// The F-DECOY matching row: every single-facet filter in [`facet_decoys`] admits it.
+fn facet_row(id: &str) -> Issue {
+    let mut i = issue(id, "fix the parser");
+    i.description = Some(format!("shared {FACET_SEARCH_NEEDLE} body"));
+    i.issue_type = IssueType::Task;
+    i.priority = Priority::HIGH;
+    i.assignee = Some("alice".to_string());
+    i.labels = vec!["api".to_string(), "v2".to_string(), "web".to_string()];
+    i
+}
+
+/// **F-DECOY (facet decoys):** one decoy per facet, each differing from [`facet_row`] in that field
+/// only, paired with the single-facet filter that must exclude it. `priority_min`/`priority_max` are
+/// separate cases (a P0 decoy under `priority_min=P1`, a P3 decoy under `priority_max=P1`). The
+/// `status` decoy (`ub-f-status`, `in_progress`) is not run on `ready` — F-READY-STATUS carries it.
+fn facet_decoys() -> Vec<(Issue, ListFilters)> {
+    let none = ListFilters::default;
+    let mut out = Vec::new();
+
+    let mut d = facet_row("ub-f-type");
+    d.issue_type = IssueType::Bug;
+    out.push((
+        d,
+        ListFilters {
+            issue_type: vec![IssueType::Task],
+            ..none()
+        },
+    ));
+
+    let mut d = facet_row("ub-f-assignee");
+    d.assignee = Some("bob".to_string());
+    out.push((
+        d,
+        ListFilters {
+            assignee: Some("alice".to_string()),
+            ..none()
+        },
+    ));
+
+    // Missing one required label.
+    let mut d = facet_row("ub-f-labels-all");
+    d.labels = vec!["v2".to_string(), "web".to_string()];
+    out.push((
+        d,
+        ListFilters {
+            labels_all: vec!["api".to_string(), "v2".to_string()],
+            ..none()
+        },
+    ));
+
+    // None of the listed labels.
+    let mut d = facet_row("ub-f-labels-any");
+    d.labels = vec!["api".to_string(), "v2".to_string()];
+    out.push((
+        d,
+        ListFilters {
+            labels_any: vec!["web".to_string(), "x".to_string()],
+            ..none()
+        },
+    ));
+
+    // The title lacks the needle (the description still carries the shared search needle).
+    let mut d = facet_row("ub-f-text");
+    d.title = "fix the lexer".to_string();
+    out.push((
+        d,
+        ListFilters {
+            text_contains: Some("parser".to_string()),
+            ..none()
+        },
+    ));
+
+    let mut d = facet_row("ub-f-priority-min");
+    d.priority = Priority::CRITICAL;
+    out.push((
+        d,
+        ListFilters {
+            priority_min: Some(Priority::HIGH),
+            ..none()
+        },
+    ));
+
+    let mut d = facet_row("ub-f-priority-max");
+    d.priority = Priority::LOW;
+    out.push((
+        d,
+        ListFilters {
+            priority_max: Some(Priority::HIGH),
+            ..none()
+        },
+    ));
+
+    let mut d = facet_row("ub-f-status");
+    d.status = Status::InProgress;
+    out.push((
+        d,
+        ListFilters {
+            status: vec![Status::Open],
+            ..none()
+        },
+    ));
+
+    out
+}
+
+/// The id set `kind` (`list`/`ready`/`blocked`/`search`/`stale`) returns under `filters`.
+async fn facet_kind_ids<S: Storage>(
+    storage: &S,
+    kind: &str,
+    filters: &ListFilters,
+) -> std::collections::HashSet<String> {
+    let issues = match kind {
+        "list" => storage.list_issues(filters).await,
+        "ready" => storage.ready_issues(filters).await,
+        "blocked" => storage.blocked_issues(filters).await,
+        "search" => storage.search_issues(FACET_SEARCH_NEEDLE, filters).await,
+        "stale" => storage.stale_issues(ts(2999, 1, 1), filters).await,
+        other => panic!("unknown query kind {other}"),
+    };
+    issues.unwrap().into_iter().map(|i| i.id).collect()
+}
+
+/// Every query kind sharing [`ListFilters`] (`list`, `ready`, `blocked`, `search`, `count`, `stale`)
+/// applies EVERY narrowing facet, on **F-DECOY** (ub-m07 / D18 addendum: `ready` once ignored them).
+///
+/// For every kind the unfiltered call returns the hit plus every decoy eligible for that kind
+/// (non-vacuity), and each single-facet filter returns exactly that set minus its decoy, so a kind
+/// that ignores a facet keeps the decoy and fails naming it. All facets together narrow to the hit.
+/// `blocked` runs last, after a shared unresolved blocker gates EVERY row.
+#[allow(clippy::too_many_lines)]
+pub async fn contract_every_kind_applies_every_facet<S: Storage>(storage: S) {
+    use std::collections::HashSet;
+
+    let decoys = facet_decoys();
+    storage
+        .create_issue(&facet_row("ub-f-hit"), "a")
+        .await
+        .unwrap();
+    for (d, _) in &decoys {
+        storage.create_issue(d, "a").await.unwrap();
+    }
+    let every: HashSet<String> = std::iter::once("ub-f-hit".to_string())
+        .chain(decoys.iter().map(|(d, _)| d.id.clone()))
+        .collect();
+    let hit = HashSet::from(["ub-f-hit".to_string()]);
+    let all_facets = ListFilters {
+        status: vec![Status::Open],
+        issue_type: vec![IssueType::Task],
+        priority_min: Some(Priority::HIGH),
+        priority_max: Some(Priority::HIGH),
+        assignee: Some("alice".to_string()),
+        labels_all: vec!["api".to_string(), "v2".to_string()],
+        labels_any: vec!["web".to_string(), "x".to_string()],
+        text_contains: Some("parser".to_string()),
+        ..ListFilters::default()
+    };
+
+    // Phase 1 (no edges yet): every row is unblocked.
+    for kind in ["list", "ready", "search", "stale"] {
+        let unfiltered = facet_kind_ids(&storage, kind, &ListFilters::default()).await;
+        let mut eligible = every.clone();
+        if kind == "ready" {
+            // `in_progress` is never ready-eligible; ready's status cell is F-READY-STATUS.
+            eligible.remove("ub-f-status");
+        }
+        assert_eq!(
+            unfiltered, eligible,
+            "{kind}: the unfiltered call returns the hit plus every eligible decoy"
+        );
+        for (decoy, filters) in &decoys {
+            if kind == "ready" && decoy.id == "ub-f-status" {
+                continue;
+            }
+            let mut expected = unfiltered.clone();
+            expected.remove(&decoy.id);
+            assert_eq!(
+                facet_kind_ids(&storage, kind, filters).await,
+                expected,
+                "{kind}: the facet excludes {}",
+                decoy.id
+            );
+        }
+        assert_eq!(
+            facet_kind_ids(&storage, kind, &all_facets).await,
+            hit,
+            "{kind}: all facets narrow to the hit"
+        );
+    }
+
+    // count: totals over the same cases.
+    assert_eq!(
+        total_count(&storage, &ListFilters::default()).await,
+        every.len(),
+        "count: the unfiltered total covers the hit plus every decoy"
+    );
+    for (decoy, filters) in &decoys {
+        assert_eq!(
+            total_count(&storage, filters).await,
+            every.len() - 1,
+            "count: the facet excludes {}",
+            decoy.id
+        );
+    }
+    assert_eq!(
+        total_count(&storage, &all_facets).await,
+        1,
+        "count: all facets narrow to the hit"
+    );
+
+    // Phase 2: a shared unresolved blocker gates EVERY row, then blocked runs the same cases.
+    storage
+        .create_issue(&issue("ub-f-gate", "gate"), "a")
+        .await
+        .unwrap();
+    for id in &every {
+        storage
+            .add_dependency(&dep(id, "ub-f-gate", DependencyType::Blocks), "a")
+            .await
+            .unwrap();
+    }
+    let unfiltered = facet_kind_ids(&storage, "blocked", &ListFilters::default()).await;
+    assert_eq!(
+        unfiltered, every,
+        "blocked: the unfiltered call returns the hit plus every decoy"
+    );
+    for (decoy, filters) in &decoys {
+        let mut expected = unfiltered.clone();
+        expected.remove(&decoy.id);
+        assert_eq!(
+            facet_kind_ids(&storage, "blocked", filters).await,
+            expected,
+            "blocked: the facet excludes {}",
+            decoy.id
+        );
+    }
+    assert_eq!(
+        facet_kind_ids(&storage, "blocked", &all_facets).await,
+        hit,
+        "blocked: all facets narrow to the hit"
+    );
+}
+
+/// A fixed instant on 2026-01-01 at `h:m:s` UTC (the ub-m07 ready-order fixtures).
+fn at(h: u32, m: u32, s: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 1, 1, h, m, s)
+        .single()
+        .unwrap_or_else(Utc::now)
+}
+
+/// An open issue at priority `p`, created (and updated) at `created`.
+fn ranked(id: &str, p: i32, created: DateTime<Utc>) -> Issue {
+    let mut i = issue(id, id);
+    i.priority = Priority(p);
+    i.created_at = created;
+    i.updated_at = created;
+    i
+}
+
+/// The ordered ready ids under `offset`/`limit` (default facets).
+async fn ready_page<S: Storage>(
+    storage: &S,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Vec<String> {
+    storage
+        .ready_issues(&ListFilters {
+            offset,
+            limit,
+            ..ListFilters::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect()
+}
+
+/// The ordered blocked ids under `offset`/`limit` (default facets).
+async fn blocked_page<S: Storage>(
+    storage: &S,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Vec<String> {
+    storage
+        .blocked_issues(&ListFilters {
+            offset,
+            limit,
+            ..ListFilters::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect()
+}
+
+/// The ordered ready ids under `filters`.
+async fn ready_ids_under<S: Storage>(storage: &S, filters: &ListFilters) -> Vec<String> {
+    storage
+        .ready_issues(filters)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect()
+}
+
+/// **F-READY-STATUS:** `ready`'s `status` facet intersects the `open` baseline (D18 addendum). An
+/// open row plus an unblocked, undeferred `in_progress` row: `status=[in_progress]` ⇒ `[]` (an
+/// ignored facet would return the open row; a facet that replaced the baseline would return the
+/// `in_progress` row); `status=[open,in_progress]` ⇒ only the open row.
+pub async fn contract_ready_status_intersects_open<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-rs-open", "open"), "a")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-rs-wip", "wip"), "a")
+        .await
+        .unwrap();
+    storage
+        .claim_issue("ub-rs-wip", "bob", "bob")
+        .await
+        .unwrap();
+
+    let with_status = |status: Vec<Status>| ListFilters {
+        status,
+        ..ListFilters::default()
+    };
+    assert_eq!(
+        ready_ids_under(&storage, &ListFilters::default()).await,
+        ["ub-rs-open"],
+        "default ready holds the open row only (non-vacuity)"
+    );
+    assert!(
+        ready_ids_under(&storage, &with_status(vec![Status::InProgress]))
+            .await
+            .is_empty(),
+        "ready(status=[in_progress]) is empty"
+    );
+    assert_eq!(
+        ready_ids_under(
+            &storage,
+            &with_status(vec![Status::Open, Status::InProgress])
+        )
+        .await,
+        ["ub-rs-open"],
+        "ready(status=[open,in_progress]) keeps only the open row"
+    );
+}
+
+/// **F-READY-NOOP:** `include_deferred`/`include_closed` are no-ops on `ready` (D18 addendum — a
+/// deliberate departure from bd `sqlite.rs:5019-5036`). A ready row, a status-`deferred` row, a
+/// future-`defer_until` open row and a closed row: each flag leaves `ready` == the default result.
+pub async fn contract_ready_include_flags_are_noops<S: Storage>(storage: S) {
+    for id in [
+        "ub-nn-ready",
+        "ub-nn-status-deferred",
+        "ub-nn-defer-until",
+        "ub-nn-closed",
+    ] {
+        storage.create_issue(&issue(id, id), "a").await.unwrap();
+    }
+    for (id, status) in [
+        ("ub-nn-status-deferred", Status::Deferred),
+        ("ub-nn-closed", Status::Closed),
+    ] {
+        storage
+            .update_issue(
+                id,
+                &IssuePatch {
+                    status: Some(status),
+                    ..IssuePatch::default()
+                },
+                "a",
+            )
+            .await
+            .unwrap();
+    }
+    storage
+        .defer_issue("ub-nn-defer-until", ts(2099, 1, 1), "a")
+        .await
+        .unwrap();
+
+    let default = ready_ids_under(&storage, &ListFilters::default()).await;
+    assert_eq!(
+        default,
+        ["ub-nn-ready"],
+        "default ready is the ready row only"
+    );
+    let include_deferred = ListFilters {
+        include_deferred: true,
+        ..ListFilters::default()
+    };
+    assert_eq!(
+        ready_ids_under(&storage, &include_deferred).await,
+        default,
+        "include_deferred is a no-op on ready"
+    );
+    let include_closed = ListFilters {
+        include_closed: true,
+        ..ListFilters::default()
+    };
+    assert_eq!(
+        ready_ids_under(&storage, &include_closed).await,
+        default,
+        "include_closed is a no-op on ready"
+    );
+}
+
+/// **F-PAGE (ready paging, storage half):** `offset`/`limit` page the FINAL ready order, after the
+/// in-Rust blocked-set filter (D18 addendum). Pairs P0-newer/P1-older and P2-newer/P3-older, plus a
+/// blocked row in each bucket that sorts AHEAD of a paged target in SQL order (a bucket-0 row older
+/// than P1-older, a bucket-1 row older than P3-older), gated by an `in_progress` blocker (itself not
+/// ready). Paging in SQL before the filter, or ordering by full `priority ASC`, turns this red.
+pub async fn contract_ready_pages_after_blocked_filter<S: Storage>(storage: S) {
+    storage
+        .create_issue(&ranked("ub-pg-blocker", 2, at(8, 0, 0)), "a")
+        .await
+        .unwrap();
+    storage
+        .claim_issue("ub-pg-blocker", "bob", "bob")
+        .await
+        .unwrap();
+    for row in [
+        ranked("ub-pg-b0-blocked", 0, at(9, 0, 0)),
+        ranked("ub-pg-p1-older", 1, at(9, 30, 0)),
+        ranked("ub-pg-p0-newer", 0, at(10, 0, 0)),
+        ranked("ub-pg-b1-blocked", 2, at(10, 30, 0)),
+        ranked("ub-pg-p3-older", 3, at(11, 0, 0)),
+        ranked("ub-pg-p2-newer", 2, at(12, 0, 0)),
+    ] {
+        storage.create_issue(&row, "a").await.unwrap();
+    }
+    for blocked in ["ub-pg-b0-blocked", "ub-pg-b1-blocked"] {
+        storage
+            .add_dependency(&dep(blocked, "ub-pg-blocker", DependencyType::Blocks), "a")
+            .await
+            .unwrap();
+    }
+
+    let full = ready_page(&storage, None, None).await;
+    assert_eq!(
+        full,
+        [
+            "ub-pg-p1-older",
+            "ub-pg-p0-newer",
+            "ub-pg-p3-older",
+            "ub-pg-p2-newer"
+        ],
+        "final ready order (cmp_ready key)"
+    );
+    assert_eq!(
+        ready_page(&storage, None, Some(1)).await,
+        ["ub-pg-p1-older"],
+        "limit=1"
+    );
+    assert_eq!(
+        ready_page(&storage, Some(1), Some(1)).await,
+        ["ub-pg-p0-newer"],
+        "offset=1,limit=1"
+    );
+    let mut pages = Vec::new();
+    for offset in 0..full.len() {
+        pages.extend(ready_page(&storage, Some(offset), Some(1)).await);
+    }
+    assert_eq!(
+        pages, full,
+        "concatenated limit=1 pages == the unpaged result"
+    );
+    assert_eq!(
+        ready_page(&storage, Some(2), None).await,
+        full[2..].to_vec(),
+        "offset without limit pages to the end"
+    );
+    assert!(
+        ready_page(&storage, Some(full.len() + 1), None)
+            .await
+            .is_empty(),
+        "offset = len + 1 ⇒ []"
+    );
+}
+
+/// **F-PARITY (ready key), literal half:** `ready_issues` returns the LITERAL id order of the
+/// mirrored `cmp_ready` key (`CASE WHEN priority <= 1 THEN 0 ELSE 1 END` ASC, `created_at` ASC, `id`
+/// ASC — D18 addendum), binding every backend without a policy dependency (CF-11). An older P1 next
+/// to a newer P0; inverted ages across P2/P3/P4 (P4 oldest, P2 newest); a `created_at` tie broken
+/// by `id`; a same-bucket sub-second pair `…T10:00:00+00:00` / `…T10:00:00.5+00:00` whose ids sort
+/// the opposite way. All rows go through `create_issue` (the spine §3.3 `issues.created_at`
+/// `to_rfc3339()` invariant). Red on `ORDER BY priority ASC, …`, and on a writer emitting `Z` or
+/// `SecondsFormat::Secs`.
+pub async fn contract_ready_literal_order<S: Storage>(storage: S) {
+    let half = at(10, 0, 0) + chrono::Duration::milliseconds(500);
+    for row in [
+        ranked("ub-p-p2", 2, at(12, 0, 0)),
+        ranked("ub-p-tie-b", 3, at(11, 0, 0)),
+        ranked("ub-p-tie-a", 3, at(11, 0, 0)),
+        ranked("ub-p-ss-a", 2, half),
+        ranked("ub-p-ss-z", 2, at(10, 0, 0)),
+        ranked("ub-p-p0", 0, at(9, 30, 0)),
+        ranked("ub-p-p1", 1, at(9, 0, 0)),
+        ranked("ub-p-p3", 3, at(8, 30, 0)),
+        ranked("ub-p-p4", 4, at(8, 0, 0)),
+    ] {
+        storage.create_issue(&row, "a").await.unwrap();
+    }
+
+    assert_eq!(
+        ready_page(&storage, None, None).await,
+        [
+            "ub-p-p1",
+            "ub-p-p0",
+            "ub-p-p4",
+            "ub-p-p3",
+            "ub-p-ss-z",
+            "ub-p-ss-a",
+            "ub-p-tie-a",
+            "ub-p-tie-b",
+            "ub-p-p2"
+        ],
+        "ready returns the literal cmp_ready order"
+    );
+}
+
+/// **F-BLOCKED-OFFSET:** `blocked_issues` honours `offset` then `limit` AFTER the in-Rust membership
+/// test (D18 addendum). Three blocked rows plus the non-blocked P0 shared blocker, which sorts AHEAD
+/// of the second blocked row in `priority ASC, created_at DESC, id ASC`. Paging in SQL before the
+/// membership filter turns this red.
+pub async fn contract_blocked_offset_after_membership<S: Storage>(storage: S) {
+    for row in [
+        ranked("ub-bo-blocker", 0, at(9, 0, 0)),
+        ranked("ub-bo-b1", 0, at(10, 0, 0)),
+        ranked("ub-bo-b2", 1, at(9, 30, 0)),
+        ranked("ub-bo-b3", 2, at(9, 30, 0)),
+    ] {
+        storage.create_issue(&row, "a").await.unwrap();
+    }
+    for blocked in ["ub-bo-b1", "ub-bo-b2", "ub-bo-b3"] {
+        storage
+            .add_dependency(&dep(blocked, "ub-bo-blocker", DependencyType::Blocks), "a")
+            .await
+            .unwrap();
+    }
+
+    let full = blocked_page(&storage, None, None).await;
+    assert_eq!(full, ["ub-bo-b1", "ub-bo-b2", "ub-bo-b3"], "blocked order");
+    assert_eq!(
+        blocked_page(&storage, Some(1), Some(1)).await,
+        ["ub-bo-b2"],
+        "offset=1,limit=1 ⇒ the second blocked row"
+    );
+    let mut pages = Vec::new();
+    for offset in 0..full.len() {
+        pages.extend(blocked_page(&storage, Some(offset), Some(1)).await);
+    }
+    assert_eq!(
+        pages, full,
+        "concatenated limit=1 pages == the unpaged result"
+    );
+    assert_eq!(
+        blocked_page(&storage, Some(1), None).await,
+        full[1..].to_vec(),
+        "offset without limit ⇒ the tail"
+    );
+    assert!(
+        blocked_page(&storage, Some(full.len() + 1), None)
+            .await
+            .is_empty(),
+        "offset = len + 1 ⇒ []"
+    );
+}
+
 /// Ready and blocked are **disjoint**; a deferred or closed issue is in neither.
 pub async fn contract_ready_blocked_disjoint<S: Storage>(storage: S) {
     storage
@@ -2203,7 +2785,9 @@ pub async fn contract_batch_hydration_determinism<S: Storage>(storage: S) {
         storage.create_issue(i, "seed").await.expect("create");
     }
 
-    // Expected read order: priority ASC → [ub-b(0), ub-c(1), ub-a(2)] — NOT the id/insert order.
+    // Expected read order [ub-b(0), ub-c(1), ub-a(2)] — NOT the id/insert order. `list`/`search`
+    // order by `priority ASC`; `ready` by the mirrored `cmp_ready` key (D18 addendum: bucket 0 =
+    // ub-b, ub-c by `created_at` tie → `id`; bucket 1 = ub-a), which yields the same sequence here.
     let assert_shape = |issues: &[Issue], path: &str| {
         let ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(
