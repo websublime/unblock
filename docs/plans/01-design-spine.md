@@ -481,16 +481,18 @@ All emitted `DateTime<Utc>` fields are rendered via `unblock_model::fmt_ts_secs`
 ```rust
 use chrono::{DateTime, SecondsFormat, Utc};
 /// Canonical RFC-3339 rendering: UTC, SECOND precision, `Z` suffix (e.g. `2026-01-02T03:04:05Z`).
-/// The ONLY path any crate may use to stringify a `DateTime<Utc>` for output/export. No crate may
-/// call `to_rfc3339()` directly (it emits sub-seconds + numeric offset, breaking byte-determinism
-/// and the render↔export byte-coherence the T2.4 JSONL export depends on).
+/// The ONLY path any crate may use to stringify a `DateTime<Utc>` for OUTPUT/EXPORT (render and
+/// sync). No output/export path may call `to_rfc3339()` directly (it emits sub-seconds + numeric
+/// offset, breaking byte-determinism and the render↔export byte-coherence the T2.4 JSONL export
+/// depends on). Scope: output/export only — storage PERSISTENCE follows §3.3 (`to_rfc3339()`) and
+/// never uses `fmt_ts_secs`.
 #[must_use]
 pub fn fmt_ts_secs(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 ```
 
-**`unblock-render::fmt_ts` is REWIRED to call it** (`fmt_ts(dt) == unblock_model::fmt_ts_secs(dt)` — render keeps the `fmt_ts` name as a thin wrapper/re-export for its backends; the body becomes the model call, not a second `to_rfc3339_opts`). **`unblock-sync` calls `fmt_ts_secs` directly** on export (sync depends on `unblock-model` at L0, so it needs NO render dep — the `sync→render` layering violation is avoided by construction). DRY end-state: exactly ONE `to_rfc3339_opts(SecondsFormat::Secs, true)` in the workspace (in `unblock-model`). Byte form is `<date>T<time>Z` at second precision — byte-identical to the current `fmt_ts` (verified verbatim at `crates/unblock-render/src/format.rs:146-148` this session). `content_hash` is unaffected (spine §1.8 excludes all timestamps from the hash), so this is hash-safe. Render's doctest (`format.rs:138-143`) and unit test (`format.rs:236-244`) stay green unchanged.
+**`unblock-render::fmt_ts` is REWIRED to call it** (`fmt_ts(dt) == unblock_model::fmt_ts_secs(dt)` — render keeps the `fmt_ts` name as a thin wrapper/re-export for its backends; the body becomes the model call, not a second `to_rfc3339_opts`). **`unblock-sync` calls `fmt_ts_secs` directly** on export (sync depends on `unblock-model` at L0, so it needs NO render dep — the `sync→render` layering violation is avoided by construction). DRY end-state: exactly ONE `to_rfc3339_opts(SecondsFormat::Secs, true)` in the workspace (in `unblock-model`). **Scope (D18 addendum):** this rule governs OUTPUT/EXPORT (render and sync) only; storage persistence of `issues.created_at` follows the §3.3 `issues.created_at` encoding invariant (`to_rfc3339()`) and never uses `fmt_ts_secs` (second precision would collapse sub-second order). Byte form is `<date>T<time>Z` at second precision — byte-identical to the current `fmt_ts` (verified verbatim at `crates/unblock-render/src/format.rs:146-148` this session). `content_hash` is unaffected (spine §1.8 excludes all timestamps from the hash), so this is hash-safe. Render's doctest (`format.rs:138-143`) and unit test (`format.rs:236-244`) stay green unchanged.
 
 ---
 
@@ -1040,8 +1042,8 @@ pub trait Storage: Send + Sync {
 
     // --- queries (FR-4) ---
     async fn list_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError>;
-    async fn ready_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError>;  // unblocked+undeferred, default-complete
-    async fn blocked_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError>;
+    async fn ready_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError>;  // unblocked+undeferred, default-complete; narrowing facets (status ∩ open), include_* no-ops; ORDER = cmp_ready key mirrored as SQL; offset/limit after the blocked-set filter (D18 addendum)
+    async fn blocked_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError>; // narrowing facets, include_* no-ops (D18); offset/limit after the membership test (D18 addendum)
     async fn search_issues(&self, query: &str, filters: &ListFilters) -> Result<Vec<Issue>, StorageError>; // FTS, cap default 50
     async fn count_issues(&self, filters: &ListFilters, group_by: Option<CountGroupBy>)
         -> Result<Vec<CountBucket>, StorageError>;
@@ -1504,7 +1506,7 @@ between an earlier prose description and the source are resolved **in favour of 
   widens the baseline to include `status='tombstone'` rows; no agent QUERY TOOL sets it (the mcp resource error-path scan is the one non-export consumer).
   `ORDER BY priority ASC, created_at DESC, id ASC` —
   note `created_at` **DESC** (newest-first), **deliberately distinct from `ready`'s `created_at ASC`**
-  pre-sort (oldest-first within a priority bucket; policy `ready.rs:16-17`). Default-complete unless
+  order (oldest-first within a ready bucket; policy `ready.rs:16-17`). Default-complete unless
   `limit` set; `offset`-without-`limit` uses `LIMIT -1 OFFSET n`. Authoritative order for render/MCP
   snapshots (T2.1/T2.3), NFR-14. (§3.2.1 previously had no entry for `list_issues`, `count_issues`,
   `stale_issues`, or `get_issue`; the first three are pinned here/below because their order is
@@ -1513,9 +1515,32 @@ between an earlier prose description and the source are resolved **in favour of 
 - **`ready_issues` (sqlite.rs:4988–5048) — mirrors `idx_issues_ready`.**
   `status = 'open' AND id NOT IN <live blocked set> AND (defer_until IS NULL OR defer_until <= now) AND
   (pinned = 0 OR pinned IS NULL) AND (ephemeral = 0 OR ephemeral IS NULL) AND
-  (is_template = 0 OR is_template IS NULL)`. `ORDER BY priority ASC, created_at ASC, id ASC`. The
-  original's `AND id NOT LIKE '%-wisp-%'` wisp filter is **DROPPED** (Miguel). Default-complete unless
-  `limit` set; the hybrid re-rank stays in the engine (CF-11).
+  (is_template = 0 OR is_template IS NULL)`. `ORDER BY CASE WHEN priority <= 1 THEN 0 ELSE 1 END ASC,
+  created_at ASC, id ASC` — the SAME key as `unblock_policy::cmp_ready` (`ready_hybrid_bucket`: P0/P1 →
+  bucket 0, else 1; then `created_at` ASC; then `id` ASC), MIRRORED as SQL. **CF-11 stays intact:**
+  storage takes no policy dependency; the key is pinned from outside storage by two tests (D18
+  addendum): (i) the **parity test** in `crates/unblock-engine/tests` (the engine already depends on
+  storage and policy) compares the RAW `Storage::ready_issues` output with the same fixture sorted by
+  `cmp_ready` — named mutants: reverting the SQL to `ORDER BY priority ASC, …` turns it red, and a
+  `created_at` writer that emits `Z` or `SecondsFormat::Secs` turns it red; (ii) the
+  NFR-16 **testkit contract** asserts a LITERAL expected id order, which binds every backend. The key
+  relies on the **`issues.created_at` encoding invariant** (§3.3, scoped to `bind_issue`'s write): byte
+  order of the stored text equals chrono `Ord`. The original's `AND id NOT LIKE '%-wisp-%'` wisp filter is **DROPPED** (Miguel). **Facets
+  NARROW the ready set (FR-4 "filters compose", D18 addendum).** `ready_issues` applies the same
+  *narrowing* facets as `blocked_issues` — status-OR, `issue_type`-OR, inclusive
+  `priority_min`/`priority_max`, `assignee`, `labels_all` (AND) / `labels_any` (OR), and
+  `text_contains` (title `LIKE ? ESCAPE '\'`) — to the candidate rows **before** the live blocked-set
+  membership test. A `status` facet **INTERSECTS** the `status = 'open'` baseline, so a facet set
+  without `open` yields the empty set (`status=[in_progress]` ⇒ `[]`; `status=[open,in_progress]` ⇒
+  only the open rows). `ready` does **NOT** inherit `list_issues`' default visibility:
+  `include_closed`/`include_deferred` are **no-ops** (ready always excludes closed and deferred,
+  mirroring `blocked`). The `include_deferred` no-op is a **deliberate departure** from bd
+  `sqlite.rs:5019–5036` (where `include_deferred` widens ready to `status IN ('open','deferred')` and
+  drops the `defer_until` gate) — **DEPARTED** (Miguel, ratified 2026-10-27), as with the wisp filter.
+  **Paging:** default-complete unless `limit` set; `offset`/`limit` apply **after** the in-Rust
+  blocked-set filter, over the ordered candidates, so pages follow the final ranked order
+  (`offset`-without-`limit` pages to the end; `offset = len + 1` ⇒ `[]`). The engine's `cmp_ready`
+  re-sort stays and must agree with the SQL order (it is then a no-op on a correct page).
 - **`blocked_issues` (sqlite.rs:5720–5746, 5886–5912, 6076–6090, 6258–6311, 6371–6398) — `status NOT
   IN ('closed', 'tombstone')` (INCLUDES `in_progress`/`deferred`); blocked via THREE live-computed
   passes, NOT one 4-type SQL.** An issue is blocked iff it is in the union of (1) **direct 3-type
@@ -1538,7 +1563,11 @@ between an earlier prose description and the source are resolved **in favour of 
   filter; they never alter blocked-ness or order). Crucially, `blocked` does **NOT** inherit
   `list_issues`' default visibility: its baseline `status NOT IN ('closed','tombstone')` is
   **deferred-INCLUSIVE**, so `include_closed`/`include_deferred` are **no-ops** here (closed/tombstone
-  can never be blocked-visible; deferred is always shown).
+  can never be blocked-visible; deferred is always shown). **Paging (D18 addendum):** `offset` and
+  `limit` both apply **after** the in-Rust blocked-set membership test, over the `ORDER BY` above
+  (previously only `limit` was honoured); applying them in SQL before the membership filter is the
+  named mutant of the F-BLOCKED-OFFSET test (a non-blocked P0 blocker sorts ahead of the second
+  blocked row).
 - **`search_issues` (sqlite.rs:4543–4727) — substring `instr(lower(col))` over title+description+id.**
   The needle is lowercased and matched with
   `instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 OR instr(lower(id), ?) > 0` (no LIKE
@@ -1945,6 +1974,18 @@ DependencyRemoved, LabelAdded, LabelRemoved, Compacted, Deleted, Restored, **Com
 
 ### 3.3 libsql impl notes (normative for `unblock-storage`)
 
+- **`issues.created_at` encoding invariant (NORMATIVE, D18 addendum).** Scope: the `issues.created_at`
+  column as written by `bind_issue` (`crates/unblock-storage/src/libsql/mappers.rs:186`) — the only
+  column the `ready_issues` key reads. It is always `DateTime<Utc>::to_rfc3339()`: a `+00:00` offset
+  and `SecondsFormat::AutoSi` fractions (none, 3, 6 or 9 digits). For years 0000–9999 the byte order of
+  that text equals chrono `Ord` on the `DateTime<Utc>`, sub-second values included, so the SQL
+  `created_at ASC` key of `ready_issues` agrees with `cmp_ready`'s `created_at.cmp` (§3.2.1). Production
+  inserts ALWAYS bind `created_at` and never rely on the schema's `DEFAULT CURRENT_TIMESTAMP` (whose
+  `YYYY-MM-DD HH:MM:SS` text would not sort with the RFC-3339 form). Storage persistence follows this
+  rule and never uses `fmt_ts_secs` (the CF-TS output/export helper, §1.10). Raw-SQL fixtures that seed
+  **ready-order assertions** MUST write `created_at` in this exact form (no other `SecondsFormat`, no
+  `use_z=true`, no SQLite `datetime()`/`CURRENT_TIMESTAMP` text); existing fixtures that do not seed
+  ready-order assertions are out of scope.
 - **WAL** journal mode; **`busy_timeout = 5000 ms` (native, `Connection::busy_timeout`)** — `const BUSY_TIMEOUT_MS: u64 = 5000`. This is the **sanctioned INVERSE of beads**, which set `busy_timeout = 0` + a hand-rolled flock + sleep backoff to dodge *frankensqlite*'s hot-spin. libsql ships **real SQLite**, whose native `busy_timeout` is sleep-based (it blocks, it never spins), so a non-zero native timeout resolves fsqlite-243 **by construction**. The beads `busy_timeout=0` + hand-rolled SQLITE_BUSY backoff-spin machinery stays **REJECTED** (native timeout blocks, never spins); **the cross-process advisory `.write.lock` flock IS restored (D31)** as a SEPARATE cross-process write serializer composing ABOVE this native `busy_timeout` — via `std::fs::File::try_lock` + a bounded async SLEEP-poll (`tokio::time::sleep(25ms)`, never a busy-spin, NFR-3), NOT the beads `busy_timeout=0`+backoff dodge for frankensqlite's hot handler (see the D31 advisory-lock bullet below).
 - **Pragmas (read schema.rs:606–643):** `foreign_keys = ON`, `synchronous = NORMAL`, `temp_store = MEMORY`, `cache_size = -8000`, `journal_size_limit = 33554432` on every connection; the **WAL-only** pragmas — `journal_mode = WAL` and **`wal_autocheckpoint = 0`** (+ a **manual `wal_checkpoint(TRUNCATE)`** on fresh-bootstrap) — are applied **on the file-backed path only**. A shared-cache `:memory:` DB **cannot** use WAL (it always reports `journal_mode = memory`), so asserting WAL there is both a no-op AND an intermittent "API misuse"/`DatabaseLocked` flake under parallel opens; it is skipped for `open_in_memory`. **Periodic in-flight checkpointing (RESOLVED at T0.8):** a **passive** `wal_checkpoint(PASSIVE)` fires on the **held write connection** every **50 committed mutations** (`CHECKPOINT_EVERY_N_MUTATIONS = 50`) — **never `TRUNCATE` in the write path** (an exclusive lock there would manufacture contention). This is distinct from the one-shot fresh-bootstrap `wal_checkpoint(TRUNCATE)` above: that runs **once at migration time on an empty DB** (no concurrent writers to block), whereas the steady-state write path uses PASSIVE only. PASSIVE folds committed frames back into the main DB without blocking, so the WAL file's space is reused in place and stays **bounded** (it does not shrink to zero — PASSIVE reuses, it does not truncate). The T0.8 contention lab asserts the `-wal` sidecar stays bounded under sustained multi-instance contention with this cadence on, and a `#[ignore]`d negative control shows it **breaches** the ceiling with it off.
 - **Transactions:** every **mutating** tx uses **`BEGIN IMMEDIATE`** (`transaction_with_behavior(TransactionBehavior::Immediate)`); reads use the default **Deferred** behaviour.
@@ -2328,7 +2369,7 @@ impl Session {
     // --- reads: fast path, NO write permit (FR-10) ---
     pub async fn get(&self, id: &str) -> Result<Option<Issue>, EngineError>;
     pub async fn list(&self, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>;
-    pub async fn ready(&self, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>; // hybrid sort via policy (NORMATIVE: "hybrid sort via policy" == `unblock-policy::cmp_ready` == `ready_hybrid_bucket(priority.0<=1)` ASC, then created_at ASC, then id ASC — byte-faithful to `sort_ready_hybrid` sqlite.rs:10444 / `ready_hybrid_bucket` sqlite.rs:10515. The §3.2.1 `ready_issues` SQL (`ORDER BY priority ASC, created_at ASC, id ASC`) is the candidate **pre-sort** (created_at ASC, NOT the list DESC order); the engine re-ranks it via `cmp_ready` — which buckets P0/P1 together so the final order differs from the SQL pre-sort — per CF-11. §3.2.1 SQL is unchanged.)
+    pub async fn ready(&self, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>; // hybrid sort via policy (NORMATIVE: "hybrid sort via policy" == `unblock-policy::cmp_ready` == `ready_hybrid_bucket(priority.0<=1)` ASC, then created_at ASC, then id ASC — byte-faithful to `sort_ready_hybrid` sqlite.rs:10444 / `ready_hybrid_bucket` sqlite.rs:10515. The §3.2.1 `ready_issues` SQL (`ORDER BY CASE WHEN priority <= 1 THEN 0 ELSE 1 END ASC, created_at ASC, id ASC`) MIRRORS this exact key (created_at ASC, NOT the list DESC order) without importing policy (CF-11 intact — storage takes no policy dependency; D18 addendum), so storage can apply `offset`/`limit` after the blocked-set filter and pages follow the final ranked order; the engine still re-sorts via `cmp_ready`. The engine-side parity test (`crates/unblock-engine/tests`: RAW `Storage::ready_issues` vs the same fixture sorted by `cmp_ready`) and the NFR-16 testkit literal-id-order contract pin the SQL key; it relies on the §3.3 `issues.created_at` encoding invariant.)
     pub async fn blocked(&self, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>;
     pub async fn search(&self, query: &str, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>;
     pub async fn count(&self, filters: &ListFilters, by: Option<CountGroupBy>) -> Result<Vec<CountBucket>, EngineError>;
