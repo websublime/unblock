@@ -506,9 +506,13 @@ work the tracker labels `v1-0-2`:
   `action: create`; `—` for the flat `claim`) from a typed `ToolAction.discriminant`, and the intro sentence
   naming which tools use which key is derived from the digest by a pure `discriminant_intro` helper. No wire rename, no `CONTRACT_HASH` or
   `contract_version` move.
-- **The `triage` prompt suggests a call the schema rejects** (`ub-kwh`, open). It tells agents to call `query`
-  `kind: stale` without the required `older_than`, and says `assignee:null` finds unassigned work, which applies
-  no filter.
+- **The `triage` prompt suggested a call the schema rejects** (`ub-kwh`). It told agents to call `query`
+  `kind: stale` without the required `older_than`, and said `assignee:null` finds unassigned work, which applies
+  no filter. The prompt now passes `older_than` (now minus 30 days), sizes unassigned work with `count`
+  `group_by: assignee` and keeps the `list` issues whose `assignee` is absent or blank, says no filter selects
+  every unassigned issue, and adds the deferred step its description promised. A unit test runs every call the
+  3 prompts suggest through the live argument boundary. Prompt text is golden-pinned, not hashed: no
+  `CONTRACT_HASH` re-pin, `unblock.mcp.v1.10` stands.
 - **`query kind: ready` ignored its filters** (`ub-m07`, PRD §4 D18 addendum). `ready` ignored `labels_any`,
   `labels_all`, `text_contains`, `status` and `offset`, and `blocked` ignored `offset`. `ready` now composes the
   same narrowing filters as `blocked` (a `status` filter intersects its `open` baseline; `include_deferred` and
