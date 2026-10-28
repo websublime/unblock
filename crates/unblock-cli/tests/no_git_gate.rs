@@ -18,7 +18,11 @@
 //! fast, human-readable tripwire that catches a network symbol leaking into an un-gated line at review
 //! time (before the feature-matrix build even runs), not a replacement for that build.
 
+mod source_scan;
+
 use std::path::{Path, PathBuf};
+
+use source_scan::Lexer;
 
 /// The forbidden substrings that must NOT appear ANYWHERE in the crate source (git surface, NFR-6).
 const FORBIDDEN_GIT: &[&str] = &[
@@ -69,6 +73,18 @@ fn source_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// The desync guard: a literal or block comment still open at end of file would have blanked the
+/// rest of the file, so it fails the gate instead of passing it silently.
+fn assert_lexes(file: &Path, text: &str) {
+    let mut lexer = Lexer::new();
+    for line in text.lines() {
+        lexer.line(line);
+    }
+    if let Err(err) = lexer.finish() {
+        panic!("{}: lexer desync: {err}", file.display());
+    }
+}
+
 #[test]
 fn no_git_surface_in_the_cli_source() {
     let src = src_dir();
@@ -81,6 +97,7 @@ fn no_git_surface_in_the_cli_source() {
 
     for file in &files {
         let text = std::fs::read_to_string(file).expect("read source file");
+        assert_lexes(file, &text);
         for needle in FORBIDDEN_GIT {
             assert!(
                 !text.contains(needle),
@@ -103,6 +120,7 @@ fn network_symbols_are_confined_behind_self_update() {
     let src = src_dir();
     for file in source_files(&src) {
         let text = std::fs::read_to_string(&file).expect("read source file");
+        assert_lexes(&file, &text);
         let is_update = file.file_name().is_some_and(|n| n == "update.rs");
         for symbol in NETWORK_SYMBOLS {
             if !text.contains(symbol) {
@@ -151,9 +169,11 @@ fn line_is_confined(text: &str, line: &str, idx: usize, symbol: &str, is_update:
 ///    having opened its own block.
 ///  - **H2** the target is matched by LINE INDEX, not by text, so two byte-identical lines (one gated,
 ///    one not) are told apart.
-///  - **H3** braces/terminators inside string/char literals and `//`/`/* */` comments are ignored (a
-///    lightweight lexer blanks them before the brace scan), so a stray `{` in a string cannot inflate
-///    the depth.
+///  - **H3** braces/terminators inside string/char literals and `//`/`/* */` comments are ignored (the
+///    shared `source_scan::Lexer` blanks them before the brace scan, carrying block-comment and
+///    string state across lines, so multi-line normal and raw strings are lexed exactly), so a stray
+///    `{` in a string cannot inflate the depth. The `group`/`angle` disarm counters are floored at 0
+///    (D1/F4), so a stray unbalanced `)`/`]`/`>` cannot drive a disarm guard permanently false.
 ///
 /// Coarse by design (a defense-in-depth tripwire, not a parser). Unrecognized gate forms over-flag (a
 /// safe, spurious finding). The one known UNDER-flag is a **tuple-struct paren-field sibling**
@@ -172,14 +192,14 @@ fn is_cfg_gated_region(text: &str, target_idx: usize) -> bool {
     let mut armed = false; // a gate is pending, awaiting its item
     let mut in_where = false; // inside the armed item's `where`-clause (its commas are not terminators)
     let mut armed_depth: i32 = 0; // brace depth when the pending gate was armed
-    let mut block_comment: i32 = 0; // /* */ nesting carried across lines
+    let mut lexer = Lexer::new(); // `/* */` and string state carried across lines (H3)
 
     for (i, line) in text.lines().enumerate() {
         if i == target_idx {
             return !gated_depths.is_empty() || armed;
         }
-        let in_comment_at_start = block_comment > 0;
-        let code = code_only(line, &mut block_comment);
+        let in_comment_at_start = lexer.in_block_comment();
+        let code = lexer.line(line).code;
 
         // Arm on the EXACT gate attribute (never when the line began inside a block comment).
         if !in_comment_at_start && line.trim_start() == SELF_UPDATE_GATE {
@@ -242,133 +262,6 @@ fn is_cfg_gated_region(text: &str, target_idx: usize) -> bool {
 fn has_where_keyword(code: &str) -> bool {
     code.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .any(|w| w == "where")
-}
-
-/// Return `line` with `//`/`/* */` comment, `"…"`/raw-string, and `'…'` char-literal content removed,
-/// so a following brace/terminator scan sees only real code punctuation (H3). `block_comment` carries
-/// `/* */` nesting across lines. Lifetimes (`'a`) are emitted as harmless ticks (no braces/terminators).
-///
-/// Single-line coverage. The accepted lexer residuals are (a) a multi-line raw string and (b) a
-/// `\`-continuation multi-line normal string — BOTH mis-count only in the over-flag (false-RED)
-/// direction on the continuation line. The `group`/`angle` disarm counters are floored at 0 (D1/F4), so
-/// a stray unbalanced `)`/`]`/`>` cannot drive a disarm guard permanently false. The
-/// `--no-default-features` feature-matrix build remains the authoritative gate.
-fn code_only(line: &str, block_comment: &mut i32) -> String {
-    let b = line.as_bytes();
-    let mut out = String::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if *block_comment > 0 {
-            if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
-                *block_comment += 1;
-                i += 2;
-            } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
-                *block_comment -= 1;
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-        match b[i] {
-            b'/' if i + 1 < b.len() && b[i + 1] == b'/' => break, // line comment: drop the rest
-            b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
-                *block_comment += 1;
-                i += 2;
-            }
-            b'r' if starts_raw_string(b, i) => i = skip_raw_string(b, i),
-            b'b' if i + 1 < b.len() && b[i + 1] == b'r' && starts_raw_string(b, i + 1) => {
-                i = skip_raw_string(b, i + 1);
-            }
-            b'"' => i = skip_string(b, i),
-            b'b' if i + 1 < b.len() && b[i + 1] == b'"' => i = skip_string(b, i + 1),
-            b'\'' => {
-                if let Some(next) = skip_char_literal(b, i) {
-                    i = next;
-                } else {
-                    out.push('\''); // a lifetime tick — harmless
-                    i += 1;
-                }
-            }
-            other if other.is_ascii() => {
-                out.push(char::from(other));
-                i += 1;
-            }
-            _ => i += 1, // non-ASCII (identifier bytes) — never structural punctuation
-        }
-    }
-    out
-}
-
-/// Whether a raw-string prefix (`r`, `r#`, `r##`, …) begins at `b[i] == b'r'` (i.e. `r` then `#`* then `"`).
-fn starts_raw_string(b: &[u8], i: usize) -> bool {
-    let mut j = i + 1;
-    while j < b.len() && b[j] == b'#' {
-        j += 1;
-    }
-    j < b.len() && b[j] == b'"'
-}
-
-/// Skip a raw string starting at `b[i] == b'r'`; return the index just past the closing `"#*` (or
-/// `b.len()` if unterminated on this line).
-fn skip_raw_string(b: &[u8], i: usize) -> usize {
-    let mut hashes: usize = 0;
-    let mut j = i + 1;
-    while j < b.len() && b[j] == b'#' {
-        hashes += 1;
-        j += 1;
-    }
-    j += 1; // past the opening '"'
-    while j < b.len() {
-        if b[j] == b'"' {
-            let mut end = j + 1;
-            let mut matched: usize = 0;
-            while matched < hashes && end < b.len() && b[end] == b'#' {
-                matched += 1;
-                end += 1;
-            }
-            if matched == hashes {
-                return end;
-            }
-        }
-        j += 1;
-    }
-    b.len()
-}
-
-/// Skip a normal/byte string starting at `b[i] == b'"'`; return the index just past the closing `"`.
-/// Honors `\"` escapes; returns `b.len()` if unterminated on this line.
-fn skip_string(b: &[u8], i: usize) -> usize {
-    let mut j = i + 1;
-    while j < b.len() {
-        match b[j] {
-            b'\\' => j += 2,
-            b'"' => return j + 1,
-            _ => j += 1,
-        }
-    }
-    b.len()
-}
-
-/// Skip a char literal at `b[i] == b'\''`; `Some(next)` past the closing `'` if it IS a char literal
-/// (`'x'`, `'\n'`, `'\''`, `'{'`, `'\u{7f}'`, …), or `None` if it is a lifetime tick (`'a`, `'static`).
-fn skip_char_literal(b: &[u8], i: usize) -> Option<usize> {
-    if i + 1 >= b.len() {
-        return None;
-    }
-    if b[i + 1] == b'\\' {
-        // escaped: the byte at i+2 is escaped content (possibly a quote); the closing quote is the next
-        // '\'' at or after i+3 (skips any `{`/`}` inside a `\u{..}` escape).
-        let mut j = i + 3;
-        while j < b.len() && b[j] != b'\'' {
-            j += 1;
-        }
-        return (j < b.len()).then_some(j + 1);
-    }
-    if i + 2 < b.len() && b[i + 2] == b'\'' {
-        return Some(i + 3); // plain 'x'
-    }
-    None // a lifetime
 }
 
 /// Self-tests for the hardened confinement policy — proving `is_cfg_gated_region` (a) survives blank
