@@ -2,3 +2,7 @@
 [alias]
 # Acyclic crate-graph / layering enforcement (NFR-15). T0.9 wires this into the CI `layering` job.
 xtask = "run --quiet --package xtask --"
+
+[env]
+# ub-vcp: stop insta forking `cargo metadata` inside test binaries
+INSTA_WORKSPACE_ROOT = { value = "", relative = true }

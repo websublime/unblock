@@ -79,14 +79,12 @@ mod common;
 /// Spawn `unblock mcp` with stdin already at EOF and collect both streams.
 ///
 /// No `McpClient` and no deadline loop: every cell here returns BEFORE `run_mcp_server`, and
-/// `Stdio::null()` guarantees that even under a mutation the run loop reads instant EOF and exits
-/// rather than hanging. `Command::output()` reads both pipes to EOF by construction, so these cells
-/// are unaffected by the drain-join question the `mcp_lifecycle.rs` inversions have to answer.
+/// `common::output_locked` sets stdin to `Stdio::null()`, which guarantees that even under a
+/// mutation the run loop reads instant EOF and exits rather than hanging. `output_locked` reads
+/// both pipes to EOF by construction (`wait_with_output`), so these cells are unaffected by the
+/// drain-join question the `mcp_lifecycle.rs` inversions have to answer.
 fn run_mcp(cmd: &mut Command) -> Output {
-    cmd.arg("mcp")
-        .stdin(Stdio::null())
-        .output()
-        .expect("run `unblock mcp`")
+    common::output_locked(cmd.arg("mcp"), "run `unblock mcp`")
 }
 
 /// The whole D48 oracle for one pre-run-loop failure: exit code, frame-free stdout, payload on
@@ -407,16 +405,17 @@ fn the_frame_only_assertion_rejects_a_blob_and_a_bare_line() {
 fn the_read_response_guard_is_actually_installed() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "printf '%s\\n' '{UB_OG3_BLOB}' '{REAL_FRAME}'; exec cat >/dev/null"
-        ))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the fabricated child");
+    let child = common::spawn_locked(
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "printf '%s\\n' '{UB_OG3_BLOB}' '{REAL_FRAME}'; exec cat >/dev/null"
+            ))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+        "spawn the fabricated child",
+    );
 
     let mut client = common::McpClient::from_child(child);
     let caught = catch_unwind(AssertUnwindSafe(|| {
@@ -450,16 +449,17 @@ fn the_read_deadline_binds_when_no_correlatable_reply_arrives() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::{Duration, Instant};
 
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "printf '%s\\n' '{REAL_FRAME}' '{ID_LESS_FRAME}'; exec cat 9>&1 >/dev/null"
-        ))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the fabricated child");
+    let child = common::spawn_locked(
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "printf '%s\\n' '{REAL_FRAME}' '{ID_LESS_FRAME}'; exec cat 9>&1 >/dev/null"
+            ))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+        "spawn the fabricated child",
+    );
 
     let mut client = common::McpClient::from_child(child);
     let first = client.request("ping", &serde_json::json!({}));
@@ -641,18 +641,19 @@ fn wait_for_joins_the_retained_drains_before_the_buffers_are_read() {
 
     // The `{ … } &` subshell inherits BOTH pipe write ends and outlives its parent, so EOF — and
     // therefore the end of any real join — comes a second AFTER the child itself is reaped.
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(
-            "printf 'out-first\\n'; printf 'err-first\\n' >&2; \
-             { sleep 1; printf 'out-last\\n'; printf 'err-last\\n' >&2; } & \
-             exit 1",
-        )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the fabricated child");
+    let child = common::spawn_locked(
+        Command::new("sh")
+            .arg("-c")
+            .arg(
+                "printf 'out-first\\n'; printf 'err-first\\n' >&2; \
+                 { sleep 1; printf 'out-last\\n'; printf 'err-last\\n' >&2; } & \
+                 exit 1",
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+        "spawn the fabricated child",
+    );
 
     let mut client = common::McpClient::from_child(child);
     client.capture_stdout();

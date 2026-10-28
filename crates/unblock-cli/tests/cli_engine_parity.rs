@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::Workspace;
+use common::{Workspace, output_locked};
 use serde_json::Value;
 use unblock_config::{CliOverrides, open_with_storage_with_cli};
 use unblock_engine::{Session, SessionConfig};
@@ -118,11 +118,10 @@ async fn migrate_cli_matches_session_directly() {
 
 /// Run `unblock migrate --output json` against `ws` and parse the report (exit 0 asserted).
 fn run_migrate_json(ws: &Workspace) -> Value {
-    let out = ws
-        .cmd()
-        .args(["migrate", "--output", "json"])
-        .output()
-        .expect("run migrate");
+    let out = output_locked(
+        ws.cmd().args(["migrate", "--output", "json"]),
+        "run migrate",
+    );
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -154,11 +153,7 @@ async fn doctor_cli_renders_session_doctor_verbatim() {
     let ws = Workspace::init();
 
     // CLI side: `unblock doctor --output json` (child process; it closes its session on exit).
-    let out = ws
-        .cmd()
-        .args(["doctor", "--output", "json"])
-        .output()
-        .expect("run doctor");
+    let out = output_locked(ws.cmd().args(["doctor", "--output", "json"]), "run doctor");
     assert_eq!(out.status.code(), Some(0));
     let cli_report: Value = serde_json::from_slice(&out.stdout).expect("valid JSON doctor report");
 

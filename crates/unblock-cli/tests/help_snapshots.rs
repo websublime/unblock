@@ -7,11 +7,11 @@
 
 mod common;
 
-use common::unblock;
+use common::{output_locked, unblock};
 
 /// Capture a command's `--help` stdout (asserting the help path exits 0 via clap).
 fn help(args: &[&str]) -> String {
-    let out = unblock().args(args).output().expect("run --help");
+    let out = output_locked(unblock().args(args), "run --help");
     assert_eq!(out.status.code(), Some(0), "help exits 0");
     assert!(!out.stdout.is_empty(), "help writes to stdout");
     String::from_utf8(out.stdout).expect("utf8 help")

@@ -16,9 +16,9 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Output;
+use std::process::{Output, Stdio};
 
-use common::{Workspace, unblock};
+use common::{Workspace, output_locked, pipe_locked, spawn_locked, unblock};
 use serde_json::Value;
 
 #[test]
@@ -71,11 +71,12 @@ fn init_honors_the_output_flag() {
         ("csv", "label,detail\n", "id_prefix"),
     ] {
         let root = tempfile::tempdir().expect("tempdir");
-        let out = unblock()
-            .current_dir(root.path())
-            .args(["init", "--output", format])
-            .output()
-            .expect("run init");
+        let out = output_locked(
+            unblock()
+                .current_dir(root.path())
+                .args(["init", "--output", format]),
+            "run init",
+        );
         assert_eq!(
             out.status.code(),
             Some(0),
@@ -110,11 +111,12 @@ fn init_honors_the_output_flag() {
 #[test]
 fn init_csv_reports_the_scaffold() {
     let root = tempfile::tempdir().expect("tempdir");
-    let out = unblock()
-        .current_dir(root.path())
-        .args(["init", "--output", "csv"])
-        .output()
-        .expect("run init");
+    let out = output_locked(
+        unblock()
+            .current_dir(root.path())
+            .args(["init", "--output", "csv"]),
+        "run init",
+    );
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -134,11 +136,12 @@ fn init_csv_reports_the_scaffold() {
     );
 
     let agents_root = tempfile::tempdir().expect("tempdir");
-    let out = unblock()
-        .current_dir(agents_root.path())
-        .args(["init", "--agents", "--output", "csv"])
-        .output()
-        .expect("run init --agents");
+    let out = output_locked(
+        unblock()
+            .current_dir(agents_root.path())
+            .args(["init", "--agents", "--output", "csv"]),
+        "run init --agents",
+    );
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -168,11 +171,16 @@ fn init_rejects_an_invalid_actor_after_writing_config_and_force_recovers() {
     let unblock_dir = root.path().join(".unblock");
     let long_actor = "a".repeat(201);
 
-    let rejected = unblock()
-        .current_dir(root.path())
-        .args(["init", "--actor", &long_actor, "--output", "json"])
-        .output()
-        .expect("run init --actor");
+    let rejected = output_locked(
+        unblock().current_dir(root.path()).args([
+            "init",
+            "--actor",
+            &long_actor,
+            "--output",
+            "json",
+        ]),
+        "run init --actor",
+    );
     let stderr = String::from_utf8_lossy(&rejected.stderr);
     assert_eq!(
         rejected.status.code(),
@@ -195,11 +203,10 @@ fn init_rejects_an_invalid_actor_after_writing_config_and_force_recovers() {
         "a failed init prints no hint: {stderr}"
     );
 
-    let rerun = unblock()
-        .current_dir(root.path())
-        .arg("init")
-        .output()
-        .expect("run init again");
+    let rerun = output_locked(
+        unblock().current_dir(root.path()).arg("init"),
+        "run init again",
+    );
     assert_eq!(
         rerun.status.code(),
         Some(2),
@@ -207,11 +214,10 @@ fn init_rejects_an_invalid_actor_after_writing_config_and_force_recovers() {
         String::from_utf8_lossy(&rerun.stderr)
     );
 
-    let forced = unblock()
-        .current_dir(root.path())
-        .args(["init", "--force"])
-        .output()
-        .expect("run init --force");
+    let forced = output_locked(
+        unblock().current_dir(root.path()).args(["init", "--force"]),
+        "run init --force",
+    );
     assert_eq!(
         forced.status.code(),
         Some(0),
@@ -229,12 +235,13 @@ fn init_rejects_an_invalid_actor_after_writing_config_and_force_recovers() {
 #[test]
 fn init_csv_via_env_reports_the_scaffold() {
     let root = tempfile::tempdir().expect("tempdir");
-    let out = unblock()
-        .current_dir(root.path())
-        .env("UNBLOCK_OUTPUT_FORMAT", "csv")
-        .arg("init")
-        .output()
-        .expect("run init");
+    let out = output_locked(
+        unblock()
+            .current_dir(root.path())
+            .env("UNBLOCK_OUTPUT_FORMAT", "csv")
+            .arg("init"),
+        "run init",
+    );
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -259,15 +266,14 @@ fn init_is_clobber_guarded_and_force_overwrites() {
     let ws = Workspace::init();
 
     // A second bare init refuses (exit 2, AlreadyInitialized).
-    let refused = ws.cmd().arg("init").output().expect("run init again");
+    let refused = output_locked(ws.cmd().arg("init"), "run init again");
     assert_eq!(refused.status.code(), Some(2), "clobber guard fires");
 
     // `--force` overwrites the scaffold (exit 0).
-    let forced = ws
-        .cmd()
-        .args(["init", "--force", "--output", "json"])
-        .output()
-        .expect("run init --force");
+    let forced = output_locked(
+        ws.cmd().args(["init", "--force", "--output", "json"]),
+        "run init --force",
+    );
     assert_eq!(
         forced.status.code(),
         Some(0),
@@ -286,11 +292,11 @@ fn init_prefix_is_normalized_on_disk() {
         "the seeded prefix must be normalized on disk, got:\n{config_text}"
     );
     // And the init JSON report echoes the normalized prefix.
-    let out = ws
-        .cmd()
-        .args(["init", "--force", "--prefix", "Weird!!", "--output", "json"])
-        .output()
-        .expect("re-init json");
+    let out = output_locked(
+        ws.cmd()
+            .args(["init", "--force", "--prefix", "Weird!!", "--output", "json"]),
+        "re-init json",
+    );
     assert_eq!(out.status.code(), Some(0));
     let report: Value = serde_json::from_slice(&out.stdout).expect("valid JSON init report");
     let prefix = report["findings"]
@@ -307,11 +313,10 @@ fn scaffolded_config_round_trips_through_a_real_open() {
     // The scaffolded config.toml must open cleanly through the SAME facade the runtime uses — proven
     // by a `migrate` (which opens the workspace) succeeding on the freshly-init'd dir (FR-9 no-drift).
     let ws = Workspace::init_with_prefix(Some("proj"));
-    let out = ws
-        .cmd()
-        .args(["migrate", "--output", "json"])
-        .output()
-        .expect("run migrate on the scaffold");
+    let out = output_locked(
+        ws.cmd().args(["migrate", "--output", "json"]),
+        "run migrate on the scaffold",
+    );
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -326,7 +331,7 @@ fn agents_writes_a_managed_block_and_is_idempotent() {
     let agents_path = ws.root().join("AGENTS.md");
 
     // First run creates AGENTS.md with the managed block.
-    let first = ws.cmd().arg("agents").output().expect("run agents");
+    let first = output_locked(ws.cmd().arg("agents"), "run agents");
     assert_eq!(
         first.status.code(),
         Some(0),
@@ -353,7 +358,7 @@ fn agents_writes_a_managed_block_and_is_idempotent() {
     );
 
     // Second run is idempotent — the file bytes are identical (exactly one managed block).
-    let second = ws.cmd().arg("agents").output().expect("run agents again");
+    let second = output_locked(ws.cmd().arg("agents"), "run agents again");
     assert_eq!(second.status.code(), Some(0));
     let after_second = std::fs::read_to_string(&agents_path).expect("re-read AGENTS.md");
     assert_eq!(
@@ -374,7 +379,7 @@ fn agents_preserves_surrounding_content() {
     // Pre-existing content the managed merge must preserve.
     std::fs::write(&agents_path, "# My Project\n\nHand-written notes.\n").expect("seed AGENTS.md");
 
-    let out = ws.cmd().arg("agents").output().expect("run agents");
+    let out = output_locked(ws.cmd().arg("agents"), "run agents");
     assert_eq!(out.status.code(), Some(0));
     let merged = std::fs::read_to_string(&agents_path).expect("read AGENTS.md");
     assert!(
@@ -396,7 +401,7 @@ fn agents_managed_block_is_snapshot_pinned() {
     // Snapshot the generated managed block (marker-delimited, deterministic — the contract version is
     // a fixed const) so a drift in the wiring text is a deliberate re-bless.
     let ws = Workspace::init();
-    ws.cmd().arg("agents").output().expect("run agents");
+    let _ = output_locked(ws.cmd().arg("agents"), "run agents");
     let content = std::fs::read_to_string(ws.root().join("AGENTS.md")).expect("read AGENTS.md");
     insta::assert_snapshot!("agents_managed_block", content);
 }
@@ -406,15 +411,19 @@ fn agents_managed_block_is_snapshot_pinned() {
 #[test]
 fn agents_with_a_broken_stderr_still_exits_0() {
     let ws = Workspace::init();
-    let (reader, writer) = std::io::pipe().expect("create a pipe");
+    let (reader, writer) = pipe_locked();
     drop(reader);
 
-    let out = ws
-        .cmd()
-        .arg("agents")
-        .stderr(writer)
-        .output()
-        .expect("run agents");
+    let out = spawn_locked(
+        ws.cmd()
+            .arg("agents")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(writer),
+        "run agents",
+    )
+    .wait_with_output()
+    .expect("run agents");
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -432,11 +441,7 @@ fn agents_io_failure_keeps_its_message() {
     let ws = Workspace::init();
     std::fs::create_dir(ws.root().join("AGENTS.md")).expect("mkdir AGENTS.md");
 
-    let out = ws
-        .cmd()
-        .args(["agents", "--output", "json"])
-        .output()
-        .expect("run agents");
+    let out = output_locked(ws.cmd().args(["agents", "--output", "json"]), "run agents");
     assert_eq!(
         out.status.code(),
         Some(8),
@@ -458,11 +463,12 @@ fn agents_requires_a_workspace() {
     // `agents` opens resolve-only — no workspace → NotInitialized (exit 2), so AGENTS.md sits next to
     // a real `.unblock/`.
     let empty = tempfile::tempdir().expect("tempdir");
-    let out = unblock()
-        .current_dir(empty.path())
-        .args(["agents", "--output", "json"])
-        .output()
-        .expect("run agents");
+    let out = output_locked(
+        unblock()
+            .current_dir(empty.path())
+            .args(["agents", "--output", "json"]),
+        "run agents",
+    );
     assert_eq!(
         out.status.code(),
         Some(2),
@@ -476,14 +482,15 @@ fn agents_requires_a_workspace() {
 
 /// Runs `init` from `cwd` with `flags` and `--dir dir`, under `--output json`.
 fn init_dir(cwd: &Path, dir: &Path, flags: &[&str]) -> Output {
-    common::unblock_in(cwd)
-        .arg("init")
-        .args(flags)
-        .arg("--dir")
-        .arg(dir)
-        .args(["--output", "json"])
-        .output()
-        .expect("run init --dir")
+    output_locked(
+        common::unblock_in(cwd)
+            .arg("init")
+            .args(flags)
+            .arg("--dir")
+            .arg(dir)
+            .args(["--output", "json"]),
+        "run init --dir",
+    )
 }
 
 /// Asserts that a json-mode `init` exited 0 and returns its one report document.
@@ -647,10 +654,10 @@ fn bare_init_in_a_root_with_an_underscore_workspace_is_refused() {
         &[],
     ));
 
-    let out = common::unblock_in(root.path())
-        .args(["init", "--output", "json"])
-        .output()
-        .expect("run init");
+    let out = output_locked(
+        common::unblock_in(root.path()).args(["init", "--output", "json"]),
+        "run init",
+    );
     let message = refusal_message(&out);
     assert!(
         message.ends_with("_unblock"),
@@ -684,10 +691,10 @@ fn bare_init_force_in_a_root_with_an_underscore_workspace_rescaffolds_it_in_plac
         &["--prefix", "proj"],
     ));
 
-    let out = common::unblock_in(root.path())
-        .args(["init", "--force", "--output", "json"])
-        .output()
-        .expect("run init --force");
+    let out = output_locked(
+        common::unblock_in(root.path()).args(["init", "--force", "--output", "json"]),
+        "run init --force",
+    );
     let report = scaffold_report(&out);
     let config = std::fs::read_to_string(underscore.join("config.toml")).expect("read config.toml");
     assert!(
@@ -709,10 +716,10 @@ fn bare_init_in_a_root_with_an_empty_underscore_scaffolds_inside_it() {
     let underscore = root.path().join("_unblock");
     std::fs::create_dir(&underscore).expect("mkdir _unblock");
 
-    let out = common::unblock_in(root.path())
-        .args(["init", "--output", "json"])
-        .output()
-        .expect("run init");
+    let out = output_locked(
+        common::unblock_in(root.path()).args(["init", "--output", "json"]),
+        "run init",
+    );
     let report = scaffold_report(&out);
     assert!(
         underscore.join("config.toml").exists(),
@@ -880,12 +887,13 @@ fn bare_init_on_an_empty_dot_unblock_beside_an_initialized_underscore_is_refused
     std::fs::create_dir(&dot).expect("mkdir .unblock");
 
     for flags in WITH_AND_WITHOUT_FORCE {
-        let out = common::unblock_in(root.path())
-            .arg("init")
-            .args(flags)
-            .args(["--output", "json"])
-            .output()
-            .expect("run init");
+        let out = output_locked(
+            common::unblock_in(root.path())
+                .arg("init")
+                .args(flags)
+                .args(["--output", "json"]),
+            "run init",
+        );
         let message = refusal_message(&out);
         assert!(
             message.contains("already exists, and discovery binds it before"),
@@ -1151,11 +1159,7 @@ const REFUSAL_RETRY_PREFIX: &str = "; to write its AGENTS.md block, run ";
 
 /// Runs `init` with `args` from `cwd`.
 fn init_in(cwd: &Path, args: &[&str]) -> Output {
-    common::unblock_in(cwd)
-        .arg("init")
-        .args(args)
-        .output()
-        .expect("run init")
+    output_locked(common::unblock_in(cwd).arg("init").args(args), "run init")
 }
 
 /// Asserts that `out` exited with `code`, quoting its stderr on failure.
@@ -1207,16 +1211,17 @@ fn run_retry_in_sh(retry: &str, cwd: &Path, project_dir: &Path) -> Output {
         .unwrap_or_else(|| panic!("the retry text runs unblock: {retry}"));
     let binary = assert_cmd::cargo::cargo_bin("unblock");
     let script = format!("{} {args}", posix_quote(&binary.display().to_string()));
-    std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&script)
-        .current_dir(cwd)
-        .env("CLAUDE_PROJECT_DIR", project_dir)
-        .env_remove("UNBLOCK_DIR")
-        .env_remove("UNBLOCK_ACTOR")
-        .env_remove("UNBLOCK_OUTPUT_FORMAT")
-        .output()
-        .expect("run sh -c")
+    output_locked(
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(cwd)
+            .env("CLAUDE_PROJECT_DIR", project_dir)
+            .env_remove("UNBLOCK_DIR")
+            .env_remove("UNBLOCK_ACTOR")
+            .env_remove("UNBLOCK_OUTPUT_FORMAT"),
+        "run sh -c",
+    )
 }
 
 /// Single-quotes `text` for a POSIX shell.
@@ -1234,10 +1239,10 @@ fn init_agents_writes_the_same_bytes_as_unblock_agents() {
     let agents_md = chained.path().join("AGENTS.md");
     let from_init = std::fs::read(&agents_md).expect("init --agents writes AGENTS.md");
 
-    let rerun = common::unblock_in(chained.path())
-        .arg("agents")
-        .output()
-        .expect("run agents");
+    let rerun = output_locked(
+        common::unblock_in(chained.path()).arg("agents"),
+        "run agents",
+    );
     assert_exit(&rerun, 0);
     assert_eq!(
         std::fs::read(&agents_md).expect("re-read AGENTS.md"),
@@ -1247,7 +1252,7 @@ fn init_agents_writes_the_same_bytes_as_unblock_agents() {
 
     let separate = Workspace::init();
     assert_exit(
-        &separate.cmd().arg("agents").output().expect("run agents"),
+        &output_locked(separate.cmd().arg("agents"), "run agents"),
         0,
     );
     let from_agents =
@@ -1290,11 +1295,10 @@ fn init_force_agents_rescaffolds_and_refreshes_one_block() {
     )
     .expect("seed AGENTS.md");
 
-    let out = ws
-        .cmd()
-        .args(["init", "--force", "--agents"])
-        .output()
-        .expect("run init --force --agents");
+    let out = output_locked(
+        ws.cmd().args(["init", "--force", "--agents"]),
+        "run init --force --agents",
+    );
     assert_exit(&out, 0);
     let text = std::fs::read_to_string(&agents_md).expect("read AGENTS.md");
     assert_eq!(
@@ -1325,11 +1329,12 @@ fn init_agents_ignores_an_ambient_claude_project_dir() {
     let other = Workspace::init();
     let fresh = tempfile::tempdir().expect("tempdir");
 
-    let out = common::unblock_in(fresh.path())
-        .env("CLAUDE_PROJECT_DIR", other.root())
-        .args(["init", "--agents"])
-        .output()
-        .expect("run init --agents");
+    let out = output_locked(
+        common::unblock_in(fresh.path())
+            .env("CLAUDE_PROJECT_DIR", other.root())
+            .args(["init", "--agents"]),
+        "run init --agents",
+    );
     assert_exit(&out, 0);
     assert!(
         fresh.path().join("AGENTS.md").is_file(),
@@ -1348,11 +1353,12 @@ fn init_agents_with_explicit_dir_writes_next_to_that_dot_unblock() {
     let cwd = tempfile::tempdir().expect("tempdir");
     let target_root = tempfile::tempdir().expect("tempdir");
 
-    let out = common::unblock_in(cwd.path())
-        .args(["init", "--agents", "--dir"])
-        .arg(target_root.path().join(".unblock"))
-        .output()
-        .expect("run init --agents --dir");
+    let out = output_locked(
+        common::unblock_in(cwd.path())
+            .args(["init", "--agents", "--dir"])
+            .arg(target_root.path().join(".unblock")),
+        "run init --agents --dir",
+    );
     assert_exit(&out, 0);
     assert!(
         target_root.path().join("AGENTS.md").is_file(),
@@ -1583,11 +1589,12 @@ fn refused_init_agents_names_the_retry_text_and_writes_nothing() {
         "a refusal prints no hint"
     );
 
-    let plain = common::unblock_in(links.path())
-        .args(["init", "--agents", "--output", "plain", "--dir"])
-        .arg(&dot)
-        .output()
-        .expect("run init --agents -o plain");
+    let plain = output_locked(
+        common::unblock_in(links.path())
+            .args(["init", "--agents", "--output", "plain", "--dir"])
+            .arg(&dot),
+        "run init --agents -o plain",
+    );
     assert_exit(&plain, 2);
     assert!(plain.stdout.is_empty(), "the plain error goes to stderr");
     let stderr = String::from_utf8_lossy(&plain.stderr);
@@ -1709,10 +1716,10 @@ fn refused_init_agents_at_a_root_whose_empty_dot_unblock_binds_first_carries_no_
     let dot = root.path().join(".unblock");
     std::fs::create_dir(&dot).expect("mkdir .unblock");
 
-    let out = common::unblock_in(root.path())
-        .args(["init", "--agents", "--output", "json"])
-        .output()
-        .expect("run init --agents");
+    let out = output_locked(
+        common::unblock_in(root.path()).args(["init", "--agents", "--output", "json"]),
+        "run init --agents",
+    );
     let message = refusal_message(&out);
     assert!(
         message.contains("already exists, and discovery binds it before"),
@@ -1822,11 +1829,12 @@ fn init_agents_write_failure_keeps_the_scaffold_and_exits_8() {
 
         std::fs::remove_dir(sub.join("AGENTS.md")).expect("remove the AGENTS.md directory");
         let elsewhere = tempfile::tempdir().expect("tempdir");
-        let finished = common::unblock_in(elsewhere.path())
-            .args(["agents", "--dir"])
-            .arg(quoted_dir(retry))
-            .output()
-            .expect("run the retry");
+        let finished = output_locked(
+            common::unblock_in(elsewhere.path())
+                .args(["agents", "--dir"])
+                .arg(quoted_dir(retry)),
+            "run the retry",
+        );
         assert_exit(&finished, 0);
         let text = std::fs::read_to_string(sub.join("AGENTS.md")).expect("AGENTS.md is a file now");
         assert_eq!(
@@ -1844,11 +1852,11 @@ fn init_agents_scaffold_failure_writes_no_agents_md() {
     std::fs::remove_file(ws.config_path()).expect("remove config.toml");
     std::fs::create_dir(ws.config_path()).expect("mkdir config.toml");
 
-    let out = ws
-        .cmd()
-        .args(["init", "--force", "--agents", "--output", "json"])
-        .output()
-        .expect("run init --force --agents");
+    let out = output_locked(
+        ws.cmd()
+            .args(["init", "--force", "--agents", "--output", "json"]),
+        "run init --force --agents",
+    );
     assert_exit(&out, 8);
     assert!(
         !ws.root().join("AGENTS.md").exists(),
@@ -1860,11 +1868,12 @@ fn init_agents_scaffold_failure_writes_no_agents_md() {
 #[test]
 fn init_agents_open_failure_writes_no_agents_md() {
     let root = tempfile::tempdir().expect("tempdir");
-    let out = common::unblock_in(root.path())
-        .env("UNBLOCK_OUTPUT_FORMAT", "xml")
-        .args(["init", "--agents"])
-        .output()
-        .expect("run init --agents");
+    let out = output_locked(
+        common::unblock_in(root.path())
+            .env("UNBLOCK_OUTPUT_FORMAT", "xml")
+            .args(["init", "--agents"]),
+        "run init --agents",
+    );
     assert_exit(&out, 7);
     assert!(
         !root.path().join("AGENTS.md").exists(),
@@ -1926,14 +1935,19 @@ fn init_report_with_agents_is_snapshot_pinned() {
 #[test]
 fn bare_init_with_a_broken_stdout_exits_8_and_prints_no_hint() {
     let root = tempfile::tempdir().expect("tempdir");
-    let (reader, writer) = std::io::pipe().expect("create a pipe");
+    let (reader, writer) = pipe_locked();
     drop(reader);
 
-    let out = common::unblock_in(root.path())
-        .args(["init", "--output", "plain"])
-        .stdout(writer)
-        .output()
-        .expect("run init");
+    let out = spawn_locked(
+        common::unblock_in(root.path())
+            .args(["init", "--output", "plain"])
+            .stdin(Stdio::null())
+            .stdout(writer)
+            .stderr(Stdio::piped()),
+        "run init",
+    )
+    .wait_with_output()
+    .expect("run init");
     assert_exit(&out, 8);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -1957,14 +1971,19 @@ fn bare_init_with_a_broken_stdout_exits_8_and_prints_no_hint() {
 #[test]
 fn bare_init_with_a_broken_stderr_still_exits_0() {
     let root = tempfile::tempdir().expect("tempdir");
-    let (reader, writer) = std::io::pipe().expect("create a pipe");
+    let (reader, writer) = pipe_locked();
     drop(reader);
 
-    let out = common::unblock_in(root.path())
-        .arg("init")
-        .stderr(writer)
-        .output()
-        .expect("run init");
+    let out = spawn_locked(
+        common::unblock_in(root.path())
+            .arg("init")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(writer),
+        "run init",
+    )
+    .wait_with_output()
+    .expect("run init");
     assert_eq!(
         out.status.code(),
         Some(0),
