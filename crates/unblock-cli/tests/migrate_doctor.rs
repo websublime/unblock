@@ -19,7 +19,7 @@
 
 mod common;
 
-use common::{Workspace, csv_labels, csv_report, detail, json_report};
+use common::{Workspace, csv_labels, csv_report, detail, json_report, output_locked};
 use serde_json::Value;
 
 /// An `init`-built workspace is ALREADY CURRENT — `init` opened it through the same config facade,
@@ -67,11 +67,10 @@ fn migrate_on_an_already_current_workspace_reports_no_move_and_is_idempotent() {
 /// redacted to a stable token, so a snapshot pins the SHAPE (kind + finding labels + schema/applied
 /// values) rather than a tempdir path.
 fn migrate_report_json(ws: &Workspace) -> Value {
-    let out = ws
-        .cmd()
-        .args(["migrate", "--output", "json"])
-        .output()
-        .expect("run migrate");
+    let out = output_locked(
+        ws.cmd().args(["migrate", "--output", "json"]),
+        "run migrate",
+    );
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -102,11 +101,7 @@ fn migrate_report_shape_on_an_already_current_workspace_is_snapshot_pinned() {
 #[test]
 fn migrate_csv_reports_the_delta_and_exits_0() {
     let ws = Workspace::init();
-    let out = ws
-        .cmd()
-        .args(["migrate", "--output", "csv"])
-        .output()
-        .expect("run migrate");
+    let out = output_locked(ws.cmd().args(["migrate", "--output", "csv"]), "run migrate");
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -229,11 +224,10 @@ fn migrate_on_a_future_schema_db_exits_2_with_schema_mismatch() {
     let ws = Workspace::init();
     stamp_user_version(&ws.db_path(), 99);
 
-    let out = ws
-        .cmd()
-        .args(["migrate", "--output", "json"])
-        .output()
-        .expect("run migrate on a future-schema db");
+    let out = output_locked(
+        ws.cmd().args(["migrate", "--output", "json"]),
+        "run migrate on a future-schema db",
+    );
     assert_eq!(
         out.status.code(),
         Some(2),
@@ -280,11 +274,10 @@ fn a_lying_stamp_exits_2_with_a_hint_that_names_the_repair_and_the_missing_colum
         "the stamp still claims current"
     );
 
-    let out = ws
-        .cmd()
-        .args(["migrate", "--output", "json"])
-        .output()
-        .expect("run migrate on a lying-stamp db");
+    let out = output_locked(
+        ws.cmd().args(["migrate", "--output", "json"]),
+        "run migrate on a lying-stamp db",
+    );
     assert_eq!(
         out.status.code(),
         Some(2),
@@ -491,11 +484,10 @@ fn doctor_on_a_corrupt_db_exits_2() {
     // yields a non-zero db-bucket exit on a corrupt workspace (AF-1: non-zero only on corruption).
     let ws = Workspace::init();
     corrupt_db(&ws.db_path());
-    let out = ws
-        .cmd()
-        .args(["doctor", "--output", "json"])
-        .output()
-        .expect("run doctor on corrupt db");
+    let out = output_locked(
+        ws.cmd().args(["doctor", "--output", "json"]),
+        "run doctor on corrupt db",
+    );
     assert_eq!(
         out.status.code(),
         Some(2),
@@ -514,11 +506,7 @@ fn doctor_on_a_corrupt_db_exits_2() {
 #[test]
 fn doctor_csv_on_a_healthy_workspace_exits_0() {
     let ws = Workspace::init();
-    let out = ws
-        .cmd()
-        .args(["doctor", "--output", "csv"])
-        .output()
-        .expect("run doctor");
+    let out = output_locked(ws.cmd().args(["doctor", "--output", "csv"]), "run doctor");
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -547,11 +535,10 @@ fn doctor_csv_on_a_healthy_workspace_exits_0() {
 fn doctor_csv_on_a_corrupt_db_reports_on_stderr_and_exits_2() {
     let ws = Workspace::init();
     corrupt_db(&ws.db_path());
-    let out = ws
-        .cmd()
-        .args(["doctor", "--output", "csv"])
-        .output()
-        .expect("run doctor on corrupt db");
+    let out = output_locked(
+        ws.cmd().args(["doctor", "--output", "csv"]),
+        "run doctor on corrupt db",
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "exit code; stderr: {stderr}");
     assert!(
@@ -574,11 +561,10 @@ fn doctor_csv_on_a_readable_integrity_dirty_db_reports_and_exits_2() {
     let ws = Workspace::init();
     orphan_a_page(&ws.db_path());
 
-    let json = ws
-        .cmd()
-        .args(["doctor", "--output", "json"])
-        .output()
-        .expect("run doctor -o json");
+    let json = output_locked(
+        ws.cmd().args(["doctor", "--output", "json"]),
+        "run doctor -o json",
+    );
     assert_eq!(
         json.status.code(),
         Some(2),
@@ -591,11 +577,10 @@ fn doctor_csv_on_a_readable_integrity_dirty_db_reports_and_exits_2() {
         "the report carries the orphaned page; report: {report}"
     );
 
-    let csv = ws
-        .cmd()
-        .args(["doctor", "--output", "csv"])
-        .output()
-        .expect("run doctor -o csv");
+    let csv = output_locked(
+        ws.cmd().args(["doctor", "--output", "csv"]),
+        "run doctor -o csv",
+    );
     assert_eq!(
         csv.status.code(),
         Some(2),

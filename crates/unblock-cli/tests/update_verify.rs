@@ -60,7 +60,7 @@
 
 mod common;
 
-use common::unblock;
+use common::{output_locked, unblock};
 use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -104,13 +104,14 @@ async fn update_refuses_a_receiptless_binary_and_swaps_nothing() {
 
     // Drive the REAL `unblock update` child. With no receipt it refuses at `load_receipt()` BEFORE any
     // network I/O — no swap can occur.
-    let out = unblock()
-        .args(["update", "--output", "json"])
-        .env("AXOUPDATER_CONFIG_PATH", empty_config.path())
-        .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
-        .env(GHE_BASE_URL_ENV, server.uri())
-        .output()
-        .expect("run `unblock update`");
+    let out = output_locked(
+        unblock()
+            .args(["update", "--output", "json"])
+            .env("AXOUPDATER_CONFIG_PATH", empty_config.path())
+            .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
+            .env(GHE_BASE_URL_ENV, server.uri()),
+        "run `unblock update`",
+    );
 
     // Refused: exit 1 with a VALID structured error on stdout (FR-11). A receiptless binary maps to
     // InternalError (exit 1) — never a silent success from a non-eligible binary.
@@ -141,13 +142,14 @@ async fn update_dry_run_refuses_a_receiptless_binary_and_swaps_nothing() {
 
     // `--dry-run` must also never swap; against a receiptless binary it is refused (exit 1) and the
     // binary is untouched — a dry-run can only ever report, never act.
-    let out = unblock()
-        .args(["update", "--dry-run", "--output", "json"])
-        .env("AXOUPDATER_CONFIG_PATH", empty_config.path())
-        .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
-        .env(GHE_BASE_URL_ENV, server.uri())
-        .output()
-        .expect("run `unblock update --dry-run`");
+    let out = output_locked(
+        unblock()
+            .args(["update", "--dry-run", "--output", "json"])
+            .env("AXOUPDATER_CONFIG_PATH", empty_config.path())
+            .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
+            .env(GHE_BASE_URL_ENV, server.uri()),
+        "run `unblock update --dry-run`",
+    );
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -249,20 +251,21 @@ async fn update_rejects_a_tampered_download_and_swaps_nothing() {
     let before = std::fs::read(&bin_path).expect("read the unblock binary before");
 
     // Drive the REAL `unblock update` child PAST refusal to install-execution.
-    let out = unblock()
-        .args(["update", "--output", "json"])
-        // Where axoupdater reads `unblock-cli-receipt.json`.
-        .env("AXOUPDATER_CONFIG_PATH", config_dir.path())
-        .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
-        // Redirect the GHE API base to the mock (prefix derived from the receipt's `source.app_name`).
-        .env(GHE_BASE_URL_ENV, server.uri())
-        // Guard against the mutually-exclusive plain-GitHub override leaking from the environment.
-        .env_remove("UNBLOCK_CLI_INSTALLER_GITHUB_BASE_URL")
-        // Not consulted on our path (only `new_for_updater_executable` reads it, and G1 does not use
-        // that); set for documentation/robustness so the App-name is unambiguous end-to-end.
-        .env("AXOUPDATER_APP_NAME", APP_NAME)
-        .output()
-        .expect("run `unblock update`");
+    let out = output_locked(
+        unblock()
+            .args(["update", "--output", "json"])
+            // Where axoupdater reads `unblock-cli-receipt.json`.
+            .env("AXOUPDATER_CONFIG_PATH", config_dir.path())
+            .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
+            // Redirect the GHE API base to the mock (prefix derived from the receipt's `source.app_name`).
+            .env(GHE_BASE_URL_ENV, server.uri())
+            // Guard against the mutually-exclusive plain-GitHub override leaking from the environment.
+            .env_remove("UNBLOCK_CLI_INSTALLER_GITHUB_BASE_URL")
+            // Not consulted on our path (only `new_for_updater_executable` reads it, and G1 does not use
+            // that); set for documentation/robustness so the App-name is unambiguous end-to-end.
+            .env("AXOUPDATER_APP_NAME", APP_NAME),
+        "run `unblock update`",
+    );
 
     // (1) REACHED install-execution — the sentinel exists (proving this is NOT the earlier `NoReceipt`
     // refusal, which never runs an installer).
@@ -391,18 +394,19 @@ async fn dry_run_stderr(receipt_version: &str, tag_name: &str) -> String {
     // Snapshot the on-disk binary bytes BEFORE (the NO-SWAP invariant).
     let before = std::fs::read(&bin_path).expect("read the unblock binary before");
 
-    let out = unblock()
-        .args(["update", "--dry-run", "--output", "json"])
-        // Where axoupdater reads `unblock-cli-receipt.json`.
-        .env("AXOUPDATER_CONFIG_PATH", config_dir.path())
-        .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
-        // Redirect the GHE API base to the mock (prefix derived from the receipt's `source.app_name`).
-        .env(GHE_BASE_URL_ENV, server.uri())
-        // Guard against the mutually-exclusive plain-GitHub override leaking from the environment.
-        .env_remove("UNBLOCK_CLI_INSTALLER_GITHUB_BASE_URL")
-        .env("AXOUPDATER_APP_NAME", APP_NAME)
-        .output()
-        .expect("run `unblock update --dry-run`");
+    let out = output_locked(
+        unblock()
+            .args(["update", "--dry-run", "--output", "json"])
+            // Where axoupdater reads `unblock-cli-receipt.json`.
+            .env("AXOUPDATER_CONFIG_PATH", config_dir.path())
+            .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
+            // Redirect the GHE API base to the mock (prefix derived from the receipt's `source.app_name`).
+            .env(GHE_BASE_URL_ENV, server.uri())
+            // Guard against the mutually-exclusive plain-GitHub override leaking from the environment.
+            .env_remove("UNBLOCK_CLI_INSTALLER_GITHUB_BASE_URL")
+            .env("AXOUPDATER_APP_NAME", APP_NAME),
+        "run `unblock update --dry-run`",
+    );
 
     // A dry-run against an ELIGIBLE receipt succeeds (exit 0) whether or not an update exists — it only
     // reports, it never fails the process on the happy path.
@@ -552,7 +556,7 @@ async fn update_dry_run_authenticates_with_the_github_token_env() {
                 .env_remove("AXOUPDATER_GITHUB_TOKEN")
                 .env_remove("RUST_LOG"),
         };
-        cmd.output().expect("run `unblock update --dry-run`")
+        output_locked(&mut cmd, "run `unblock update --dry-run`")
     };
 
     let authed = dry_run(Some(TOKEN));
@@ -675,7 +679,7 @@ async fn refusal_run(
             .env_remove("AXOUPDATER_GITHUB_TOKEN")
             .env_remove("RUST_LOG"),
     };
-    let out = cmd.output().expect("run `unblock update`");
+    let out = output_locked(&mut cmd, "run `unblock update`");
 
     let after = std::fs::read(&bin_path).expect("read the unblock binary after");
     assert_eq!(before, after, "a refused query never swaps the binary");

@@ -13,15 +13,33 @@
 //! (`shutdown_failure_injection.rs`) can reuse it without duplicating the JSON-RPC framing code, and
 //! adds the shared shutdown-case oracle (`reopen_and_check`) + the pinned bulk-markdown fixture
 //! (`bulk_markdown`).
+//!
+//! **`SPAWN_LOCK` invariant (ub-vcp).** Every child process this crate's integration tests create —
+//! `unblock`, `sh`, `kill`, anything — is started through [`spawn_locked`], [`output_locked`] or
+//! [`status_locked`], and every `std::io::pipe()` through [`pipe_locked`]. All four take the ONE
+//! process-wide `SPAWN_LOCK`. On macOS, std creates a pipe with `pipe()` and only then marks it
+//! close-on-exec (`FIOCLEX`), and `posix_spawnp` has no close-on-exec default, so a child spawned
+//! by another thread in that window inherits BOTH ends of this cell's pipe for its whole life. An
+//! inherited READ end keeps the pipe readable after the cell drops its own reader, so the child's
+//! write never fails with `EPIPE`: that is how the D38/D50 witness
+//! `a_no_signal_run_loop_error_exits_1_and_never_hangs` misses its broken-pipe exit 1 and hits its
+//! deadline, and how the `io::pipe()` broken-pipe cells in `init_agents.rs` would lose theirs. An
+//! inherited WRITE end delays EOF for a reader that reads to the end. The lock is held ONLY across
+//! `spawn`/`pipe()`, never across a `wait` or a read (one hung child would otherwise stall every
+//! spawn), and it is poison-tolerant. `output_locked` requires a command with NO stdio set; a
+//! command with custom stdio uses `spawn_locked` + `wait_with_output` with every remaining slot set
+//! explicitly. The lock is per test binary (one process), which is the whole race.
+//! `tests/spawn_lock_gate.rs` enforces this, and `.cargo/config.toml`'s `INSTA_WORKSPACE_ROOT` keeps
+//! insta from forking `cargo metadata` behind the lock's back.
 
 #![allow(dead_code)] // each test binary uses a subset of the harness.
 
 use std::collections::BTreeSet;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, PipeReader, PipeWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::CommandCargoExt as _;
@@ -55,7 +73,7 @@ impl Workspace {
         if let Some(prefix) = prefix {
             cmd.args(["--prefix", prefix]);
         }
-        let out = cmd.output().expect("run init");
+        let out = output_locked(&mut cmd, "run init");
         assert!(
             out.status.success(),
             "init must succeed; stderr: {}",
@@ -123,6 +141,69 @@ pub fn unblock() -> Command {
     // FR-13/D48: see the paragraph above — inherited, it makes the frame-only cells vacuous.
     cmd.env_remove("UNBLOCK_OUTPUT_FORMAT");
     cmd
+}
+
+/// The ONE process-wide spawn lock (ub-vcp) — see the module doc.
+static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+/// Poison-tolerant: a cell that panicked while holding the guard must not fail every later spawn.
+fn spawn_guard() -> MutexGuard<'static, ()> {
+    SPAWN_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The ONE sanctioned `Command::spawn`. The guard lives for this call only, so it is dropped
+/// before any caller waits or reads.
+fn try_spawn_locked(cmd: &mut Command) -> io::Result<Child> {
+    let _guard = spawn_guard();
+    cmd.spawn() // SPAWN_LOCK: sanctioned
+}
+
+/// Spawn under the lock; panics `"{what}: {err:?}"` at the CALLER's location (as `.expect(what)`).
+#[track_caller]
+#[must_use]
+pub fn spawn_locked(cmd: &mut Command, what: &str) -> Child {
+    match try_spawn_locked(cmd) {
+        Ok(child) => child,
+        Err(err) => panic!("{what}: {err:?}"),
+    }
+}
+
+/// `Command::output()` under the lock. PRECONDITION: `cmd` has NO stdio slot set (std has no
+/// getters; a set slot would be silently overridden). Sets stdin=null, stdout=piped,
+/// stderr=piped (`output()`'s defaults), spawns via `spawn_locked`, then `wait_with_output()`
+/// OUTSIDE the lock. Custom stdio: `spawn_locked` + `wait_with_output`.
+#[track_caller]
+#[must_use]
+pub fn output_locked(cmd: &mut Command, what: &str) -> Output {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match spawn_locked(cmd, what).wait_with_output() {
+        Ok(output) => output,
+        Err(err) => panic!("{what}: {err:?}"),
+    }
+}
+
+/// `Command::status()` under the lock (inherited stdio, as `status()`); `wait()` outside it.
+/// Fallible: `send_signal_tolerant` discards the error.
+pub fn status_locked(cmd: &mut Command) -> io::Result<ExitStatus> {
+    try_spawn_locked(cmd)?.wait()
+}
+
+/// `std::io::pipe()` under the lock: its `pipe()`→`FIOCLEX` window is the same race.
+#[track_caller]
+#[must_use]
+pub fn pipe_locked() -> (PipeReader, PipeWriter) {
+    // The guard is scoped to the `pipe()` call alone, so the `Err` arm's panic runs after it drops
+    // and can never poison the lock.
+    let ends = {
+        let _guard = spawn_guard();
+        io::pipe() // SPAWN_LOCK: sanctioned
+    };
+    match ends {
+        Ok(ends) => ends,
+        Err(err) => panic!("create a pipe: {err:?}"),
+    }
 }
 
 /// The D48 oracle: the ONE stderr line that IS the `StructuredError` payload, parsed.
@@ -367,14 +448,15 @@ impl McpClient {
     /// Spawn `unblock mcp <args...>` in `root` with piped stdio + a background-drained stderr.
     #[must_use]
     pub fn spawn_with_args(root: &Path, args: &[&str]) -> Self {
-        let mut child = unblock_in(root)
-            .arg("mcp")
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn `unblock mcp`");
+        let mut child = spawn_locked(
+            unblock_in(root)
+                .arg("mcp")
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+            "spawn `unblock mcp`",
+        );
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = BufReader::new(child.stdout.take().expect("child stdout"));
 
@@ -955,10 +1037,9 @@ fn drain_to_eof(mut stdout: BufReader<ChildStdout>) {
 /// case (C1/C3) and the FIRST signal of the escalation case (C6); a failed strict kill is a harness
 /// bug, not an expected outcome.
 pub fn send_signal(pid: u32, signal: &str) {
-    let status = std::process::Command::new("kill")
-        .args(["-s", signal, &pid.to_string()])
-        .status()
-        .expect("run kill");
+    let status =
+        status_locked(std::process::Command::new("kill").args(["-s", signal, &pid.to_string()]))
+            .expect("run kill");
     assert!(status.success(), "kill -s {signal} {pid} failed");
 }
 
@@ -967,9 +1048,8 @@ pub fn send_signal(pid: u32, signal: &str) {
 /// is sent the child may already be mid-exit (or exited) from the first signal, and that is not a
 /// test failure.
 pub fn send_signal_tolerant(pid: u32, signal: &str) {
-    let _ = std::process::Command::new("kill")
-        .args(["-s", signal, &pid.to_string()])
-        .status();
+    let _ =
+        status_locked(std::process::Command::new("kill").args(["-s", signal, &pid.to_string()]));
 }
 
 /// Wait for the child to exit within `timeout`, returning its exit status.
@@ -1022,7 +1102,7 @@ pub fn id_set(value: &Value) -> BTreeSet<String> {
 /// Promoted here (D27/AF-1/AF-2, originally `migrate_doctor.rs`-private) so T3.2's C-doctor case can
 /// reuse it verbatim without inventing a second report-parsing shape.
 pub fn json_report(ws: &Workspace, args: &[&str]) -> Value {
-    let out = ws.cmd().args(args).output().expect("run command");
+    let out = output_locked(ws.cmd().args(args), "run command");
     assert_eq!(
         out.status.code(),
         Some(0),
