@@ -498,8 +498,9 @@ work the tracker labels `v1-0-2`:
   misuse" (`ub-q1u`, closed 2026-10-06); the `write_lock_two_process` non-vacuity control failed under load
   (`ub-fh5`, closed 2026-10-07); `McpClient::read_response` fails at its 20-second deadline when the child never
   writes a correlatable reply (`ub-46o`); `RawDuplexClient::read_response` in `unblock-mcp` fails at one 30-second
-  deadline spanning every read when no correlatable reply arrives (`ub-f1k`). Still open: `McpClient` child spawns
-  get serialised behind a process-wide mutex (`ub-vcp`).
+  deadline spanning every read when no correlatable reply arrives (`ub-f1k`); every child spawn and `io::pipe` within
+  each `unblock-cli` integration-test binary that links `tests/common/mod.rs` is serialised behind one process-wide
+  mutex held across `spawn`/`pipe()` only (`ub-vcp`).
 - **The `AGENTS.md` managed block hid each tool's discriminant key** (`ub-q2v`, PRD §4 D33 addendum). Its
   `Action` column showed bare values, but `query` and `diagnostics` are keyed `kind`, so agents sent
   `{"action":"ready"}` and were rejected. Each row now shows the exact wire pair (`kind: ready`,
