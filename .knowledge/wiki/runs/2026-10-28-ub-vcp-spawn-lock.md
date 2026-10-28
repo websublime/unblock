@@ -64,7 +64,7 @@ which gained three rows before any code.
 - **Shared-tree incident:** the implementer's first edits landed in `main`'s shared tree, not in the
   worktree (PROCESS §4). They were moved into the worktree, the three files were restored there, and
   the shared tree is clean. An earlier hand edit on `main` during Understand was also reverted.
-- **d44 F9 trip:** the phrase "non-atomic" in `docs/plans/crates/unblock-cli.md:95` matched
+- **d44 F9 trip:** describing `pipe()`→`FIOCLEX` as "not atomic" with a `non` prefix in `docs/plans/crates/unblock-cli.md:95` matched
   `scripts/checks/d44-create-deps-claims.sh` rule F9 (retired create-with-deps framing). The script
   failed on the branch and passed on `main`; the row was reworded.
 - **Insta cargo-metadata fork:** insta 1.48 (`src/env.rs:487-494`) runs `cargo metadata` through an
@@ -83,7 +83,7 @@ which gained three rows before any code.
 | SPAWN_LOCK | the one process-wide mutex every test spawn and `io::pipe()` takes, held across `spawn`/`pipe()` only | `crates/unblock-cli/tests/common/mod.rs` |
 | sanctioned line | one of the two lines marked `// SPAWN_LOCK: sanctioned` directly under `let _guard = spawn_guard();`, the only dispatch the gate allows | `crates/unblock-cli/tests/common/mod.rs`, `crates/unblock-cli/tests/spawn_lock_gate.rs` |
 | reproducer | the throwaway DYLD_INSERT_LIBRARIES program that stalls between `pipe()` and `FIOCLEX`, spawns a sibling and checks with `lsof` for the inherited fd; not committed | `ub-vcp` comments 329, 333 |
-| F9 | rule F9 of the d44 doc-lint script, which rejects the retired create-with-deps framing (here, the word "non-atomic") | `scripts/checks/d44-create-deps-claims.sh` |
+| F9 | rule F9 of the d44 doc-lint script, which rejects the retired create-with-deps framing (here, "atomic" with a `non` prefix) | `scripts/checks/d44-create-deps-claims.sh` |
 | MF-a to MF-e | Design Review round-2 must-fixes: insta env, `assert_cmd` hole, roadmap.html, EPIPE attribution, `#[track_caller]` | `ub-vcp` comment 330 |
 | round 1/2 | successive iterations of the design Review or Verify gate | `ub-vcp` issue comments |
 | plan rev 3 | the Spec/Plan revision after Design Review round 2 | `ub-vcp` comment 331 |
