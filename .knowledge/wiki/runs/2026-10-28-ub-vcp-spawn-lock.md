@@ -4,7 +4,7 @@ description: Serialising every child spawn and io::pipe in the unblock-cli integ
 type: run
 date: 2026-10-28
 branch: ub-vcp-spawn-lock
-pr: pending
+pr: '468'
 issues: [ub-vcp]
 ---
 
@@ -13,8 +13,7 @@ issues: [ub-vcp]
 ## Context
 
 Issue `ub-vcp`: the `McpClient` broken-pipe witness hung about 1 run in 58. The run went through the full
-lifecycle on branch `ub-vcp-spawn-lock` in the worktree `../unblock-ub-vcp`. PR: pending (push and PR wait
-for Miguel's go-ahead). Design Review passed in round 2 (round 1 FAIL; round 2 three PASS-WITH-MUST-FIX,
+lifecycle on branch `ub-vcp-spawn-lock` in the worktree `../unblock-ub-vcp`. PR: #468. Design Review passed in round 2 (round 1 FAIL; round 2 three PASS-WITH-MUST-FIX,
 folded into plan rev 3). Verify passed in round 2 (round 1 PASS-WITH-MUST-FIX). Team: one coordinator,
 one implementer, and three review lenses per gate.
 
