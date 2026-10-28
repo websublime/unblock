@@ -1082,6 +1082,17 @@ automates that step behind a strict, human-operated safety model.
   reachable only through a GitHub Enterprise base-URL override). Every other
   update failure stays `INTERNAL_ERROR`, exit 1. The binary that sends the query decides the output, so v1.0.0
   and v1.0.1 still report any refusal as `INTERNAL_ERROR`, exit 1, and send no token (PRD §4 D55 clause (10)(iv)).
+- **Known residual: the token can follow a cross-origin next page (`ub-bq8`, accepted for v1.0.2).** When
+  `/releases/latest` fails or has no installer asset, and on the pre-release path, axoupdater 0.10.0 falls back
+  to paging the release list. It follows each response's `Link: <url>; rel="next"` header and sends the bearer
+  token on every page request, with no check that the next URL has the first request's origin. Each page is a fresh
+  request, so reqwest's rule that drops `Authorization` on a cross-host redirect does not apply. Whoever shapes the
+  release source's responses can therefore force the fallback, name another host as the next page and collect the
+  token there: GitHub itself against `api.github.com`, or the operator of a GitHub Enterprise or mirror base URL.
+  Only users who set `AXOUPDATER_GITHUB_TOKEN` are exposed, and v1.0.2 is the first release that sends it. unblock
+  cannot close this without forking the release query, because axoupdater owns the pagination loop. The fix
+  belongs upstream: follow a next URL only on the same origin when a token is set. Miguel accepted the residual for
+  v1.0.2 on 2026-10-28, and `ub-bq8` stays open until that upstream fix lands.
 - **Live end-to-end smoke — where it lives (`ub-lp9.26`).** Hermetic tests cannot reach the real path, because it
   needs two **published** releases. `crates/unblock-cli/tests/update_verify.rs` pins only the client-side
   no-swap half. The live smoke is the manual **`workflow_dispatch`** workflow
