@@ -1,5 +1,5 @@
 //! The [`Session`] struct (the single shared state) + [`SessionConfig`], with the per-concern
-//! `impl Session` modules (lifecycle / read / write / interchange).
+//! `impl Session` modules (lifecycle / read / write / interchange / organization).
 //!
 //! `Session` is the single mutation home (FR-9): MCP and CLI are thin adapters over this surface, so
 //! behaviour cannot drift. Writes serialize through one `Arc<tokio::sync::Semaphore>` with **one
@@ -14,6 +14,7 @@ pub(crate) mod bulk;
 pub(crate) mod ids;
 pub(crate) mod interchange;
 pub(crate) mod lifecycle;
+pub(crate) mod organization;
 pub(crate) mod read;
 pub(crate) mod write;
 

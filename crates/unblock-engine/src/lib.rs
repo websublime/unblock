@@ -96,6 +96,7 @@
 #![warn(missing_docs)]
 
 mod diagnostics;
+mod epic;
 mod error;
 mod logging;
 mod permit;
@@ -115,10 +116,12 @@ pub use shutdown::is_shutdown_requested;
 pub use report::{CloseOutcome, ExportReport, ImportOptions, ImportReport};
 
 // --- re-exported model-owned DTOs (CF-B/CF-C, spine §1.10) — defined in unblock-model, never
-//     redefined here, so unblock-render (model + error only) can format engine results ---
+//     redefined here, so unblock-render (model + error only) can format engine results. Since D56
+//     the FR-6 organization results (`EpicStatus`/`LabelCount`/`LabelRename`/
+//     `CloseEligibleOutcome`) ride the same re-export ---
 pub use unblock_model::{
-    CountBucket, CountGroupBy, DepTree, Dependency, DiagnosticFinding, DiagnosticKind,
-    DiagnosticReport, GraphEdge, ListFilters,
+    CloseEligibleOutcome, CountBucket, CountGroupBy, DepTree, Dependency, DiagnosticFinding,
+    DiagnosticKind, DiagnosticReport, EpicStatus, GraphEdge, LabelCount, LabelRename, ListFilters,
 };
 
 // --- re-exported storage-owned contract types so adapters import them from one place ---
@@ -132,10 +135,10 @@ mod tests {
     //! statically witnesses the whole re-export surface (CF-A/CF-B/CF-C + storage-owned + engine).
     #[allow(unused_imports)]
     use crate::{
-        CloseOutcome, CountBucket, CountGroupBy, DeleteMode, DeletePlan, DepTree, Dependency,
-        DiagnosticFinding, DiagnosticKind, DiagnosticReport, EngineError, ExportReport, GraphEdge,
-        ImportOptions, ImportReport, IssuePatch, ListFilters, MigrateOutcome, Result, Session,
-        SessionConfig, TracingOptions,
+        CloseEligibleOutcome, CloseOutcome, CountBucket, CountGroupBy, DeleteMode, DeletePlan,
+        DepTree, Dependency, DiagnosticFinding, DiagnosticKind, DiagnosticReport, EngineError,
+        EpicStatus, ExportReport, GraphEdge, ImportOptions, ImportReport, IssuePatch, LabelCount,
+        LabelRename, ListFilters, MigrateOutcome, Result, Session, SessionConfig, TracingOptions,
     };
 
     #[test]

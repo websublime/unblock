@@ -1,9 +1,13 @@
-//! Tool **#4 `query`** — read queries over the issue store (spine §5.1/§5.2, FR-4).
+//! Tool **#4 `query`** — read queries over the issue store (spine §5.1/§5.2, FR-4, FR-6).
 //!
 //! Maps `QueryInput{kind}` + `FilterInput`→`ListFilters` to `Session::{list, ready, blocked, search,
 //! count, stale}`. `ready` is default-complete (no limit unless set); `search` applies the engine's
 //! default cap of 50 when no limit is set (the engine fills `search_cap`). Reads never acquire the
 //! write permit (FR-10).
+//!
+//! D56 (FR-6 remainder, v1.1) appends two kinds that flatten NO `FilterInput` (the catalog and the
+//! rollup are not list facets): `labels` → `Session::list_all_labels()` → `QueryOutput::Labels`, and
+//! `epics` → `Session::epic_statuses(id, eligible_only)` → `QueryOutput::Epics`. Both are reads.
 
 use chrono::{DateTime, Utc};
 // D42 SEAM: this is the CRATE-LOCAL `Parameters` (`crate::tools::args`), NOT rmcp's. It defers
@@ -19,7 +23,7 @@ use unblock_model::{CountGroupBy, ListFilters};
 
 use crate::server::UnblockServer;
 use crate::tools::dto::FilterInput;
-use crate::tools::output::{CountList, IssueList, QueryOutput};
+use crate::tools::output::{CountList, EpicStatusList, IssueList, LabelList, QueryOutput};
 use crate::tools::{engine_err_json, err_json, ok_json};
 
 /// The `query` tool input (spine §5.2 — EXACT shape).
@@ -73,14 +77,29 @@ pub(crate) enum QueryInput {
         #[serde(flatten)]
         filters: FilterInput,
     },
+    /// The label catalog: every label carried by a non-tombstoned issue, with its issue count.
+    //
+    // D56 — `Labels` and `Epics` are APPENDED LAST: schemars emits the variants in DECLARATION order
+    // and `CONTRACT_HASH` digests those bytes; each variant's `///` doc comment is contract bytes
+    // (its schema `description`).
+    Labels {},
+    /// Epic rollups: child counts and close eligibility, for every open epic or one epic by id.
+    Epics {
+        /// One epic by id (any status except tombstone) instead of every open, non-template epic.
+        #[serde(default)]
+        id: Option<String>,
+        /// Keep only the epics eligible for close.
+        #[serde(default)]
+        eligible_only: bool,
+    },
 }
 
 #[rmcp::tool_router(router = query_router, vis = "pub(crate)")]
 impl UnblockServer {
-    /// Read queries over the issue store (FR-4).
+    /// Read queries over the issue store (FR-4; the label catalog and epic rollups, FR-6/D56).
     #[tool(
         name = "query",
-        description = "Query issues: list, ready, blocked, search, count, or stale."
+        description = "Query issues: list, ready, blocked, search, count, stale, labels, or epics."
     )]
     pub(crate) async fn query(&self, Parameters(raw, _): Parameters<QueryInput>) -> CallToolResult {
         // D42 PROLOGUE: the ONLY deserialization of tool arguments. The NFR-18 quota already
@@ -143,6 +162,20 @@ impl UnblockServer {
                 let filters: ListFilters = filters.into_list_filters();
                 match self.session.stale(older_than, &filters).await {
                     Ok(issues) => ok_json(&QueryOutput::Issues(IssueList { issues })),
+                    Err(err) => engine_err_json(&err),
+                }
+            }
+            QueryInput::Labels {} => match self.session.list_all_labels().await {
+                Ok(labels) => ok_json(&QueryOutput::Labels(LabelList { labels })),
+                Err(err) => engine_err_json(&err),
+            },
+            QueryInput::Epics { id, eligible_only } => {
+                match self
+                    .session
+                    .epic_statuses(id.as_deref(), eligible_only)
+                    .await
+                {
+                    Ok(epics) => ok_json(&QueryOutput::Epics(EpicStatusList { epics })),
                     Err(err) => engine_err_json(&err),
                 }
             }

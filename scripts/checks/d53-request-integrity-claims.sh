@@ -75,7 +75,7 @@ RANGE_ALT_RE='D\(56\|55\|'
 # The LIVE published contract version. D53 does NOT move it, and neither does the D47 amendment, so
 # this row is the affirmative record of that. It tracks the LIVE id, so a later decision's bump moves
 # it in that decision's implementation commit.
-CONTRACT_RE='unblock\.mcp\.v1\.10'
+CONTRACT_RE='unblock\.mcp\.v1\.11'
 
 # The SAME two spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte rather than a regex operator. DERIVED, never hand-written a second time. `printf '%s'`

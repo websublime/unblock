@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use chrono::{DateTime, Utc};
 use libsql::{Connection, Value, params_from_iter};
 
-use unblock_model::{CountBucket, CountGroupBy, Issue, ListFilters};
+use unblock_model::{CountBucket, CountGroupBy, Issue, LabelCount, ListFilters};
 
 use crate::error::{StorageError, map_libsql_err};
 
@@ -259,6 +259,34 @@ pub(super) async fn count_issues(
         buckets.push(CountBucket { key, count });
     }
     Ok(buckets)
+}
+
+/// `list_all_labels`: the label CATALOG (D56 clause (6), spine §3.2.1 "Organization (D56)") — one
+/// row per distinct label carried by at least one NON-tombstoned issue, counting such issues
+/// WHATEVER their status (closed, deferred, template and ephemeral all count), ordered by label in
+/// byte order (`BINARY` collation — bd's `BTreeMap` order). Deliberately NOT
+/// [`count_issues`]`(Label)`, which keeps list default visibility. Served by `idx_labels_label`.
+pub(super) async fn list_all_labels(conn: &Connection) -> Result<Vec<LabelCount>, StorageError> {
+    let mut rows = conn
+        .query(
+            "SELECT l.label, COUNT(*) FROM labels l JOIN issues i ON i.id = l.issue_id \
+             WHERE i.status != 'tombstone' GROUP BY l.label ORDER BY l.label ASC",
+            (),
+        )
+        .await
+        .map_err(map_libsql_err)?;
+    let mut labels = Vec::new();
+    while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+        let Value::Text(label) = row.get_value(0).map_err(map_libsql_err)? else {
+            continue;
+        };
+        let count = match row.get_value(1).map_err(map_libsql_err)? {
+            Value::Integer(i) => usize::try_from(i).unwrap_or(0),
+            _ => 0,
+        };
+        labels.push(LabelCount { label, count });
+    }
+    Ok(labels)
 }
 
 /// `stale_issues`: issues with `updated_at < older_than` matching `filters`.

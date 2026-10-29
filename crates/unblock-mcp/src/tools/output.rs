@@ -31,7 +31,8 @@ use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use unblock_engine::DeleteMode;
 use unblock_model::{
-    CloseOutcome, Comment, CountBucket, DepTree, Dependency, ExportReport, ImportReport, Issue,
+    CloseEligibleOutcome, CloseOutcome, Comment, CountBucket, DepTree, Dependency, EpicStatus,
+    ExportReport, ImportReport, Issue, LabelCount, LabelRename,
 };
 
 /// The quick-create output: the minted id only (spine §5.3).
@@ -41,7 +42,8 @@ pub(crate) struct IdOnly {
     pub id: String,
 }
 
-/// The `issue` tool success union — the 5 success shapes across the 8 actions (spine §5.3, D25).
+/// The `issue` tool success union — the 7 success shapes across the 10 actions (spine §5.3, D25;
+/// D56 appends `Relabel` and `CloseEligible`).
 ///
 /// `#[serde(untagged)]` ⇒ each arm serializes as its inner value directly (wire-identical to the
 /// pre-D25 ad-hoc values). The large arms are boxed to keep `clippy::large_enum_variant` clean.
@@ -59,6 +61,16 @@ pub(crate) enum IssueOutput {
     Close(Box<CloseOutcome>),
     /// The resolved delete plan (was the ad-hoc `delete_plan_json`).
     Delete(DeletePlanOutput),
+    /// The `relabel` outcome: the renamed label and the number of issues changed.
+    //
+    // D56 — `Relabel` and `CloseEligible` are APPENDED LAST: schemars emits the variants in
+    // DECLARATION order and `CONTRACT_HASH` digests those bytes.
+    Relabel(LabelRename),
+    /// The `close_eligible` outcome: the epic ids closed (or that would close), in close order.
+    //
+    // D56 clause (4): its list key is `epic_ids`, never `close`'s `closed` (an `Issue`), so this
+    // untagged union never carries one key with two types.
+    CloseEligible(CloseEligibleOutcome),
 }
 
 /// The CD-2 object-wrap for a list of issues: `{"issues":[…]}` (spine §5.3). Shared by
@@ -107,9 +119,10 @@ impl From<DeleteMode> for DeleteModeOutput {
     }
 }
 
-/// The `query` tool success union (spine §5.3, D25). Both arms are CD-2 object-wrapped (§5.3) so the
+/// The `query` tool success union (spine §5.3, D25). Every arm is CD-2 object-wrapped (§5.3) so the
 /// `structuredContent` is always a JSON object, never a bare array. `#[serde(untagged)]` ⇒ the arm's
-/// wrapper value is emitted directly (`{"issues":[…]}` / `{"counts":[…]}`).
+/// wrapper value is emitted directly (`{"issues":[…]}` / `{"counts":[…]}` / `{"labels":[…]}` /
+/// `{"epics":[…]}`).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub(crate) enum QueryOutput {
@@ -117,6 +130,26 @@ pub(crate) enum QueryOutput {
     Issues(IssueList),
     /// The `count` buckets (`{"counts":[…]}`).
     Counts(CountList),
+    /// The `labels` catalog (`{"labels":[…]}`).
+    //
+    // D56 — `Labels` and `Epics` are APPENDED LAST (schemars declaration order is hashed).
+    Labels(LabelList),
+    /// The `epics` rollups (`{"epics":[…]}`).
+    Epics(EpicStatusList),
+}
+
+/// The CD-2 object-wrap for `query{labels}`: `{"labels":[…]}` (spine §5.3, D56).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub(crate) struct LabelList {
+    /// The labels, ordered by label in byte order.
+    pub labels: Vec<LabelCount>,
+}
+
+/// The CD-2 object-wrap for `query{epics}`: `{"epics":[…]}` (spine §5.3, D56).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub(crate) struct EpicStatusList {
+    /// The epic rollups, ordered by epic id ascending.
+    pub epics: Vec<EpicStatus>,
 }
 
 /// The CD-2 object-wrap for `query{count}` buckets: `{"counts":[…]}` (spine §5.3).

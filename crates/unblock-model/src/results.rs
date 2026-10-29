@@ -133,6 +133,46 @@ pub struct DiagnosticFinding {
     pub detail: String,
 }
 
+// --- FR-6 remainder (D56, v1.1) — label catalog / rename / close-eligible results (spine §1.10).
+//     All three reach L7 (spine §5.3) through the `query`/`issue` output unions, so every `///` line
+//     below is CONTRACT BYTES (a schema `description` digested by `CONTRACT_HASH`).
+
+/// One label-catalog row (`query kind: labels`, FR-6 / D56).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct LabelCount {
+    /// The label value.
+    pub label: String,
+    /// The number of non-tombstoned issues carrying the label, whatever their status.
+    pub count: usize,
+}
+
+/// The outcome of a label rename (`issue action: relabel`, FR-6 / D56).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct LabelRename {
+    /// The label that was renamed.
+    pub old_name: String,
+    /// The label it was renamed to.
+    pub new_name: String,
+    /// The number of non-tombstoned issues changed (renamed and merged alike).
+    pub affected_issues: usize,
+}
+
+/// The outcome of closing every eligible epic (`issue action: close_eligible`, FR-6 / D56).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct CloseEligibleOutcome {
+    /// The epic ids closed (or, on a dry run, that would close), in close order: by cascade round,
+    /// then by id ascending, so every child epic precedes its parent.
+    //
+    // D56 clause (4): the key is `epic_ids`, NEVER `closed` — `issue close` already returns `closed`
+    // as an `Issue` inside the same untagged `IssueOutput` union, and one key carrying two types
+    // would make the wire ambiguous.
+    pub epic_ids: Vec<String>,
+    /// The number of entries in `epic_ids`.
+    pub count: usize,
+    /// Whether this was a dry run (nothing written).
+    pub dry_run: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

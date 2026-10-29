@@ -82,7 +82,7 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
     [
         (
             "issue",
-            "Create, show, update, close, reopen, delete, or restore issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them.",
+            "Create, show, update, close, reopen, delete, restore, relabel, or close_eligible issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them.",
         ),
         // The shared constant — these bytes are contract and ship here AND in the
         // `#[tool(description)]` attribute (the pair-compare in `contract_suite` keeps them equal).
@@ -93,7 +93,7 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
         ),
         (
             "query",
-            "Query issues: list, ready, blocked, search, count, or stale.",
+            "Query issues: list, ready, blocked, search, count, stale, labels, or epics.",
         ),
         (
             "dep",

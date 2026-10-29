@@ -151,3 +151,81 @@ async fn scale_250k_reads_bounded_and_integrity_clean() {
 async fn scale_1m_soak() {
     run_scale(1_000_000).await;
 }
+
+/// More issues than `SQLite`'s default bound-parameter ceiling (32 766 since 3.32): a rename that bound
+/// the affected ids as one list would fail outright here.
+const RENAME_SCALE_N: usize = 40_000;
+
+/// D56 clause (5) SCALE (NFR-2): `rename_label` over a label carried by more issues than the
+/// bound-parameter limit succeeds in ONE transaction, because its merge `DELETE` and rename `UPDATE`
+/// select rows by SUBQUERY and every per-issue statement binds a fixed handful of parameters —
+/// never a bound id list (the constraint `HYDRATE_ID_CHUNK` exists for). Elapsed is printed for the
+/// record and held to the generous boundedness guard.
+#[tokio::test(flavor = "multi_thread")]
+async fn scale_rename_label_past_the_bound_parameter_limit() {
+    use chrono::{TimeZone, Utc};
+    use unblock_model::Issue;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = open_file_db(dir.path()).await;
+    let epoch = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+
+    let t = Instant::now();
+    let ids: Vec<usize> = (0..RENAME_SCALE_N).collect();
+    for chunk in ids.chunks(1_000) {
+        let batch: Vec<Issue> = chunk
+            .iter()
+            .map(|i| Issue {
+                id: format!("ub-rn{i:06}"),
+                title: format!("rename scale {i}"),
+                created_at: epoch,
+                updated_at: epoch,
+                // Every tenth issue already carries the target name, so the merge path runs at
+                // scale too.
+                labels: if i % 10 == 0 {
+                    vec!["bulk-new".to_string(), "bulk-old".to_string()]
+                } else {
+                    vec!["bulk-old".to_string()]
+                },
+                ..Issue::default()
+            })
+            .collect();
+        storage
+            .create_issues(&batch, "scale")
+            .await
+            .expect("seed batch");
+    }
+    eprintln!(
+        "scale: seeded {RENAME_SCALE_N} labelled issues in {:?}",
+        t.elapsed()
+    );
+
+    let t = Instant::now();
+    let affected = storage
+        .rename_label("bulk-old", "bulk-new", "scale")
+        .await
+        .expect("rename past the bound-parameter limit");
+    let rename_elapsed = t.elapsed();
+    eprintln!("scale: rename_label({RENAME_SCALE_N}) in {rename_elapsed:?}");
+    assert_eq!(
+        affected, RENAME_SCALE_N,
+        "merged + renamed issues are all counted"
+    );
+    assert!(
+        rename_elapsed < Duration::from_mins(2),
+        "rename at {RENAME_SCALE_N} exceeded the boundedness guard: {rename_elapsed:?}"
+    );
+
+    let catalog = storage.list_all_labels().await.expect("catalog");
+    assert_eq!(
+        catalog,
+        vec![unblock_model::LabelCount {
+            label: "bulk-new".to_string(),
+            count: RENAME_SCALE_N,
+        }],
+        "every live `bulk-old` row became (or merged into) `bulk-new`"
+    );
+
+    drop(storage);
+    drop(dir);
+}

@@ -86,6 +86,21 @@ impl StorageTestkit for LibsqlStorage {
         Ok(row.get::<i64>(0).map_err(map_libsql_err)? != 0)
     }
 
+    async fn testkit_raw_content_hash(&self, id: &str) -> Result<Option<String>, StorageError> {
+        // The STORED column, read by SQL (D56 clause (10) "RAW HASH") — never `get_issue`, whose
+        // row mapper recomputes the hash on load and would hide a stale column. The column is
+        // nullable; a NULL reads as `None`, like an absent row.
+        let mut rows = self
+            .read()
+            .query("SELECT content_hash FROM issues WHERE id = ?1", params![id])
+            .await
+            .map_err(map_libsql_err)?;
+        match rows.next().await.map_err(map_libsql_err)? {
+            Some(row) => row.get::<Option<String>>(0).map_err(map_libsql_err),
+            None => Ok(None),
+        }
+    }
+
     // --- T0.8 contention-lab instrumentation seams -----------------------------------------------
     //
     // Thin async wrappers over the in-`mod.rs` `StorageInstrument` (reached via the `pub(super)`

@@ -770,6 +770,31 @@ pub mod recording {
         async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
             self.inner.dangling_dependencies().await
         }
+
+        // D56 (FR-6 remainder): the catalog is a read — delegate, unrecorded. The two organization
+        // MUTATIONS call `record()` (this is the zero-write spy, so without it every "rejected with
+        // zero writes" cell on `relabel`/`close_eligible` would pass vacuously).
+        async fn list_all_labels(&self) -> Result<Vec<unblock_model::LabelCount>, StorageError> {
+            self.inner.list_all_labels().await
+        }
+        async fn rename_label(
+            &self,
+            old: &str,
+            new: &str,
+            actor: &str,
+        ) -> Result<usize, StorageError> {
+            self.record();
+            self.inner.rename_label(old, new, actor).await
+        }
+        async fn close_issues(
+            &self,
+            ids: &[String],
+            reason: &str,
+            actor: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            self.record();
+            self.inner.close_issues(ids, reason, actor).await
+        }
     }
 }
 
@@ -1064,6 +1089,27 @@ pub mod gated {
         async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
             self.inner.dangling_dependencies().await
         }
+
+        // D56 (FR-6 remainder): not gated — delegate, like every other non-gated method.
+        async fn list_all_labels(&self) -> Result<Vec<unblock_model::LabelCount>, StorageError> {
+            self.inner.list_all_labels().await
+        }
+        async fn rename_label(
+            &self,
+            old: &str,
+            new: &str,
+            actor: &str,
+        ) -> Result<usize, StorageError> {
+            self.inner.rename_label(old, new, actor).await
+        }
+        async fn close_issues(
+            &self,
+            ids: &[String],
+            reason: &str,
+            actor: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            self.inner.close_issues(ids, reason, actor).await
+        }
     }
 }
 
@@ -1300,6 +1346,27 @@ pub mod failing {
         // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
         async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
             self.inner.dangling_dependencies().await
+        }
+
+        // D56 (FR-6 remainder): only `list_issues` fails here — delegate.
+        async fn list_all_labels(&self) -> Result<Vec<unblock_model::LabelCount>, StorageError> {
+            self.inner.list_all_labels().await
+        }
+        async fn rename_label(
+            &self,
+            old: &str,
+            new: &str,
+            actor: &str,
+        ) -> Result<usize, StorageError> {
+            self.inner.rename_label(old, new, actor).await
+        }
+        async fn close_issues(
+            &self,
+            ids: &[String],
+            reason: &str,
+            actor: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            self.inner.close_issues(ids, reason, actor).await
         }
     }
 }

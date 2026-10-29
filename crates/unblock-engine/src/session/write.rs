@@ -119,7 +119,10 @@ impl Session {
     /// (`.write.lock` before the permit). On the in-memory path the storage guard is `None` (no file
     /// lock). A `.write.lock`-acquire timeout surfaces the transparent retryable
     /// `StorageError::DatabaseLocked` and drops the already-held permit (no leak).
-    async fn acquire(&self) -> Result<MutationGuard> {
+    ///
+    /// `pub(super)` since D56: the two `session/organization.rs` mutations (`rename_label`,
+    /// `close_eligible`) take the SAME permit + `.write.lock` path, never a copy of it.
+    pub(super) async fn acquire(&self) -> Result<MutationGuard> {
         let permit = acquire_write(&self.write_permit, &self.shutdown).await?;
         let lock = self.storage.acquire_write_lock().await?;
         Ok(MutationGuard::new(lock, permit))

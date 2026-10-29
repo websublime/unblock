@@ -221,6 +221,24 @@ impl Storage for WidenedStorage {
     async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
         self.inner.dangling_dependencies().await
     }
+
+    // D56 (FR-6 remainder): the catalog read and the two organization mutations — delegate.
+    async fn list_all_labels(&self) -> Result<Vec<unblock_model::LabelCount>, StorageError> {
+        self.inner.list_all_labels().await
+    }
+
+    async fn rename_label(&self, old: &str, new: &str, actor: &str) -> Result<usize, StorageError> {
+        self.inner.rename_label(old, new, actor).await
+    }
+
+    async fn close_issues(
+        &self,
+        ids: &[String],
+        reason: &str,
+        actor: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        self.inner.close_issues(ids, reason, actor).await
+    }
 }
 
 #[tokio::main]

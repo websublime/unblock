@@ -5,7 +5,7 @@ This workspace is tracked by **unblock**. Issue-data operations are exposed over
 `unblock` CLI is lifecycle/ops only.
 
 - Start the server: `unblock mcp` (MCP over stdio).
-- Contract: `unblock.mcp.v1.10`.
+- Contract: `unblock.mcp.v1.11`.
 - Machine-readable discovery: read `unblock://capabilities` (the source of these tables) and
 `unblock://schema` (the full JsonSchema bundle for every tool I/O).
 
@@ -15,10 +15,10 @@ Descriptors (from `unblock://capabilities`):
 
 | Tool | Description |
 |---|---|
-| `issue` | Create, show, update, close, reopen, delete, or restore issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
+| `issue` | Create, show, update, close, reopen, delete, restore, relabel, or close_eligible issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
 | `claim` | Atomically claim an issue for an assignee; the loser of a race is reported. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
 | `defer` | Defer an issue until a future timestamp, or undefer it. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
-| `query` | Query issues: list, ready, blocked, search, count, or stale. |
+| `query` | Query issues: list, ready, blocked, search, count, stale, labels, or epics. |
 | `dep` | Manage and query dependencies: add, remove, list, tree, cycles, or graph. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
 | `sync` | Export/import the issue store as JSONL, or one-shot import a bd export. |
 | `diagnostics` | Diagnostics: stats, info, where, version, lint, changelog, orphans, or dangling. |
@@ -40,6 +40,8 @@ Discriminant keys: `action` — `issue`, `defer`, `dep`, `sync`, `comment`; `kin
 | `issue` | `action: reopen` | `id` | `agent_name`, `harness`, `model` |
 | `issue` | `action: delete` | `ids` | `agent_name`, `harness`, `mode`, `model` |
 | `issue` | `action: restore` | `id` | `agent_name`, `harness`, `model` |
+| `issue` | `action: relabel` | `new_name`, `old_name` | `agent_name`, `harness`, `model` |
+| `issue` | `action: close_eligible` | — | `agent_name`, `dry_run`, `harness`, `model` |
 | `claim` | — | `assignee`, `id` | `agent_name`, `harness`, `model` |
 | `defer` | `action: defer` | `id`, `until` | `agent_name`, `harness`, `model` |
 | `defer` | `action: undefer` | `id` | `agent_name`, `harness`, `model` |
@@ -49,6 +51,8 @@ Discriminant keys: `action` — `issue`, `defer`, `dep`, `sync`, `comment`; `kin
 | `query` | `kind: search` | `query` | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
 | `query` | `kind: count` | — | `assignee`, `group_by`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
 | `query` | `kind: stale` | `older_than` | `assignee`, `include_closed`, `include_deferred`, `issue_type`, `labels_all`, `labels_any`, `limit`, `offset`, `priority_max`, `priority_min`, `status`, `text_contains` |
+| `query` | `kind: labels` | — | — |
+| `query` | `kind: epics` | — | `eligible_only`, `id` |
 | `dep` | `action: add` | `dep_type`, `depends_on_id`, `issue_id` | `agent_name`, `harness`, `metadata`, `model` |
 | `dep` | `action: remove` | `dep_type`, `depends_on_id`, `issue_id` | `agent_name`, `harness`, `model` |
 | `dep` | `action: list` | `id` | — |

@@ -68,7 +68,7 @@ use tokio::sync::Mutex;
 
 use unblock_model::{
     Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
-    Issue, ListFilters,
+    Issue, LabelCount, ListFilters,
 };
 
 use crate::error::{StorageError, is_busy_locked, map_libsql_err};
@@ -798,6 +798,27 @@ impl Storage for LibsqlStorage {
     async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
         diagnostics::dangling_dependencies(self.read()).await
     }
+
+    // --- organization (FR-6 remainder, D56; spine §3.2.1 "Organization (D56)") ---
+
+    async fn list_all_labels(&self) -> Result<Vec<LabelCount>, StorageError> {
+        query::list_all_labels(self.read()).await
+    }
+
+    async fn rename_label(&self, old: &str, new: &str, actor: &str) -> Result<usize, StorageError> {
+        let conn = self.write().await;
+        crud::rename_label(&conn, self.hook(), old, new, actor).await
+    }
+
+    async fn close_issues(
+        &self,
+        ids: &[String],
+        reason: &str,
+        actor: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let conn = self.write().await;
+        crud::close_issues(&conn, self.hook(), ids, reason, actor).await
+    }
 }
 
 #[cfg(test)]
@@ -1180,5 +1201,111 @@ mod tests {
                 expected: 2
             })
         ));
+    }
+
+    // --- organization (FR-6 remainder, D56) — libsql-side cells ------------------------------------
+    //
+    // The RAW `content_hash` cells live in the backend-independent contract suite
+    // (`contract_rename_label_pair`, `contract_close_issues_*`, via `testkit_raw_content_hash`).
+
+    /// A fresh, migrated in-memory store holding `ids`, each labelled `labels` (fixed epoch).
+    async fn organization_store(ids: &[&str], labels: &[&str]) -> LibsqlStorage {
+        use chrono::{TimeZone, Utc};
+        use unblock_model::Issue;
+
+        let storage = LibsqlStorage::open_in_memory().await.expect("open");
+        storage.migrate().await.expect("migrate");
+        for id in ids {
+            let issue = Issue {
+                id: (*id).to_string(),
+                title: (*id).to_string(),
+                created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                updated_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                labels: labels.iter().map(ToString::to_string).collect(),
+                ..Issue::default()
+            };
+            storage
+                .create_issue(&issue, "tester")
+                .await
+                .expect("create");
+        }
+        storage
+    }
+
+    /// D56 (f) ATOMIC RENAME: a rename across N issues returns N and commits exactly ONE transaction
+    /// (the store's committed-mutation counter). `old == new` opens none; a rename of a label no live
+    /// issue carries writes nothing, but its empty transaction still commits and so ticks the counter
+    /// (spine §3.2.1 "Organization (D56)" — no acceptance criterion counts on that path).
+    #[tokio::test]
+    async fn rename_label_commits_exactly_one_transaction() {
+        let storage = organization_store(&["ub-1", "ub-2", "ub-3"], &["old"]).await;
+
+        let before = storage.instrument().mutation_count();
+        assert_eq!(
+            storage.rename_label("old", "new", "tester").await.unwrap(),
+            3
+        );
+        assert_eq!(
+            storage.instrument().mutation_count() - before,
+            1,
+            "the whole rename is ONE committed transaction"
+        );
+
+        let before = storage.instrument().mutation_count();
+        assert_eq!(
+            storage.rename_label("new", "new", "tester").await.unwrap(),
+            0
+        );
+        assert_eq!(
+            storage.instrument().mutation_count(),
+            before,
+            "old == new opens no transaction"
+        );
+
+        let before = storage.instrument().mutation_count();
+        assert_eq!(
+            storage.rename_label("absent", "x", "tester").await.unwrap(),
+            0
+        );
+        assert_eq!(
+            storage.instrument().mutation_count() - before,
+            1,
+            "a missing label's empty transaction still commits"
+        );
+    }
+
+    /// D56 clause (5) SCALE (NFR-2): the rename's merge `DELETE` and rename `UPDATE` drive from
+    /// `idx_labels_label` and probe primary keys only — `EXPLAIN QUERY PLAN` (bundled `SQLite`) never
+    /// reports a `SCAN` of `issues` or `labels`, so their cost is proportional to the rows carrying
+    /// the label, not to the size of the store.
+    #[tokio::test]
+    async fn rename_statements_never_scan_issues() {
+        let storage = organization_store(&[], &[]).await;
+        for sql in [
+            super::crud::RENAME_MERGE_DELETE_SQL,
+            super::crud::RENAME_UPDATE_SQL,
+        ] {
+            let mut rows = storage
+                .read()
+                .query(
+                    &format!("EXPLAIN QUERY PLAN {sql}"),
+                    libsql::params!["old", "new"],
+                )
+                .await
+                .expect("explain");
+            let mut plan = Vec::new();
+            while let Some(row) = rows.next().await.expect("next") {
+                plan.push(row.get::<String>(3).expect("detail"));
+            }
+            assert!(
+                plan.iter()
+                    .any(|step| step.contains("USING INDEX idx_labels_label")),
+                "drives from idx_labels_label: {plan:?}"
+            );
+            assert!(
+                plan.iter().all(|step| !step.starts_with("SCAN")),
+                "no full scan: {plan:?}"
+            );
+        }
     }
 }

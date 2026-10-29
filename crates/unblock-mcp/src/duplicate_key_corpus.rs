@@ -311,6 +311,49 @@ pub const CELLS: &[FlipCell] = &[
         both_arms_schema_clean: true,
         shown_arm_mutates: false,
     },
+    // -- D56 (FR-6 remainder, v1.1) — the four arms appended to `issue` and `query` ------------
+    // `query`'s two new kinds accept the SAME (empty-required) field set, so a both-arms-clean tag
+    // flip covers both. `relabel` and `close_eligible` accept disjoint fields, so — like `comment`
+    // and `defer` above — each is covered by a schema-clean FIELD substitution instead.
+    FlipCell {
+        id: "T10 query{labels->epics}",
+        tool: "query",
+        arguments_text: r#"{"kind":"labels","kind":"epics"}"#,
+        shown: r#"{"kind":"labels"}"#,
+        hidden: r#"{"kind":"epics"}"#,
+        duplicated_key: "kind",
+        pointer: "/arguments",
+        kind: FlipKind::TagFlip,
+        both_arms_schema_clean: true,
+        shown_arm_mutates: false,
+    },
+    // The rename TARGET swapped: the text renames to `reviewed`, GA would have renamed to `rejected`.
+    FlipCell {
+        id: "S1 issue{relabel new_name substitution}",
+        tool: "issue",
+        arguments_text: r#"{"action":"relabel","old_name":"triage","new_name":"reviewed","new_name":"rejected"}"#,
+        shown: r#"{"action":"relabel","old_name":"triage","new_name":"reviewed"}"#,
+        hidden: r#"{"action":"relabel","old_name":"triage","new_name":"rejected"}"#,
+        duplicated_key: "new_name",
+        pointer: "/arguments",
+        kind: FlipKind::FieldSubstitution,
+        both_arms_schema_clean: true,
+        shown_arm_mutates: true,
+    },
+    // The blast-radius escalation: the text asks for the cascade PREVIEW, GA would have CLOSED every
+    // eligible epic.
+    FlipCell {
+        id: "S2 issue{close_eligible dry_run escalation}",
+        tool: "issue",
+        arguments_text: r#"{"action":"close_eligible","dry_run":true,"dry_run":false}"#,
+        shown: r#"{"action":"close_eligible","dry_run":true}"#,
+        hidden: r#"{"action":"close_eligible","dry_run":false}"#,
+        duplicated_key: "dry_run",
+        pointer: "/arguments",
+        kind: FlipKind::FieldSubstitution,
+        both_arms_schema_clean: true,
+        shown_arm_mutates: false,
+    },
 ];
 
 /// A `tools/call` frame with `arguments_text` spliced in VERBATIM (no serde on the payload).

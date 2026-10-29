@@ -740,7 +740,9 @@ impl UpdateBuilder {
 /// event — §3.2.1 table). It is patched **independently** of `status`: the `StatusChanged`/`Closed`
 /// audit event does **not** carry the reason in v1 (wiring it would couple the two independent patch
 /// fields through `append_event_in_tx`; deferred — the reason is still durably stored on the row).
-#[allow(clippy::too_many_lines)]
+///
+/// The in-transaction body is the shared [`apply_patch_in_tx`] — the SAME body
+/// [`close_issues`] runs per id (D56), never a second copy.
 pub(super) async fn update_issue(
     conn: &Connection,
     hook: WriteHook<'_>,
@@ -748,264 +750,19 @@ pub(super) async fn update_issue(
     patch: &crate::filters::IssuePatch,
     actor: &str,
 ) -> Result<Issue, StorageError> {
-    use unblock_model::{EventType, Status};
-
-    let patch = patch.clone();
-    let id_owned = id.to_string();
-    let actor = actor.to_string();
-
     with_immediate_tx(conn, hook, |tx| async move {
         // Load the current row inside the tx (TOCTOU-safe).
-        let sql = format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id = ?1");
-        let mut rows = tx
-            .query(&sql, libsql::params![id_owned.as_str()])
-            .await
-            .map_err(map_libsql_err)?;
-        let Some(row) = rows.next().await.map_err(map_libsql_err)? else {
-            return Err(StorageError::IssueNotFound { id: id_owned });
+        let Some(mut issue) = load_row_in_tx(&tx, id).await? else {
+            return Err(StorageError::IssueNotFound { id: id.to_string() });
         };
-        let mut issue = issue_from_row(&row)?;
-        drop(rows);
 
         // A tombstone cannot be patched (the original rejects this).
         if issue.is_tombstone() {
-            return Err(StorageError::IssueNotFound { id: id_owned });
+            return Err(StorageError::IssueNotFound { id: id.to_string() });
         }
 
-        // Seed the LABEL relation in-tx so `apply_labels` diffs against the labels the issue REALLY
-        // carries. `issue_from_row` projects the `issues` row ALONE, so without this the diff base is
-        // permanently EMPTY: a `labels_remove` removes from nothing, and a `labels_add`/`labels_set`
-        // naming an already-present label is seen as new and re-INSERTs it against the `labels`
-        // `(issue_id, label)` primary key. The remove is the SILENT one, and how much it swallows
-        // depends on the REST of the patch: in a label-ONLY patch the equal diff takes the empty-diff
-        // full skip, so the whole patch vanishes as a success (no event, no `updated_at`); in a MIXED
-        // patch the row UPDATE still runs and only the label op vanishes. The post-transaction
-        // hydrated re-read is what HID both: it returns a correct-looking label set either way.
-        //
-        // LABELS ONLY, deliberately — and the reason is narrower than "the only relation touched in
-        // this tx": `apply_reparent` diffs the parent-child edge in this same transaction, but it
-        // re-reads its OWN base from the tx (`existing_parent`, called below), so labels are the only
-        // relation whose diff base comes from the in-memory `Issue`. Dependencies/comments are never
-        // diffed here, and the post-tx re-read hydrates them. Placed AFTER the tombstone guard so the
-        // reject path pays for no extra query. Same shape and order as the read-path `hydrate`, read
-        // inside the tx exactly like the row load above (TOCTOU-safe).
-        //
-        // The `issue_id` scope is LOAD-BEARING, not incidental: a base polluted with another issue's
-        // labels re-creates this very defect (an add of a label some OTHER issue carries diffs equal
-        // and is skipped) and additionally invents `LabelRemoved` events for labels this issue never
-        // had. Pinned by `contract_label_diff_base_is_per_issue` (`crate::testkit`).
-        let mut label_rows = tx
-            .query(
-                "SELECT label FROM labels WHERE issue_id = ?1 ORDER BY label ASC",
-                libsql::params![id_owned.as_str()],
-            )
-            .await
-            .map_err(map_libsql_err)?;
-        let mut current_labels = Vec::new();
-        while let Some(row) = label_rows.next().await.map_err(map_libsql_err)? {
-            if let Value::Text(label) = row.get_value(0).map_err(map_libsql_err)? {
-                current_labels.push(label);
-            }
-        }
-        drop(label_rows);
-        issue.labels = current_labels;
-
-        let mut builder = UpdateBuilder::new();
-        // (event_type, old, new) tuples, appended after the row update succeeds.
-        let mut events: Vec<(EventType, Option<String>, Option<String>)> = Vec::new();
-
-        // --- title (NOT NULL): change -> Updated ---
-        if let Some(title) = patch.title.clone()
-            && title != issue.title
-        {
-            events.push((
-                EventType::Updated,
-                Some(issue.title.clone()),
-                Some(title.clone()),
-            ));
-            builder.push("title", Value::Text(title.clone()));
-            issue.title = title;
-        }
-
-        // --- body text fields (no event) ---
-        builder.push_opt_text("description", &patch.description, &mut issue.description);
-        builder.push_opt_text("design", &patch.design, &mut issue.design);
-        builder.push_opt_text(
-            "acceptance_criteria",
-            &patch.acceptance_criteria,
-            &mut issue.acceptance_criteria,
-        );
-        builder.push_opt_text("notes", &patch.notes, &mut issue.notes);
-        builder.push_opt_text("owner", &patch.owner, &mut issue.owner);
-        // close_reason: a `DEFAULT ''` body column (no event); the close path sets it (T1.2,
-        // spine §3.1). `Some(None)` clears to '' (→ None on load); `Some(Some(s))` sets it.
-        builder.push_opt_text("close_reason", &patch.close_reason, &mut issue.close_reason);
-
-        // --- external_ref (nullable, uniqueness-checked; no event) ---
-        if let Some(ext) = patch.external_ref.clone()
-            && ext != issue.external_ref
-        {
-            if let Some(ref ext_ref) = ext
-                && external_ref_taken(&tx, ext_ref, &id_owned).await?
-            {
-                return Err(StorageError::Backend {
-                    source: crate::error::BackendOpaque::from_message(format!(
-                        "external reference already exists: {ext_ref}"
-                    )),
-                });
-            }
-            builder.push("external_ref", ext.clone().map_or(Value::Null, Value::Text));
-            issue.external_ref = ext;
-        }
-
-        // --- status: change -> StatusChanged (+ Closed/Reopened/Deleted) ---
-        if let Some(status) = patch.status.clone() {
-            let old = issue.status.clone();
-            if status.as_str() != old.as_str() {
-                events.push((
-                    EventType::StatusChanged,
-                    Some(old.as_str().to_string()),
-                    Some(status.as_str().to_string()),
-                ));
-                builder.push("status", Value::Text(status.as_str().to_string()));
-
-                let was_terminal = old.is_terminal();
-                if status == Status::Closed {
-                    if !was_terminal {
-                        events.push((EventType::Closed, None, None));
-                    }
-                    if issue.closed_at.is_none() {
-                        let now = Utc::now();
-                        builder.push("closed_at", Value::Text(now.to_rfc3339()));
-                        issue.closed_at = Some(now);
-                    }
-                } else if status == Status::Tombstone {
-                    if !was_terminal {
-                        events.push((EventType::Deleted, None, None));
-                    }
-                    let now = Utc::now();
-                    builder.push("deleted_at", Value::Text(now.to_rfc3339()));
-                    builder.push("deleted_by", Value::Text(actor.clone()));
-                    issue.deleted_at = Some(now);
-                    issue.deleted_by = Some(actor.clone());
-                } else {
-                    if was_terminal && !status.is_terminal() {
-                        events.push((EventType::Reopened, None, None));
-                    }
-                    if issue.closed_at.is_some() {
-                        builder.push("closed_at", Value::Null);
-                        issue.closed_at = None;
-                    }
-                }
-                issue.status = status;
-            }
-        }
-
-        // --- priority: change -> PriorityChanged ---
-        if let Some(priority) = patch.priority
-            && priority.0 != issue.priority.0
-        {
-            events.push((
-                EventType::PriorityChanged,
-                Some(issue.priority.0.to_string()),
-                Some(priority.0.to_string()),
-            ));
-            builder.push("priority", Value::Integer(i64::from(priority.0)));
-            issue.priority = priority;
-        }
-
-        // --- issue_type (no event) ---
-        if let Some(it) = patch.issue_type.clone()
-            && it.as_str() != issue.issue_type.as_str()
-        {
-            builder.push("issue_type", Value::Text(it.as_str().to_string()));
-            issue.issue_type = it;
-        }
-
-        // --- assignee: change -> AssigneeChanged ---
-        if let Some(assignee) = patch.assignee.clone()
-            && assignee != issue.assignee
-        {
-            events.push((
-                EventType::AssigneeChanged,
-                issue.assignee.clone(),
-                assignee.clone(),
-            ));
-            builder.push(
-                "assignee",
-                assignee.clone().map_or(Value::Null, Value::Text),
-            );
-            issue.assignee = assignee;
-        }
-
-        // --- estimated_minutes (scalar; no event) ---
-        if let Some(minutes) = patch.estimated_minutes
-            && Some(minutes) != issue.estimated_minutes
-        {
-            builder.push("estimated_minutes", Value::Integer(i64::from(minutes)));
-            issue.estimated_minutes = Some(minutes);
-        }
-
-        // --- due_at (scalar; no event) ---
-        if let Some(due) = patch.due_at
-            && Some(due) != issue.due_at
-        {
-            builder.push("due_at", Value::Text(due.to_rfc3339()));
-            issue.due_at = Some(due);
-        }
-
-        // --- label relation ops (LabelAdded/LabelRemoved) ---
-        let label_changed = apply_labels(&tx, &id_owned, &actor, &patch, &mut issue).await?;
-
-        // --- reparent (cycle-checked) ---
-        // A real reparent emits DependencyRemoved/DependencyAdded into `events` and advances
-        // `updated_at` (FR-1b) even when no row column otherwise changed.
-        let parent_changed = apply_reparent(&tx, &id_owned, &patch, &actor, &mut events).await?;
-
-        // Empty diff: nothing in the row, no relation change -> full skip (no updated_at, no event).
-        if builder.is_empty() && !label_changed && !parent_changed {
-            return Ok((issue, tx));
-        }
-
-        // A row column changed, OR a real reparent occurred, OR a real label change occurred ->
-        // advance updated_at. A RELATION-only change with no other row change still stamps
-        // `updated_at` so the modification is observable: the reparent arm is FR-1b, and the label arm
-        // rides the same rule (spine §3.2.1 `update_issue` names both exceptions). `content_hash`
-        // excludes `updated_at` + relations (spine §1.8), so the recompute on a pure-relation change is
-        // a no-op against the stored hash (parent/deps/labels are not hashed).
-        if !builder.is_empty() || parent_changed || label_changed {
-            let now = Utc::now();
-            issue.updated_at = now;
-            builder.push("updated_at", Value::Text(now.to_rfc3339()));
-            let new_hash = issue.compute_content_hash();
-            builder.push("content_hash", Value::Text(new_hash));
-
-            let where_idx = builder.params.len() + 1;
-            builder.params.push(Value::Text(id_owned.clone()));
-            let update_sql = format!(
-                "UPDATE issues SET {} WHERE id = ?{where_idx}",
-                builder.set.join(", ")
-            );
-            tx.execute(&update_sql, params_from_iter(builder.params))
-                .await
-                .map_err(map_libsql_err)?;
-        }
-
-        // Append the per-field events after the successful row update.
-        for (event_type, old, new) in &events {
-            append_event_in_tx(
-                &tx,
-                &id_owned,
-                event_type,
-                &actor,
-                old.as_deref(),
-                new.as_deref(),
-                None,
-            )
-            .await?;
-        }
-
-        Ok((issue, tx))
+        apply_patch_in_tx(&tx, id, &mut issue, patch, actor).await?;
+        Ok(((), tx))
     })
     .await?;
 
@@ -1013,6 +770,454 @@ pub(super) async fn update_issue(
     get_issue(conn, id)
         .await?
         .ok_or_else(|| StorageError::IssueNotFound { id: id.to_string() })
+}
+
+/// Load the `issues` row for `id` inside `tx` (TOCTOU-safe), or `None` when no row exists.
+///
+/// Projects the `issues` row ALONE (no relation hydration) — the shape both [`update_issue`] and
+/// [`close_issues`] guard on before running [`apply_patch_in_tx`].
+async fn load_row_in_tx(tx: &libsql::Transaction, id: &str) -> Result<Option<Issue>, StorageError> {
+    let sql = format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id = ?1");
+    let mut rows = tx
+        .query(&sql, libsql::params![id])
+        .await
+        .map_err(map_libsql_err)?;
+    match rows.next().await.map_err(map_libsql_err)? {
+        Some(row) => Ok(Some(issue_from_row(&row)?)),
+        None => Ok(None),
+    }
+}
+
+/// The ONE shared in-transaction patch body (spine §3.2.1 `update_issue`; D56 `close_issues`).
+///
+/// `issue` is the row of `id` the caller has JUST loaded in `tx` (via [`load_row_in_tx`]) and
+/// guarded (it exists and is not a tombstone). Seeds the label diff base, builds the `SET` clause,
+/// applies the label and reparent relations, advances `updated_at` + recomputes `content_hash` when
+/// anything changed, and appends the per-field events — all inside `tx`. An empty diff writes
+/// nothing.
+#[allow(clippy::too_many_lines)]
+async fn apply_patch_in_tx(
+    tx: &libsql::Transaction,
+    id: &str,
+    issue: &mut Issue,
+    patch: &crate::filters::IssuePatch,
+    actor: &str,
+) -> Result<(), StorageError> {
+    use unblock_model::{EventType, Status};
+
+    // Seed the LABEL relation in-tx so `apply_labels` diffs against the labels the issue REALLY
+    // carries. `issue_from_row` projects the `issues` row ALONE, so without this the diff base is
+    // permanently EMPTY: a `labels_remove` removes from nothing, and a `labels_add`/`labels_set`
+    // naming an already-present label is seen as new and re-INSERTs it against the `labels`
+    // `(issue_id, label)` primary key. The remove is the SILENT one, and how much it swallows
+    // depends on the REST of the patch: in a label-ONLY patch the equal diff takes the empty-diff
+    // full skip, so the whole patch vanishes as a success (no event, no `updated_at`); in a MIXED
+    // patch the row UPDATE still runs and only the label op vanishes. The post-transaction
+    // hydrated re-read is what HID both: it returns a correct-looking label set either way.
+    //
+    // LABELS ONLY, deliberately — and the reason is narrower than "the only relation touched in
+    // this tx": `apply_reparent` diffs the parent-child edge in this same transaction, but it
+    // re-reads its OWN base from the tx (`existing_parent`, called below), so labels are the only
+    // relation whose diff base comes from the in-memory `Issue`. Dependencies/comments are never
+    // diffed here, and the post-tx re-read hydrates them. Placed AFTER the caller's tombstone guard
+    // so the reject path pays for no extra query. Same shape and order as the read-path `hydrate`,
+    // read inside the tx exactly like the caller's `load_row_in_tx` row load (TOCTOU-safe).
+    //
+    // The `issue_id` scope is LOAD-BEARING, not incidental: a base polluted with another issue's
+    // labels re-creates this very defect (an add of a label some OTHER issue carries diffs equal
+    // and is skipped) and additionally invents `LabelRemoved` events for labels this issue never
+    // had. Pinned by `contract_label_diff_base_is_per_issue` (`crate::testkit`).
+    let mut label_rows = tx
+        .query(
+            "SELECT label FROM labels WHERE issue_id = ?1 ORDER BY label ASC",
+            libsql::params![id],
+        )
+        .await
+        .map_err(map_libsql_err)?;
+    let mut current_labels = Vec::new();
+    while let Some(row) = label_rows.next().await.map_err(map_libsql_err)? {
+        if let Value::Text(label) = row.get_value(0).map_err(map_libsql_err)? {
+            current_labels.push(label);
+        }
+    }
+    drop(label_rows);
+    issue.labels = current_labels;
+
+    let mut builder = UpdateBuilder::new();
+    // (event_type, old, new) tuples, appended after the row update succeeds.
+    let mut events: Vec<(EventType, Option<String>, Option<String>)> = Vec::new();
+
+    // --- title (NOT NULL): change -> Updated ---
+    if let Some(title) = patch.title.clone()
+        && title != issue.title
+    {
+        events.push((
+            EventType::Updated,
+            Some(issue.title.clone()),
+            Some(title.clone()),
+        ));
+        builder.push("title", Value::Text(title.clone()));
+        issue.title = title;
+    }
+
+    // --- body text fields (no event) ---
+    builder.push_opt_text("description", &patch.description, &mut issue.description);
+    builder.push_opt_text("design", &patch.design, &mut issue.design);
+    builder.push_opt_text(
+        "acceptance_criteria",
+        &patch.acceptance_criteria,
+        &mut issue.acceptance_criteria,
+    );
+    builder.push_opt_text("notes", &patch.notes, &mut issue.notes);
+    builder.push_opt_text("owner", &patch.owner, &mut issue.owner);
+    // close_reason: a `DEFAULT ''` body column (no event); the close path sets it (T1.2,
+    // spine §3.1). `Some(None)` clears to '' (→ None on load); `Some(Some(s))` sets it.
+    builder.push_opt_text("close_reason", &patch.close_reason, &mut issue.close_reason);
+
+    // --- external_ref (nullable, uniqueness-checked; no event) ---
+    if let Some(ext) = patch.external_ref.clone()
+        && ext != issue.external_ref
+    {
+        if let Some(ext_ref) = &ext
+            && external_ref_taken(tx, ext_ref, id).await?
+        {
+            return Err(StorageError::Backend {
+                source: crate::error::BackendOpaque::from_message(format!(
+                    "external reference already exists: {ext_ref}"
+                )),
+            });
+        }
+        builder.push("external_ref", ext.clone().map_or(Value::Null, Value::Text));
+        issue.external_ref = ext;
+    }
+
+    // --- status: change -> StatusChanged (+ Closed/Reopened/Deleted) ---
+    if let Some(status) = patch.status.clone() {
+        let old = issue.status.clone();
+        if status.as_str() != old.as_str() {
+            events.push((
+                EventType::StatusChanged,
+                Some(old.as_str().to_string()),
+                Some(status.as_str().to_string()),
+            ));
+            builder.push("status", Value::Text(status.as_str().to_string()));
+
+            let was_terminal = old.is_terminal();
+            if status == Status::Closed {
+                if !was_terminal {
+                    events.push((EventType::Closed, None, None));
+                }
+                if issue.closed_at.is_none() {
+                    let now = Utc::now();
+                    builder.push("closed_at", Value::Text(now.to_rfc3339()));
+                    issue.closed_at = Some(now);
+                }
+            } else if status == Status::Tombstone {
+                if !was_terminal {
+                    events.push((EventType::Deleted, None, None));
+                }
+                let now = Utc::now();
+                builder.push("deleted_at", Value::Text(now.to_rfc3339()));
+                builder.push("deleted_by", Value::Text(actor.to_string()));
+                issue.deleted_at = Some(now);
+                issue.deleted_by = Some(actor.to_string());
+            } else {
+                if was_terminal && !status.is_terminal() {
+                    events.push((EventType::Reopened, None, None));
+                }
+                if issue.closed_at.is_some() {
+                    builder.push("closed_at", Value::Null);
+                    issue.closed_at = None;
+                }
+            }
+            issue.status = status;
+        }
+    }
+
+    // --- priority: change -> PriorityChanged ---
+    if let Some(priority) = patch.priority
+        && priority.0 != issue.priority.0
+    {
+        events.push((
+            EventType::PriorityChanged,
+            Some(issue.priority.0.to_string()),
+            Some(priority.0.to_string()),
+        ));
+        builder.push("priority", Value::Integer(i64::from(priority.0)));
+        issue.priority = priority;
+    }
+
+    // --- issue_type (no event) ---
+    if let Some(it) = patch.issue_type.clone()
+        && it.as_str() != issue.issue_type.as_str()
+    {
+        builder.push("issue_type", Value::Text(it.as_str().to_string()));
+        issue.issue_type = it;
+    }
+
+    // --- assignee: change -> AssigneeChanged ---
+    if let Some(assignee) = patch.assignee.clone()
+        && assignee != issue.assignee
+    {
+        events.push((
+            EventType::AssigneeChanged,
+            issue.assignee.clone(),
+            assignee.clone(),
+        ));
+        builder.push(
+            "assignee",
+            assignee.clone().map_or(Value::Null, Value::Text),
+        );
+        issue.assignee = assignee;
+    }
+
+    // --- estimated_minutes (scalar; no event) ---
+    if let Some(minutes) = patch.estimated_minutes
+        && Some(minutes) != issue.estimated_minutes
+    {
+        builder.push("estimated_minutes", Value::Integer(i64::from(minutes)));
+        issue.estimated_minutes = Some(minutes);
+    }
+
+    // --- due_at (scalar; no event) ---
+    if let Some(due) = patch.due_at
+        && Some(due) != issue.due_at
+    {
+        builder.push("due_at", Value::Text(due.to_rfc3339()));
+        issue.due_at = Some(due);
+    }
+
+    // --- label relation ops (LabelAdded/LabelRemoved) ---
+    let label_changed = apply_labels(tx, id, actor, patch, issue).await?;
+
+    // --- reparent (cycle-checked) ---
+    // A real reparent emits DependencyRemoved/DependencyAdded into `events` and advances
+    // `updated_at` (FR-1b) even when no row column otherwise changed.
+    let parent_changed = apply_reparent(tx, id, patch, actor, &mut events).await?;
+
+    // Empty diff: nothing in the row, no relation change -> full skip (no updated_at, no event).
+    if builder.is_empty() && !label_changed && !parent_changed {
+        return Ok(());
+    }
+
+    // A row column changed, OR a real reparent occurred, OR a real label change occurred ->
+    // advance updated_at. A RELATION-only change with no other row change still stamps
+    // `updated_at` so the modification is observable: the reparent arm is FR-1b, and the label arm
+    // rides the same rule (spine §3.2.1 `update_issue` names both exceptions). `content_hash`
+    // excludes `updated_at` + relations (spine §1.8), so the recompute on a pure-relation change is
+    // a no-op against the stored hash (parent/deps/labels are not hashed).
+    if !builder.is_empty() || parent_changed || label_changed {
+        let now = Utc::now();
+        issue.updated_at = now;
+        builder.push("updated_at", Value::Text(now.to_rfc3339()));
+        let new_hash = issue.compute_content_hash();
+        builder.push("content_hash", Value::Text(new_hash));
+
+        let where_idx = builder.params.len() + 1;
+        builder.params.push(Value::Text(id.to_string()));
+        let update_sql = format!(
+            "UPDATE issues SET {} WHERE id = ?{where_idx}",
+            builder.set.join(", ")
+        );
+        tx.execute(&update_sql, params_from_iter(builder.params))
+            .await
+            .map_err(map_libsql_err)?;
+    }
+
+    // Append the per-field events after the successful row update.
+    for (event_type, old, new) in &events {
+        append_event_in_tx(
+            tx,
+            id,
+            event_type,
+            actor,
+            old.as_deref(),
+            new.as_deref(),
+            None,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Close `ids` in the GIVEN order inside ONE `BEGIN IMMEDIATE` (D56 clause (4), spine §3.2.1
+/// "Organization (D56)"), returning the ids actually closed, in that order.
+///
+/// Per id the row is loaded ONCE in the transaction ([`load_row_in_tx`]): a MISSING id fails
+/// `IssueNotFound`, which rolls back the WHOLE batch — closes already made in this transaction
+/// included (D44 one-transaction invariant, spine §4.2). A row already `closed` or `tombstone` is
+/// SKIPPED UNTOUCHED by an explicit guard and is absent from the result. The guard is load-bearing:
+/// the shared body would otherwise rewrite a differing `close_reason` (`push_opt_text`) and so
+/// advance `updated_at` and rewrite the row. Every other id runs the SAME in-transaction body
+/// [`update_issue`] runs ([`apply_patch_in_tx`], never a second copy) with `{status: Closed,
+/// close_reason: Some(Some(reason))}` — `closed_at` derived, `close_reason` persisted, `updated_at`
+/// advanced, `content_hash` recomputed, `StatusChanged(old → closed)` then `Closed` appended.
+pub(super) async fn close_issues(
+    conn: &Connection,
+    hook: WriteHook<'_>,
+    ids: &[String],
+    reason: &str,
+    actor: &str,
+) -> Result<Vec<String>, StorageError> {
+    use unblock_model::Status;
+
+    let patch = crate::filters::IssuePatch {
+        status: Some(Status::Closed),
+        close_reason: Some(Some(reason.to_string())),
+        ..crate::filters::IssuePatch::default()
+    };
+
+    with_immediate_tx(conn, hook, |tx| async move {
+        let mut closed = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(mut issue) = load_row_in_tx(&tx, id).await? else {
+                return Err(StorageError::IssueNotFound { id: id.clone() });
+            };
+            // The explicit SKIP guard: an already-closed or tombstoned row is left untouched.
+            if issue.status.is_terminal() {
+                continue;
+            }
+            apply_patch_in_tx(&tx, id, &mut issue, &patch, actor).await?;
+            closed.push(id.clone());
+        }
+        Ok((closed, tx))
+    })
+    .await
+}
+
+/// The rename's MERGE `DELETE` (D56 clause (5) step (2)): the `old` row of every NON-tombstoned
+/// issue that ALSO carries `new` (`?1` = old, `?2` = new).
+///
+/// Both filters are CORRELATED `EXISTS` subqueries keyed on the candidate row's `issue_id`, so the
+/// plan drives from `idx_labels_label` (`label = ?1`) and probes the `labels` and `issues` primary
+/// keys per candidate — cost proportional to the rows carrying `old`, never a scan of `issues`
+/// (an uncorrelated `issue_id IN (SELECT id FROM issues WHERE status != 'tombstone')` materializes
+/// every live issue id). Pinned by `rename_statements_never_scan_issues` (`libsql::tests`).
+pub(super) const RENAME_MERGE_DELETE_SQL: &str = "DELETE FROM labels WHERE label = ?1 \
+     AND EXISTS (SELECT 1 FROM labels n WHERE n.issue_id = labels.issue_id AND n.label = ?2) \
+     AND EXISTS (SELECT 1 FROM issues i WHERE i.id = labels.issue_id AND i.status != 'tombstone')";
+
+/// The rename's `UPDATE` (D56 clause (5) step (3)): every remaining NON-tombstoned `old` row
+/// becomes `new` (`?1` = old, `?2` = new). Same correlated-`EXISTS` shape as
+/// [`RENAME_MERGE_DELETE_SQL`], for the same reason.
+pub(super) const RENAME_UPDATE_SQL: &str = "UPDATE labels SET label = ?2 WHERE label = ?1 \
+     AND EXISTS (SELECT 1 FROM issues i WHERE i.id = labels.issue_id AND i.status != 'tombstone')";
+
+/// Rename the label `old` to `new` on every NON-tombstoned issue carrying it, inside ONE
+/// `BEGIN IMMEDIATE` (D56 clause (5), spine §3.2.1 "Organization (D56)"). Returns the number of
+/// AFFECTED (merged + renamed) issues.
+///
+/// `old == new` → `Ok(0)` with no transaction. Otherwise, in this order: (1) read the AFFECTED ids
+/// (every non-tombstoned issue carrying `old`) and, of those, the MERGED ids (that ALSO carry
+/// `new`), both `ORDER BY issue_id` and each binding only `old`/`new`; (2) the merge `DELETE` of the
+/// merged issues' `old` rows FIRST, so (3) the rename `UPDATE` can never hit the `(issue_id, label)`
+/// primary key; (4) per affected id, in id order: `LabelRemoved(old_value = old)`, then — for a
+/// non-merged id only — `LabelAdded(new_value = new)`, then `updated_at = now`.
+///
+/// **SCALE (NFR-2):** steps (2)-(3) select their rows by SUBQUERY and never bind a list of issue ids,
+/// and every step-(4) statement binds a fixed handful of parameters, so a label carried by hundreds
+/// of thousands of issues never meets `SQLite`'s bound-parameter limit (the constraint
+/// [`HYDRATE_ID_CHUNK`] exists for); the cost is O(affected) statements in the one transaction.
+/// `content_hash` is NOT rewritten (labels are outside it, spine §1.8). No statement ignores a
+/// conflict: the strict `labels` primary key stays the loud tripwire of spine §3.2.1. An `old` no
+/// live issue carries writes no row and no event; its empty transaction still commits.
+pub(super) async fn rename_label(
+    conn: &Connection,
+    hook: WriteHook<'_>,
+    old: &str,
+    new: &str,
+    actor: &str,
+) -> Result<usize, StorageError> {
+    use unblock_model::EventType;
+
+    if old == new {
+        return Ok(0);
+    }
+
+    with_immediate_tx(conn, hook, |tx| async move {
+        // (1) AFFECTED and MERGED, both id-ordered so the per-issue walk below merge-joins them.
+        let affected = select_ids_in_tx(
+            &tx,
+            "SELECT l.issue_id FROM labels l JOIN issues i ON i.id = l.issue_id \
+             WHERE l.label = ?1 AND i.status != 'tombstone' ORDER BY l.issue_id ASC",
+            libsql::params![old],
+        )
+        .await?;
+        let merged = select_ids_in_tx(
+            &tx,
+            "SELECT l.issue_id FROM labels l \
+             JOIN labels n ON n.issue_id = l.issue_id AND n.label = ?2 \
+             JOIN issues i ON i.id = l.issue_id \
+             WHERE l.label = ?1 AND i.status != 'tombstone' ORDER BY l.issue_id ASC",
+            libsql::params![old, new],
+        )
+        .await?;
+
+        // (2) MERGE: delete the `old` row of every live issue that already carries `new` — FIRST.
+        tx.execute(RENAME_MERGE_DELETE_SQL, libsql::params![old, new])
+            .await
+            .map_err(map_libsql_err)?;
+
+        // (3) RENAME the remaining live `old` rows.
+        tx.execute(RENAME_UPDATE_SQL, libsql::params![old, new])
+            .await
+            .map_err(map_libsql_err)?;
+
+        // (4) Per affected id, in id order: the value-carrying event pair (merged: the remove only),
+        // then `updated_at`.
+        let now = Utc::now().to_rfc3339();
+        let mut merged_iter = merged.iter().peekable();
+        for id in &affected {
+            let is_merged = merged_iter.next_if(|m| *m == id).is_some();
+            append_event_in_tx(
+                &tx,
+                id,
+                &EventType::LabelRemoved,
+                actor,
+                Some(old),
+                None,
+                None,
+            )
+            .await?;
+            if !is_merged {
+                append_event_in_tx(
+                    &tx,
+                    id,
+                    &EventType::LabelAdded,
+                    actor,
+                    None,
+                    Some(new),
+                    None,
+                )
+                .await?;
+            }
+            tx.execute(
+                "UPDATE issues SET updated_at = ?1 WHERE id = ?2",
+                libsql::params![now.as_str(), id.as_str()],
+            )
+            .await
+            .map_err(map_libsql_err)?;
+        }
+        Ok((affected.len(), tx))
+    })
+    .await
+}
+
+/// Stream the first (text) column of `sql` inside `tx` into an id list, in the query's order.
+async fn select_ids_in_tx(
+    tx: &libsql::Transaction,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<Vec<String>, StorageError> {
+    let mut rows = tx.query(sql, params).await.map_err(map_libsql_err)?;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+        if let Value::Text(id) = row.get_value(0).map_err(map_libsql_err)? {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
 }
 
 /// Whether `external_ref` is held by some **other** issue.

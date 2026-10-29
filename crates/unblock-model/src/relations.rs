@@ -104,15 +104,25 @@ pub struct Event {
 }
 
 /// Epic completion status with child counts (spine §1.7; derived rollup, populated v1.1).
+//
+// D56 (FR-6, v1.1): POPULATED by `query kind: epics` (`Session::epic_statuses`). The shape and the
+// `///` lines (schema descriptions — contract bytes, so this type's model schema golden does not
+// move) are UNCHANGED; only the field semantics below are pinned. The counts come from the D26
+// primitive `Storage::epic_child_rollup`, reused, never re-derived.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct EpicStatus {
     /// The epic issue.
+    // D56: the FULL hydrated `Issue` (bd parity), never a bare id (PRD §7 corrected by D56).
     pub epic: Issue,
     /// Total number of child issues.
+    // D56: issues holding a `parent-child` edge to the epic, row present, NOT templates.
     pub total_children: usize,
     /// Number of closed child issues.
+    // D56: of those, status `closed` OR `tombstone` (a tombstoned child counts as closed).
     pub closed_children: usize,
     /// Whether the epic is eligible to be closed.
+    // D56: the ONE shared engine predicate, `unblock-engine` `epic::is_eligible_for_close`
+    // (single-pass: a parent whose last open child is an eligible epic reads `false` here).
     pub eligible_for_close: bool,
 }
 

@@ -318,4 +318,26 @@ impl Storage for FakeStorage {
         });
         Ok(out)
     }
+
+    // D56 (FR-6 remainder): sync never drives the label catalog, the rename or the epic close —
+    // this file's `unimplemented!()` idiom for a method sync never calls.
+    async fn list_all_labels(&self) -> Result<Vec<unblock_model::LabelCount>, StorageError> {
+        unimplemented!("FakeStorage::list_all_labels")
+    }
+    async fn rename_label(
+        &self,
+        _old: &str,
+        _new: &str,
+        _actor: &str,
+    ) -> Result<usize, StorageError> {
+        unimplemented!("FakeStorage::rename_label")
+    }
+    async fn close_issues(
+        &self,
+        _ids: &[String],
+        _reason: &str,
+        _actor: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        unimplemented!("FakeStorage::close_issues")
+    }
 }
