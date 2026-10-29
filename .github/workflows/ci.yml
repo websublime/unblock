@@ -423,6 +423,18 @@ jobs:
       # the contract version standing UNMOVED. Positive-only by design. Specified in
       # ci-cd-and-distribution.md §2.1 (the D55 sub-check).
       - run: scripts/checks/d55-update-refusal-claims.sh
+      # D56 (`ub-lp9.1`) required landings: the FR-6 remainder — label rename and catalog, the epic
+      # rollup read and the explicit close of eligible epics. Every behaviour is a cell; this step
+      # asserts the positive: the model results, the Storage trait methods, the shared epic predicate and
+      # cascade with the stats call, the four Session methods, the four input and four output arms and
+      # both description twins on their production lines, no code line under libsql spelling OR IGNORE,
+      # every contract, libsql and organization_ cell on its own declaration with every contract cell
+      # registered, the tracker id, the PRD row and its notes, the spine, the crate plans, both
+      # roadmaps, README, the task, the retargeted sibling rows, this gate's own wiring, the live
+      # contract id, and the live D-range at every prose site and every SIBLING script's knob —
+      # including `d55`'s two. Positive-only by design, save one negative row. Specified in
+      # ci-cd-and-distribution.md §2.1 (the D56 sub-check).
+      - run: scripts/checks/d56-organization-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
