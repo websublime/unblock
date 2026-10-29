@@ -536,7 +536,7 @@ shape (only additive `contract_version` bumps).
 ### Lands (FRs)
 | FR | Capability | Crates |
 |---|---|---|
-| FR-6 | **Organization (v1.1 remainder):** labels (rename/list-all), epic rollups + auto-close-eligibility. *(**Comments graduated to v1 — D37**: FLAT full-CRUD comments — add/list/update/delete — over the dedicated `comment` tool, landing at T3.9 and HOLDING the `v1.0.0` GA tag; NOT the "threaded (add/list)" v1.1 sketch.)* | model, storage, engine, mcp |
+| FR-6 | **Organization (v1.1 remainder):** labels (rename/list-all), epic rollups + auto-close-eligibility. **[D56]** Specified by PRD §4 D56 (`ub-lp9.1`, implementation-plan T4.1): `issue relabel`, `query labels`, `query epics` and an explicit, `dry_run`-able `issue close_eligible` that cascades through nested epics — four arms on existing tools, one contract bump `unblock.mcp.v1.10` → `unblock.mcp.v1.11`; nothing closes automatically. *(**Comments graduated to v1 — D37**: FLAT full-CRUD comments — add/list/update/delete — over the dedicated `comment` tool, landing at T3.9 and HOLDING the `v1.0.0` GA tag; NOT the "threaded (add/list)" v1.1 sketch.)* | model, storage, engine, mcp |
 | FR-1c (D20 seams) | **Restore extensions:** cascade-restore (needs a delete-batch identity to avoid over-reviving independently-tombstoned children) + TTL-refusal of expired tombstones (`deletions_retention_days`, reserved/unenforced in v1) | model, storage, engine, mcp |
 | FR-18 | **Swarm coordination diagnostics:** `scheduler` (ranked, explainable `unblock.scheduler.v1`); `coordination status` (`unblock.coordination.v1`, read-only stale-claim diagnosis). Purely DB-state-derived (Agent Mail dropped, PRD §12) | policy, engine, mcp |
 | FR-19 | **Workflow gates:** policy-driven (`.unblock/policy.toml`) transition gates (ci_green / min_reviewers / security_sign_off) | policy, config, engine, mcp |
@@ -550,8 +550,10 @@ shape (only additive `contract_version` bumps).
 
 ### Crates touched
 Primarily `unblock-policy`, `unblock-health`, `unblock-config`, `unblock-engine`, `unblock-mcp`,
-`unblock-render`, `unblock-cli`. MCP surface grows: tools/resources for
-labels/comments, scheduler, coordination, gates, saved-queries (plan §6).
+`unblock-render`, `unblock-cli`. MCP surface grows by DISCRIMINATOR ARMS on the existing eight tools, never a
+ninth (RK-3, spine §6.6) — scheduler, coordination, gates, saved-queries (plan §6). **[D56]** Labels and epic
+rollups are the `issue` actions `relabel`/`close_eligible` and the `query` kinds `labels`/`epics`; comments
+already shipped in v1 as the 8th tool (D37). `unblock-render` needs no FR-6 work (D56 clause (8)).
 
 ---
 
@@ -789,6 +791,11 @@ answered here.
    carries a placement constraint. The doctor body is pure, non-async and storage-free under D29, so a network
    probe cannot live inside `unblock-health` and must arrive as data from the engine, the way integrity-check
    rows already do.
+7. **`close_eligible` has no cross-process guard in remote mode (PRD §4 D56 clause (4)).** Local mode computes
+   the nested-epic cascade and commits it under the `.write.lock`; remote mode has no such lock, so a child
+   reopened by another process between compute and commit can let an epic close with an open child, and the
+   close succeeds silently. The lock decides the remote-mode serialization this needs (for example
+   re-checking eligibility inside the transaction).
 
 ---
 

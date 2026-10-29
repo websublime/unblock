@@ -242,12 +242,14 @@ pub struct Event {                         // append-only audit; written transac
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
-pub struct EpicStatus {                    // [v1.1] derived rollup
-    pub epic: Issue,
-    pub total_children: usize,
-    pub closed_children: usize,
-    pub eligible_for_close: bool,
+pub struct EpicStatus {                    // [v1.1] derived rollup — POPULATED by D56 (`query kind: epics`, §4.1 `epic_statuses`)
+    pub epic: Issue,                       // the FULL hydrated issue (bd parity), never a bare id (PRD §7 corrected by D56)
+    pub total_children: usize,             // issues holding a `parent-child` edge to the epic, row present, NOT templates
+    pub closed_children: usize,            // of those, status `closed` OR `tombstone` (a tombstoned child counts as closed)
+    pub eligible_for_close: bool,          // the ONE shared engine predicate (§4.1 `epic::is_eligible_for_close`, D56 clause (2))
 }
+// D56: the shape is UNCHANGED (its model schema golden does not move); only the field semantics above are pinned.
+// The counts come from the D26 primitive `Storage::epic_child_rollup` (§3.2), reused, never re-derived.
 ```
 
 ### 1.8 content_hash / sync_equals / tombstone semantics (normative)
@@ -413,6 +415,18 @@ pub struct CloseOutcome  { pub closed: Issue, pub newly_unblocked: Vec<Issue> }
 pub struct ImportReport  { pub imported: usize, pub skipped: usize, pub dependencies: usize, pub comments: usize, pub dropped_fields: Vec<String> }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct ExportReport  { pub written: usize, pub path: PathBuf } // PathBuf: JsonSchema = string
+
+// --- FR-6 remainder (D56, v1.1) — label catalog / rename / close-eligible results; all reach L7 (§5.3) ---
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct LabelCount  { pub label: String, pub count: usize }   // `query kind: labels` row; count over NON-tombstoned issues, any status
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct LabelRename { pub old_name: String, pub new_name: String, pub affected_issues: usize } // `issue relabel`; merged + renamed issues
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct CloseEligibleOutcome { pub epic_ids: Vec<String>, pub count: usize, pub dry_run: bool }
+// `issue close_eligible`: `epic_ids` = the cascade close set in close order (by cascade round, then id ASC within a
+// round — child before parent): the ids actually closed, or with `dry_run:true` the ids that WOULD close;
+// `count == epic_ids.len()`. NOT bd's `closed` key: `issue close` already returns `closed` as an `Issue` inside the
+// same untagged `IssueOutput` union (§5.3), and one key with two types would make the wire ambiguous (D56 clause (4)).
 
 // --- diagnostics (CF-B: defined normatively here; referenced by engine/render/mcp) ---
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1079,6 +1093,26 @@ pub trait Storage: Send + Sync {
     //  which maps to the SAME ErrorCode::IssueNotFound at L7 — the StorageError level names the missing entity
     //  honestly; the ErrorCode taxonomy does not grow (FORK-E1). author threaded for the in-tx Event
     //  (bd parity — the import/seed path carries comment.author; the engine passes author = self.actor, FORK-M1b).
+
+    // --- organization (FR-6 remainder, D56, v1.1). ALL TWELVE `impl Storage` blocks gain all three, with NO default
+    //     body (NoopStorage, LibsqlStorage; engine ParkedStorage/CollisionForcer/RaceInjector/WidenedStorage; mcp
+    //     RecordingStorage/GateStorage/FailListStorage; sync testutil FakeStorage, tests FakeStorage, StorageInjector —
+    //     the `epic_child_rollup`/`dangling_dependencies` enumerate-by-impl-SITE cost). `RecordingStorage` is the mcp
+    //     zero-write spy, so its `rename_label`/`close_issues` delegations MUST call `record()`. Plus NFR-16 contract cells in `crates/unblock-storage/src/testkit.rs`. The epic rollup READ adds NO
+    //     method: it reuses `epic_child_rollup()` below (D56 clause (2)). Semantics: §3.2.1 "Organization (D56)". ---
+    async fn list_all_labels(&self) -> Result<Vec<LabelCount>, StorageError>;
+    //  PURE READ: one row per distinct label carried by ≥1 NON-tombstoned issue (any status, templates and ephemeral
+    //  included), count = such issues, ORDER BY label ASC (BINARY collation). No permit, no lock (FR-10).
+    async fn rename_label(&self, old: &str, new: &str, actor: &str) -> Result<usize, StorageError>;
+    //  ONE `BEGIN IMMEDIATE`: merge-delete, rename, per-issue LabelRemoved(old)[+LabelAdded(new)], updated_at.
+    //  Returns the affected (merged + renamed) non-tombstoned issue count; `old == new` → Ok(0) with no tx. Callers
+    //  validate both names first (the engine runs `LabelValidator`); storage does not re-validate.
+    async fn close_issues(&self, ids: &[String], reason: &str, actor: &str) -> Result<Vec<String>, StorageError>;
+    //  ONE `BEGIN IMMEDIATE` that runs, per id in the given order, the SAME in-transaction body `update_issue` runs for
+    //  the patch `{status: Closed, close_reason: Some(Some(reason))}` (factored into one shared in-tx helper — never a
+    //  second copy), AFTER an explicit guard that SKIPS UNTOUCHED a row already `closed` or `tombstone`. Returns the ids
+    //  actually closed, in the given order. A MISSING id fails `IssueNotFound` and rolls back EVERY id (D44
+    //  one-transaction invariant, §4.2). Backs `Session::close_eligible` (the whole nested-epic cascade in one call).
 
     // --- hierarchical-id child allocation (FR-1a, D21) — the READ-half the engine allocator consumes ---
     async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError>; // high-water+1 (§3.2.1)
@@ -1936,6 +1970,49 @@ The hierarchical-id child allocation (FR-1a, D21) — the read-half of `parent.N
   already exists — T1.8 Implement promotes it from `pub(super)` to the trait impl and removes its
   `allow(dead_code)`.
 
+**Organization (D56, v1.1 — normative).** The three FR-6-remainder methods (§3.2) behave as follows; the PRD §4 D56
+row is the decision, this is the storage contract its acceptance criteria (a)–(p) are tested against.
+
+- **`list_all_labels()`** — `SELECT l.label, COUNT(*) FROM labels l JOIN issues i ON i.id = l.issue_id WHERE
+  i.status != 'tombstone' GROUP BY l.label ORDER BY l.label ASC`. Only tombstoned issues are excluded: closed,
+  deferred, template and ephemeral issues all count (bd `get_unique_labels_with_counts`,
+  `temp/beads_rust-main/src/storage/sqlite.rs:7974-8001`, whose `BTreeMap` order equals SQLite `BINARY`). It is NOT
+  `count_issues(…, Some(CountGroupBy::Label))`, which keeps list default visibility (closed and deferred hidden) and is
+  unchanged. No migration: `idx_labels_label` already exists.
+- **`rename_label(old, new, actor)`** — `old == new` → `Ok(0)`, no transaction. Otherwise ONE `BEGIN IMMEDIATE`, in
+  this order: (1) read AFFECTED = the ids of every non-tombstoned issue carrying `old`, `ORDER BY issue_id`, and MERGED =
+  the affected ids that ALSO carry `new` (two streaming `SELECT`s, each binding only `old`/`new`); (2) the merge
+  `DELETE FROM labels WHERE label = ?old AND issue_id IN (SELECT issue_id FROM labels WHERE label = ?new) AND issue_id IN
+  (SELECT id FROM issues WHERE status != 'tombstone')` — the conflicting rows go FIRST, so (3) the rename `UPDATE labels
+  SET label = ?new WHERE label = ?old AND issue_id IN (SELECT id FROM issues WHERE status != 'tombstone')` can never hit
+  the `(issue_id, label)` primary key; (4) per affected id, in id order: `LabelRemoved(old_value = old)`, then — for a
+  non-merged id only — `LabelAdded(new_value = new)`, both with `comment = None`, then `updated_at = now` for that id.
+  **SCALE (NFR-2):** steps (2)-(3) select rows by SUBQUERY and never bind a list of issue ids, and every step-(4)
+  statement binds a fixed handful of parameters, so a label on hundreds of thousands of issues never meets SQLite's
+  bound-parameter limit (the constraint `HYDRATE_ID_CHUNK` exists for, `crud.rs:542-548`); the cost is O(affected)
+  statements in the one transaction. `content_hash` is NOT rewritten: labels are outside it (§1.8). A tombstoned issue's
+  `old` row is untouched and it gets no event. NO statement uses ignore-on-conflict (the label-relation tripwire above
+  stays loud). Returns `AFFECTED.len()`; an `old` no live issue carries returns `Ok(0)` and writes no row and no event
+  (its empty transaction still commits and so ticks the committed-mutation counter, which no acceptance criterion
+  counts on that path). **Divergence from bd, on purpose:** bd writes ONE value-less `LabelRemoved` with a "Renamed
+  label X to Y" comment per issue (`sqlite.rs:8010-8075`); unblock writes the value-carrying pair every other label
+  change writes, so one event reader serves both.
+- **`close_issues(ids, reason, actor)`** — ONE `BEGIN IMMEDIATE`, ids processed in the GIVEN order (the engine passes
+  the cascade order, child before parent). For each id it first loads the row in the transaction: a MISSING id fails
+  `IssueNotFound` and rolls back the WHOLE batch, closes already made included; a row already `closed` or `tombstone`
+  is SKIPPED UNTOUCHED by an explicit guard — no `close_reason`, `updated_at`, `content_hash` or event change — and is
+  absent from the result. The guard is load-bearing, not cosmetic: the shared body below would otherwise rewrite a
+  differing `close_reason` (`push_opt_text`) and so advance `updated_at` and rewrite the row. Every other id runs the
+  shared in-tx body of `update_issue` (factored into ONE helper both call — never a second copy) with `{status: Closed,
+  close_reason: Some(Some(reason))}`, so `closed_at` is derived, `close_reason` persisted, `updated_at` advanced,
+  `content_hash` recomputed and `StatusChanged(old → closed)` then `Closed` appended — byte-for-byte what `issue close`
+  writes. Returns the ids actually closed, in processing order. **Divergence from bd, on purpose:** bd's
+  `close-eligible` (`temp/beads_rust-main/src/cli/commands/epic.rs:120-230`) issues a raw `UPDATE` that leaves
+  `content_hash` stale and writes only `Closed`.
+- **Epic rollup (no new method).** `Session::epic_statuses` (§4.1) composes `list_issues` with `epic_child_rollup()`;
+  the D26 primitive's child definition (a `parent-child` edge, child row present, child not a template; closed =
+  `closed` OR `tombstone`) IS `EpicStatus`'s, so `stats.epics_eligible` and the epic read cannot disagree.
+
 **EventType-per-mutation (the T0.7 oracle).** Model `EventType` = 17 named (Created, Updated,
 StatusChanged, PriorityChanged, AssigneeChanged, Commented, Closed, Reopened, DependencyAdded,
 DependencyRemoved, LabelAdded, LabelRemoved, Compacted, Deleted, Restored, **CommentEdited**, **CommentRedacted**
@@ -1962,6 +2039,8 @@ DependencyRemoved, LabelAdded, LabelRemoved, Compacted, Deleted, Restored, **Com
 | comment update (edit, D-D) | `CommentEdited` |
 | comment delete (soft-redact, D-E) | `CommentRedacted` |
 | add / remove label | `LabelAdded` / `LabelRemoved` |
+| label rename (`relabel`, D56) — per affected issue | `LabelRemoved(old)` + `LabelAdded(new)` · a MERGED issue (it already carried `new`): `LabelRemoved(old)` only · a tombstoned issue: **none** |
+| close eligible epics (`close_eligible`, D56) — per closed epic, cascade order (child before parent) | `StatusChanged` + `Closed` (the `update status` row above, verbatim) · an already-closed or tombstoned id: **none** (skipped untouched) · dry run: **none** |
 
 > **NOTE (restore carve-out — the T0.7 oracle is normative here).** `restore` (D20) is a **DEDICATED** path
 > that emits **ONLY `Restored`**. Although a tombstone→active restore is a terminal→non-terminal transition,
@@ -2503,6 +2582,44 @@ impl Session {
     pub async fn delete_comment(&self, comment_id: i64) -> Result<Comment, EngineError>;            // soft-redact (D-E)
     pub async fn close_with_suggestions(&self, id: &str, reason: Option<String>)
         -> Result<CloseOutcome, EngineError>; // returns newly-unblocked issues (FR-11)
+    // --- organization (FR-6 remainder, D56, v1.1) — `src/session/organization.rs` (NEW). `rename_label` and BOTH
+    //     `close_eligible` runs acquire the write permit (D14) + the D31 `.write.lock` for the WHOLE operation by reusing
+    //     `acquire()` (promoted from `write.rs`-private to `pub(super)`; `interchange.rs` and `lifecycle.rs` keep their own
+    //     paths). The dry run takes the guard for a consistent snapshot, as `import_jsonl{dry_run}` and
+    //     `delete(DryRun)` already do; `list_all_labels` and `epic_statuses` are reads and take neither (FR-10).
+    //     A NEW engine module `src/epic.rs` holds the two shared pure functions:
+    //       pub(crate) fn is_eligible_for_close(epic: &Issue, total_children: usize, closed_children: usize) -> bool
+    //       // = issue_type == Epic && !is_template && !status.is_terminal() && total_children > 0
+    //       //   && closed_children == total_children
+    //       pub(crate) fn cascade_close_set(candidates: &[EpicStatus]) -> Vec<String>
+    //       // the D56 clause (4) FIXPOINT over `is_eligible_for_close`: round 1 = the eligible candidates; each epic put in
+    //       // the set adds one closed child to every candidate it holds a `parent-child` edge to (read from its hydrated
+    //       // `Issue.dependencies`), which can make that parent eligible in the next round; stop at a round that adds
+    //       // nothing. Order: by round, then epic id ASC within a round (child before parent). Terminates: each round
+    //       // only moves candidates out of a finite set.
+    //     `diagnostics::stats`' `epics_eligible` (D26) calls `is_eligible_for_close` instead of its inline filter (same
+    //     result; `stats` counts single-pass eligibility, never the cascade). `epic_statuses` (`query kind: epics`) is single-pass too, so a parent
+    //     whose last open child is an eligible epic reads ineligible there; the `close_eligible` dry run is the cascade preview. ---
+    pub async fn list_all_labels(&self) -> Result<Vec<LabelCount>, EngineError>;   // read; forwards Storage::list_all_labels
+    pub async fn rename_label(&self, old: &str, new: &str) -> Result<LabelRename, EngineError>;
+    //   LabelValidator::validate on BOTH names first (failures re-keyed to fields `old_name`/`new_name`, ONE
+    //   ModelError::ValidationFailed aggregate); `old == new` → `affected_issues: 0` with no permit; else acquire() →
+    //   Storage::rename_label(old, new, &self.actor).
+    pub async fn epic_statuses(&self, id: Option<&str>, eligible_only: bool) -> Result<Vec<EpicStatus>, EngineError>;
+    //   read. `None` → list_issues{issue_type:[Epic], include_deferred:true} (closed + tombstone excluded) minus templates;
+    //   `Some(id)` → get(id): absent/tombstoned → StorageError::IssueNotFound; not an Epic → ModelError::ValidationFailed
+    //   (field `id`, "issue <id> is a <type>, not an epic"); a closed OR TEMPLATE epic IS returned, with
+    //   `eligible_for_close: false` (the predicate excludes both), although the `None` list omits templates. Counts from
+    //   epic_child_rollup() (absent = (0,0); the by-id read still runs the whole aggregate — disclosed, NFR-2 accepts it);
+    //   `eligible_for_close` = epic::is_eligible_for_close; `eligible_only` filters; ORDER BY epic id ASC.
+    pub async fn close_eligible(&self, dry_run: bool) -> Result<CloseEligibleOutcome, EngineError>;
+    //   BOTH runs: acquire(); read the snapshot epic_statuses(None, false) UNDER the guard; ids = epic::cascade_close_set.
+    //   dry_run → return {epic_ids: ids, count, dry_run: true}, no write. Else, when ids is non-empty, ONE
+    //   Storage::close_issues(&ids, "All children completed", &self.actor) (D44 one-transaction invariant, §4.2) — the
+    //   whole cascade, nested parents included, in ONE transaction; empty → no transaction. `epic_ids` = the returned ids
+    //   (close order). REMOTE-mode residual (D51, no `.write.lock`; routed to the v1.3 lock): the snapshot is guarded by the
+    //   in-process permit only, so a child reopened by another process between compute and commit can let an epic close
+    //   with an open child, silently.
 
     // --- interchange (FR-7/FR-8/FR-26), delegates to unblock-sync ---
     // T2.4: the export/import BODIES delegate to `unblock_sync::{export_jsonl,import_jsonl}` (cfg-gated behind the
@@ -2571,8 +2688,8 @@ impl Session {
 
 // CloseOutcome / ImportReport / ExportReport are defined in unblock-model §1.10 and
 // re-exported here (CF-A) — NOT redefined. CountBucket / GraphEdge / DepTree /
-// DiagnosticReport / DiagnosticFinding / DiagnosticKind likewise come from unblock-model
-// via the same re-export. SessionConfig + ImportOptions + NewIssue (D21) + NewDep (D44) + MigrateOutcome
+// DiagnosticReport / DiagnosticFinding / DiagnosticKind — and, since D56, EpicStatus / LabelCount / LabelRename /
+// CloseEligibleOutcome — likewise come from unblock-model via the same re-export. SessionConfig + ImportOptions + NewIssue (D21) + NewDep (D44) + MigrateOutcome
 // (D27/AF-2) are engine-owned (above); MigrateOutcome is a plain engine-local return (no
 // JsonSchema, NOT a §1.10 DTO), exported from unblock-engine like the peer ImportOptions
 // (the TRUE engine-local peer — a plain engine-defined return, no JsonSchema; contrast
@@ -2598,10 +2715,10 @@ impl Session {
 
 | # | Tool | Discriminator | Maps to |
 |---|---|---|---|
-| 1 | `issue` | `action: create\|create_bulk\|show\|update\|close\|reopen\|delete\|restore` (D22 `create_bulk` is the 8th `issue` ACTION — a discriminator arm, so it does NOT grow the **tool** count, §6.6) | FR-1a/1b/1c |
+| 1 | `issue` | `action: create\|create_bulk\|show\|update\|close\|reopen\|delete\|restore\|relabel\|close_eligible` (D22 `create_bulk` is the 8th `issue` ACTION — a discriminator arm, so it does NOT grow the **tool** count, §6.6; **D56** appends `relabel` and `close_eligible`, FR-6, on the same rule) | FR-1a/1b/1c, FR-6 (D56) |
 | 2 | `claim` | (none) | FR-2 |
 | 3 | `defer` | `action: defer\|undefer` | FR-3 |
-| 4 | `query` | `kind: list\|ready\|blocked\|search\|count\|stale` | FR-4 |
+| 4 | `query` | `kind: list\|ready\|blocked\|search\|count\|stale\|labels\|epics` (**D56** appends `labels` — the label catalog — and `epics` — the epic rollup read, FR-6; discriminator arms, no new tool, §6.6) | FR-4, FR-6 (D56) |
 | 5 | `dep` | `action: add\|remove\|list\|tree\|cycles\|graph` | FR-5 |
 | 6 | `sync` | `action: export\|import\|import_bd` | FR-7/8/26 |
 | 7 | `diagnostics` | `kind: stats\|info\|where\|version\|lint\|changelog\|orphans\|dangling` (D45 — `dangling` is the 8th `diagnostics` KIND, a discriminator arm, so it does NOT grow the **tool** count, §6.6; no ninth tool is created) | FR-15 |
@@ -2746,6 +2863,17 @@ pub enum IssueInput {
     // `update_issue`, crud.rs:332-334, the SSOT), so restore is the dedicated un-tombstone path emitting only
     // `Event(Restored)` (§3.2.1 `restore_issue` / §4.1 `Session::restore`). The interface
     // lands now; the `issue`-tool MCP adapter wires this action at T2.2.
+    Relabel { old_name: String, new_name: String, #[serde(flatten)] attribution: Attribution },          // D56 — APPENDED
+    CloseEligible { #[serde(default)] dry_run: bool, #[serde(flatten)] attribution: Attribution },      // D56 — APPENDED LAST
+    // D56 (FR-6, v1.1): `Relabel` → `Session::rename_label(old_name, new_name)` → `IssueOutput::Relabel(LabelRename)`;
+    // `CloseEligible` → `Session::close_eligible(dry_run)` → `IssueOutput::CloseEligible(CloseEligibleOutcome)` — its list
+    // key is `epic_ids`, never `close`'s `closed` (an `Issue`), so the untagged union stays unambiguous. Both are
+    // mutating arms, so both flatten the discarded `Attribution` (D52). APPENDED after `Restore` because schemars emits
+    // variants in declaration order and `CONTRACT_HASH` digests those bytes; each variant's `///` doc comment is
+    // contract bytes (its schema `description`). The tool DESCRIPTION, both copies (`#[tool(description)]` and the
+    // `capabilities()` descriptor), becomes "Create, show, update, close, reopen, delete, restore, relabel, or
+    // close_eligible issues. Where an action accepts the optional agent_name, harness and model fields, unblock
+    // currently discards them."
 }
 
 // DepInput — the ONLY wire shape for a dependency edge declared on `issue create`.
@@ -2877,6 +3005,12 @@ pub enum QueryInput {
     Search { query: String, #[serde(default)] limit: Option<usize>, #[serde(flatten)] filters: FilterInput }, // cap 50 default
     Count  { #[serde(default)] group_by: Option<CountGroupBy>, #[serde(flatten)] filters: FilterInput },
     Stale  { older_than: DateTime<Utc>, #[serde(flatten)] filters: FilterInput },
+    Labels {},                                                                                     // D56 — APPENDED; no parameter
+    Epics  { #[serde(default)] id: Option<String>, #[serde(default)] eligible_only: bool },       // D56 — APPENDED LAST
+    // D56 (FR-6, v1.1): `Labels` → `Session::list_all_labels()` → `QueryOutput::Labels(LabelList)`; `Epics` →
+    // `Session::epic_statuses(id, eligible_only)` → `QueryOutput::Epics(EpicStatusList)`. Neither flattens
+    // `FilterInput` (the catalog and the rollup are not list facets). Tool DESCRIPTION, both copies: "Query issues:
+    // list, ready, blocked, search, count, stale, labels, or epics."
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -3026,7 +3160,7 @@ so a bare-array JSON string there is spec-legal. Enforced by an assertion that e
 `structuredContent` is a JSON object.
 
 ```rust
-// issue — the 5 success shapes of the 8 actions:
+// issue — the 7 success shapes of the 10 actions (D56 appends `Relabel` and `CloseEligible`):
 #[derive(Serialize, JsonSchema)] #[serde(untagged)]
 pub enum IssueOutput {
     Id(IdOnly),                        // quick-create
@@ -3034,6 +3168,8 @@ pub enum IssueOutput {
     Issues(IssueList),                 // multi-id update; ALSO create_bulk (D22 — N); {"issues":[…]} object-wrap (CD-2)
     Close(Box<CloseOutcome>),          // close — suggest_next -> newly_unblocked (FR-11)
     Delete(DeletePlanOutput),          // the resolved delete plan (was the ad-hoc delete_plan_json)
+    Relabel(LabelRename),              // D56 — `relabel`: {"old_name","new_name","affected_issues"} (APPENDED)
+    CloseEligible(CloseEligibleOutcome), // D56 — `close_eligible`: {"epic_ids":[…],"count","dry_run"} (APPENDED LAST; a key distinct from `Close`'s `closed`)
 }
 #[derive(Serialize, JsonSchema)] pub struct IdOnly { pub id: String }
 #[derive(Serialize, JsonSchema)] pub struct IssueList { pub issues: Vec<Issue> }   // CD-2 object-wrap: {"issues":[…]} (shared by IssueOutput + QueryOutput)
@@ -3046,7 +3182,12 @@ pub enum DeleteModeOutput { Tombstone, Cascade, Hard, DryRun }   // From<DeleteM
 
 // query:
 #[derive(Serialize, JsonSchema)] #[serde(untagged)]
-pub enum QueryOutput { Issues(IssueList), Counts(CountList) }  // Issues = list/ready/blocked/search/stale; CD-2 object-wrap
+pub enum QueryOutput { Issues(IssueList), Counts(CountList),
+                       Labels(LabelList),        // D56 — `labels`: {"labels":[{label,count}…]} (APPENDED)
+                       Epics(EpicStatusList) }   // D56 — `epics`:  {"epics":[EpicStatus…]} (APPENDED LAST)
+// Issues = list/ready/blocked/search/stale; every list arm CD-2 object-wrapped
+#[derive(Serialize, JsonSchema)] pub struct LabelList { pub labels: Vec<LabelCount> }          // D56 CD-2 object-wrap
+#[derive(Serialize, JsonSchema)] pub struct EpicStatusList { pub epics: Vec<EpicStatus> }      // D56 CD-2 object-wrap
 #[derive(Serialize, JsonSchema)] pub struct CountList { pub counts: Vec<CountBucket> }   // CD-2 object-wrap: {"counts":[…]}
 
 // dep:
@@ -3420,6 +3561,21 @@ them (the D45 precedent). The fields stay on the wire because `deny_unknown_fiel
 reject calls that succeed today, which is a D35 break. When FR-22 records attribution, the discard
 sentences are withdrawn under a further additive bump.
 
+**D56 (v1.1) — the contract bumps to `unblock.mcp.v1.11`.** A SIBLING entry appended to this ledger; the entries
+above are NOT renumbered. D56 (PRD §4, tracked as `ub-lp9.1`) lands the FR-6 remainder as four discriminator arms on
+existing tools (§5.1 rows 1 and 4, §6.6): `schema_bundle()` moves by the `issue` input arms `relabel`/`close_eligible`,
+the `query` input arms `labels`/`epics`, the four output arms with their `LabelList`/`EpicStatusList`/`LabelRename`/
+`CloseEligibleOutcome`/`LabelCount` definitions — and `EpicStatus` with its embedded `Issue` enters the `query`
+output for the first time — and `capabilities()` moves by the `issue` and `query` tool descriptions (§5.2). So
+`CONTRACT_HASH` is re-pinned and `CONTRACT_VERSION` bumps to `unblock.mcp.v1.11` (unblock-mcp `options.rs`), with the
+`capabilities` and `schema_bundle` goldens re-blessed, the `public_api.rs` assert moved, and `agents_digest()` moving
+as in D45/D52 (the managed `AGENTS.md` table gains the four actions; `unblock agents` re-run, `init_agents` snapshot and
+the `agents.rs` kind-list and discriminant-intro asserts updated). D56 mints **no** `ErrorCode` (`ErrorCode::ALL` stays
+36), leaves the 0–8 exit table (§2.3) untouched, adds **no** tool, resource or prompt, adds no `EventType` and needs no
+migration. Per D35 an additive `.M` bump is NON-breaking. As in D45/D52, the bump rides the IMPLEMENTATION commit with
+the code constant, the re-blessed goldens, README and the claims scripts' `CONTRACT_RE` knobs — never this spec
+commit; until then the live contract stays `unblock.mcp.v1.10`.
+
 **`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
 exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the
 8 tools with their `oneOf`-derived actions + each action's FULL parameter surface — its required AND
@@ -3566,7 +3722,7 @@ All mutations flow through `Session` (FR-9) and the single write permit (D14); r
 Every error surfaced at L7 maps to exactly one `ErrorCode` and one 0–8 exit code per §2.3 (golden-snapshot pinned).
 
 ### 6.6 MCP tool-count budget
-MCP tool count stays ≤ 8; new domain surface extends existing tools by discriminator before adding tools (RK-3). D22's `create_bulk` is a NEW `action` arm on the existing `issue` tool (NOT a new tool) — the live `list_tools` golden (T2.3) keeps the count at 7. **D37 (the `comment` tool):** the dedicated `comment` tool (D-B) is the deliberate exception to "extend before add" — a distinct domain verb, not an `issue` arm — bringing the count to **8 ≤ 8** at T3.9; the RK-3 budget is now **FULL** and any further domain surface must extend an existing tool by discriminator. **D45 is the first surface to land under that FULL budget and it obeys the rule literally:** the dangling-dependency listing is a new `kind` arm on the existing `diagnostics` tool (§5.1 row 7 / §5.2), NOT a ninth tool — the count stays **8 ≤ 8** and the live `list_tools` assert does not move.
+MCP tool count stays ≤ 8; new domain surface extends existing tools by discriminator before adding tools (RK-3). D22's `create_bulk` is a NEW `action` arm on the existing `issue` tool (NOT a new tool) — the live `list_tools` golden (T2.3) keeps the count at 7. **D37 (the `comment` tool):** the dedicated `comment` tool (D-B) is the deliberate exception to "extend before add" — a distinct domain verb, not an `issue` arm — bringing the count to **8 ≤ 8** at T3.9; the RK-3 budget is now **FULL** and any further domain surface must extend an existing tool by discriminator. **D45 is the first surface to land under that FULL budget and it obeys the rule literally:** the dangling-dependency listing is a new `kind` arm on the existing `diagnostics` tool (§5.1 row 7 / §5.2), NOT a ninth tool — the count stays **8 ≤ 8** and the live `list_tools` assert does not move. **D56 follows the same rule for the FR-6 remainder:** label rename and the explicit close of eligible epics are `issue` actions (`relabel`, `close_eligible`), the label catalog and the epic rollup read are `query` kinds (`labels`, `epics`) — four discriminator arms, NO ninth tool, the count stays **8 ≤ 8**.
 
 ### 6.7 Safety / no-git / no-default-network
 `forbid(unsafe_code)`, no git crate / `Command::new("git")` anywhere (NFR-6/NFR-9). **LOCAL mode is the default build and makes no network CALL on any normal command path.** Network/TLS already links into that build, and exactly two routes put it into any build of this workspace — the default-on `self-update` axoupdater path (FR-25/D17), which calls out only on an explicit `unblock update`, and the non-default, opt-in `remote` feature that selects remote mode's HTTP client (D15/D51). The no-network source-scan whitelists the first; the second needs its own explicitly feature-gated entry before that client lands, or a required job fails for a reason unrelated to its own decision (ci-cd §2). NFR-10 names both routes.
