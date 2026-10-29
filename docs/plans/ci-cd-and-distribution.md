@@ -1119,7 +1119,13 @@ automates that step behind a strict, human-operated safety model.
   v1.0.1 binary never sends the workflow's token and reports any refusal, a 403 or a 429, as `INTERNAL_ERROR`,
   exit 1. A v1.0.2 or later binary sends the token and reports a refusal that still happens as `RATE_LIMITED`,
   exit 2, or `CONFIG_ERROR`, exit 7 (D55). So the `v1.0.1 → v1.0.2` run can already show the new form at its
-  post-swap step. Key on the step, the code and the exit code, never on reqwest's reason text.
+  post-swap step. Key on the step, the code and the exit code, never on reqwest's reason text. The
+  `v1.0.1 → v1.0.2` run on 2026-10-29 (workflow run 40846567896) passed on every triple. Four legs passed in
+  CI. The `aarch64-apple-darwin` leg failed at `update --dry-run`, run by the installed v1.0.1 binary, with
+  `INTERNAL_ERROR`, exit 1, naming `403 rate limit exceeded`: the step 3 exception in `RELEASING.md` §5. It
+  then passed by hand with the same script and the token set. Its post-swap `update --dry-run`, the first
+  query GitHub received from a token-sending binary, exited 0. No `RATE_LIMITED` or `CONFIG_ERROR` path was
+  hit, so the D55 refusal mapping was not exercised live.
 
 ## 5. Mapping to PRD NFRs
 
