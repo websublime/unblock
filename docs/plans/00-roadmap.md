@@ -1,6 +1,6 @@
 # unblock — Version Roadmap
 
-- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (released 2026-10-02; maintenance patch — the `v1.0.1` subsection of §1); v1.0.2 **PLANNED** (maintenance patch — the `v1.0.2` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
+- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (released 2026-10-02; maintenance patch — the `v1.0.1` subsection of §1); v1.0.2 **PLANNED** (released 2026-10-29; maintenance patch — the `v1.0.2` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
 - **Date:** 2026-06-19 · **v1.2–v1.5 resequence:** 2026-07-07 (session ratified by Miguel; audience decision minted as PRD §4 D28) · **post-GA v1.2+ resequence:** 2026-07-20 (Miguel-ratified; the PROPOSED v1.2–v1.5 order is reworked and a v1.0.1 maintenance-patch slot added — full mapping in roadmap §8, rationale + guardrail in PRD §4 D41)
 - **Owner:** Miguel Ramos
 - **Sources of truth:** `docs/PRD.md` (PRD APPROVED v1.1, §5 tiers / §11 scope / §13 phasing), `docs/plans/01-design-spine.md` (cross-crate interfaces — wins on any cross-crate type/signature disagreement), `docs/plans/implementation-plan.md` (v1 walking skeleton). Hierarchy: PRD > spine > crate plans. Grounding for deferred/later items: original `temp/beads_rust-main` feature inventory; UX grounding for the v1.4 TUI: the TUI-adopted subset of the 14 mockups under `temp/tentative-v2/docs/designs/` (**reference-only**, same status as `temp/beads_rust-main`; the graph / burnup screens there inform the v2+ PRO web instead — roadmap §7).
@@ -464,7 +464,7 @@ shipped AC was unmet (FR-20, FR-12, NFR-18), and D43 strengthens that same wordi
 surface** — the subject of this clause is that pair, not the slot: no new tool, command, `ErrorCode` or schema field (D43's new items — the shared `dup_key` scanner and the shared flip corpus — are workspace-internal, and the `unblock-*` crates are
 not published). **D45 DOES add outward surface** — a new `dangling` action arm on the `diagnostics` tool, and therefore a new `oneOf` arm plus a `DiagnosticKind` enum member in the published schema — while still adding no new tool, no new command and no new `ErrorCode`.
 
-### v1.0.2 — maintenance patch  **[PLANNED]**
+### v1.0.2 — maintenance patch  **[PLANNED]** (released 2026-10-29)
 
 A second maintenance patch on the 1.0 line, opened on 2026-10-06 by PRD §4 D55 and cut on top of v1.0.1 before
 v1.1. It adds no FR, re-tiers nothing, and leaves the v1.2+ resequence of PRD §4 D41 untouched. Its scope is the
@@ -491,7 +491,10 @@ work the tracker labels `v1-0-2`:
   and v1.0.1 never send the token, so v1.0.2 is the first release whose `unblock update` does. In the live update
   smoke a v1.0.2 binary queries GitHub authenticated at whichever step it runs. The post-swap `update --dry-run`
   of a `v1.0.1 → v1.0.2` run already does, and the `update --dry-run` and `update` steps do once `from_tag` is
-  v1.0.2 (ci-cd §4).
+  v1.0.2 (ci-cd §4). **The `v1.0.1 → v1.0.2` live update smoke passed on every leg on 2026-10-29**: four in CI,
+  and `aarch64-apple-darwin` by hand after the v1.0.1 binary's anonymous query drew a rate-limit `403` on the
+  shared runner. In the hand run the post-swap `update --dry-run`, sent by v1.0.2 with the token, exited 0. No
+  query was refused there, so the D55 refusal mapping was not exercised live.
 - **CI and test-harness hardening**, each item a tracker issue labelled `v1-0-2`: the two create benchmarks
   measured teardown rather than the operation (`ub-lp9.28`, closed 2026-10-06); the libsql
   `open_in_memory_parallel_first_write_stress` cell failed intermittently with SQLite "bad parameter or other API
