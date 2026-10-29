@@ -25,7 +25,7 @@
 
 ### v1.1
 - `toon` feature lights up `OutputFormat::Toon` + the `ToonRenderer` backend (D12, roadmap §2 "TOON output").
-- Render support for the new v1.1 domain surface that the CLI/MCP may need to display: `EpicStatus`, label lists, `GateResult`, scheduler/coordination report value types (csv/markdown/plain views). Additive only. *(**`Comment` rendering graduated to v1 — D37**: the `plain`/`markdown` issue-detail views gain a Comments section; `json`/`robot` serialize `Issue.comments` via serde with no code change; `csv` stays comment-free (relations excluded, FORK-R1). See the `backend/plain.rs` + `backend/markdown.rs` rows.)*
+- Render support for the new v1.1 domain surface that the CLI/MCP may need to display: `GateResult`, scheduler/coordination report value types (csv/markdown/plain views). Additive only. *(**`Comment` rendering graduated to v1 — D37**: the `plain`/`markdown` issue-detail views gain a Comments section; `json`/`robot` serialize `Issue.comments` via serde with no code change; `csv` stays comment-free (relations excluded, FORK-R1). See the `backend/plain.rs` + `backend/markdown.rs` rows.)* **[D56]** `EpicStatus` and the label catalog (`LabelCount`) need NO render work: the CLI carries no issue-data verb (D3) and MCP serializes them through serde (PRD §4 D56 clause (8)).
 
 ### v1.5
 - Large-result formatting helpers (streaming/chunked CSV + markdown writer over an iterator, not a `Vec`) for the 1M-issue / batch surface (roadmap §6, `unblock-render` ◐). Additive: `render_stream_csv(iter, …) -> impl` writer-based API alongside the v1 `Vec`-based one.
