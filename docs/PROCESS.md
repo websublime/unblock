@@ -83,6 +83,16 @@ tool. **Never simplify the solution to make progress; if you reach that point, s
   coherent (e.g. one scaffold); it returns the diff + a short summary. The orchestrator reviews that diff and runs
   the Verify gate — it does **not** hand-write the artifact. **Never run file-mutating agents in the shared working
   tree** (they can switch branches or clobber state); isolate them.
+- **Local machine load (MANDATORY — no exceptions, binds the orchestrator and every agent).** Unbounded cargo
+  runs freeze Miguel's machine. Every local cargo invocation runs **capped at 4 cores** (enforced machine-wide by
+  `~/.cargo/config.toml`: `[build] jobs = 4`, `[env] RUST_TEST_THREADS = "4"`): `CARGO_BUILD_JOBS=4`
+  (or `-j 4`) and, for tests, `RUST_TEST_THREADS=4` (or `-- --test-threads=4`). **Tests are always targeted** —
+  `cargo test -p <crate> <test-filter>` for the cells the change touches; never the whole suite
+  (`cargo test --workspace`, un-filtered `--all-targets`). **One cargo process at a time across all agents of a
+  Workflow** — never two concurrently. Briefs MUST carry this rule verbatim; an agent that breaks it is stopped
+  and the process killed. **`cargo test --workspace` (and any un-targeted test/insta run over the workspace) is FORBIDDEN locally even
+  under the 4-core cap — it froze the machine for 30+ minutes on 2026-10-29.** Locally, the Verify gate runs only
+  targeted tests of the crates the change touches, one at a time; the workspace-wide suite runs only in CI.
 - **Use a Workflow** for substantive, decomposable, or review work (decompose + cover in parallel; independent
   perspectives before committing; scale beyond one context). **Solo** for trivial/mechanical edits or conversation.
 - **Proportionality.** The per-phase team lineup (below) is the **default for substantive work**; trivial/mechanical
@@ -164,7 +174,11 @@ outcome, not a process violation. The Understand comment on the task's issue (§
 - **Branch off `main`** — never commit directly to `main`. Branch name: `t<mid>.<n>-<slug>` (e.g. `t0.6-libsql-impl`).
 - A change may be committed only **after both gates pass** (design Review **and** Verify). The Track team
   (`git-workflow-manager`) makes **Conventional Commits** (`feat`/`fix`/`docs`/`refactor`/`test`/`chore`/`ci`…),
-  **atomic** — one logical change per commit.
+  **atomic** — one logical change per commit. **Exception — CI for the Verify gate (Miguel, 2026-10-29):** because
+  the workspace suite may not run locally (§4) and CI triggers only on `pull_request`/push to `main`, the
+  implemented work is committed as a work-in-progress commit, pushed, and opened as a **draft PR**
+  (`gh pr create --draft`); the Verify gate reads that CI run, the Track team re-cuts the atomic Conventional
+  Commits, and the PR is marked ready only after Verify + Track.
 - **Claude opens the PR** (`gh pr create`): summary + the linked **unblock** issue id + gate results. Claude does **not**
   merge — merging to `main` is a human gate (Miguel/an approver) unless Miguel says otherwise.
 - **One PR per task (T-id)** by default — atomic Conventional Commits within it; split a large task into sub-PRs
