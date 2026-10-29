@@ -93,8 +93,8 @@ pub(crate) struct WorkspaceFacts<'a> {
 /// `pinned` is composed in-memory over a widest-visibility `list_issues` pass
 /// (`issue.pinned || status == Pinned`, `stats.rs:436`). `blocked` is the id SET of the manual
 /// `Status::Blocked` rows UNION the dependency-blocked active ids (`blocked_issues`), deduped by id.
-/// `ready` is `ready_issues().len()`. `epics_eligible` counts each `epic_child_rollup` entry with
-/// `total>0 && closed==total` whose epic passes the in-memory active-non-template Epic filter.
+/// `ready` is `ready_issues().len()`. `epics_eligible` counts each `epic_child_rollup` entry whose
+/// epic passes the ONE shared predicate `epic::is_eligible_for_close` (D56 clause (2); single-pass).
 /// `avg_lead_time_hours` is the mean `(closed_at − created_at)` in hours over closed issues.
 async fn stats(storage: &dyn Storage) -> Result<Vec<DiagnosticFinding>> {
     // Per-status tally over the WHOLE table INCLUDING tombstones (bd's WHERE-less scan): the
@@ -141,20 +141,21 @@ async fn stats(storage: &dyn Storage) -> Result<Vec<DiagnosticFinding>> {
     let ready = storage.ready_issues(&ListFilters::default()).await?.len();
 
     // `epics_eligible` — the SQL rollup supplies the per-epic child (total, closed_or_tombstone); the
-    // engine gates the EPIC side in-memory (`issue_type == Epic ∧ ¬terminal ∧ ¬template`,
-    // `stats.rs:441-446`). Both filters live at their respective sites (D26).
-    let eligible_epic_ids: std::collections::HashSet<&str> = all
+    // EPIC side is judged by the ONE shared predicate (`epic::is_eligible_for_close`, D56 clause (2)
+    // — the same function `query kind: epics` and `close_eligible` call; the D26 inline filter it
+    // replaced computed the same result). SINGLE-PASS: `stats` never counts the cascade.
+    let epics: std::collections::HashMap<&str, &unblock_model::Issue> = all
         .iter()
-        .filter(|i| i.issue_type == IssueType::Epic && !i.status.is_terminal() && !i.is_template)
-        .map(|i| i.id.as_str())
+        .filter(|i| i.issue_type == IssueType::Epic)
+        .map(|i| (i.id.as_str(), i))
         .collect();
     let rollup = storage.epic_child_rollup().await?;
     let epics_eligible = rollup
         .iter()
         .filter(|(epic_id, (child_total, child_closed))| {
-            *child_total > 0
-                && child_closed == child_total
-                && eligible_epic_ids.contains(epic_id.as_str())
+            epics.get(epic_id.as_str()).is_some_and(|epic| {
+                crate::epic::is_eligible_for_close(epic, *child_total, *child_closed)
+            })
         })
         .count();
 

@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 
 use unblock_model::{
     Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
-    Issue, ListFilters,
+    Issue, LabelCount, ListFilters,
 };
 
 use crate::WriteLockGuard;
@@ -669,6 +669,57 @@ pub trait Storage: Send + Sync {
     async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError>;
 
     // ---------------------------------------------------------------------------------------------
+    // organization (FR-6 remainder, D56, v1.1 — spine §3.2 / §3.2.1 "Organization (D56)")
+    //
+    // ALL TWELVE `impl Storage` blocks implement all three, with NO default body. The epic rollup
+    // READ adds no method: it reuses `epic_child_rollup()` above (D56 clause (2)).
+    // ---------------------------------------------------------------------------------------------
+
+    /// The label CATALOG (`query kind: labels`) — a PURE READ: one row per distinct label carried
+    /// by at least one NON-tombstoned issue, `count` = the number of such issues WHATEVER their
+    /// status (closed, deferred, template and ephemeral issues all count; only tombstoned issues
+    /// are excluded), ordered by label ascending in byte order (`SQLite` `BINARY` collation — bd's
+    /// `BTreeMap` order).
+    ///
+    /// It is NOT [`count_issues`](Self::count_issues) grouped by label, which keeps list default
+    /// visibility (closed and deferred hidden) and is unchanged. No permit, no lock (FR-10).
+    async fn list_all_labels(&self) -> Result<Vec<LabelCount>, StorageError>;
+
+    /// RENAME the label `old` to `new` on every NON-tombstoned issue carrying it, in ONE
+    /// `BEGIN IMMEDIATE`, returning the AFFECTED (merged + renamed) issue count.
+    ///
+    /// `old == new` → `Ok(0)` with no transaction. Otherwise a MERGED issue (it already carries
+    /// `new`) has its `old` row deleted FIRST and gets one `LabelRemoved(old_value = old)` and no
+    /// `LabelAdded`; every other affected issue has its row renamed and gets `LabelRemoved(old)`
+    /// then `LabelAdded(new_value = new)`. Every affected issue's `updated_at` advances;
+    /// `content_hash` does not move (labels are outside it, spine §1.8). A tombstoned issue keeps
+    /// `old` untouched, gets no event and is not counted. An `old` no live issue carries returns
+    /// `Ok(0)` and writes no row and no event. Rows are selected by SUBQUERY, never by a bound id
+    /// list (NFR-2), and no statement ignores a conflict (the `labels` primary key stays a loud
+    /// tripwire). Callers validate both names first (the engine runs `LabelValidator`); storage
+    /// does not re-validate.
+    async fn rename_label(&self, old: &str, new: &str, actor: &str) -> Result<usize, StorageError>;
+
+    /// CLOSE `ids`, in the GIVEN order, in ONE `BEGIN IMMEDIATE` with `close_reason = reason`,
+    /// returning the ids actually closed, in that order.
+    ///
+    /// Per id the row is loaded in the transaction: a MISSING id fails
+    /// [`StorageError::IssueNotFound`] and rolls back the WHOLE batch, closes already made
+    /// included (D44 one-transaction invariant, spine §4.2); a row already `closed` or `tombstone`
+    /// is SKIPPED UNTOUCHED by an explicit guard (no `close_reason`, `updated_at`, `content_hash`
+    /// or event change) and is absent from the result. Every other id runs the SAME in-transaction
+    /// body [`update_issue`](Self::update_issue) runs for `{status: Closed, close_reason:
+    /// Some(Some(reason))}` — `closed_at` derived, `close_reason` persisted, `updated_at`
+    /// advanced, `content_hash` recomputed, `StatusChanged(old → closed)` then `Closed` appended.
+    /// Backs `Session::close_eligible` (the whole nested-epic cascade in one call).
+    async fn close_issues(
+        &self,
+        ids: &[String],
+        reason: &str,
+        actor: &str,
+    ) -> Result<Vec<String>, StorageError>;
+
+    // ---------------------------------------------------------------------------------------------
     // [v1.1] reserved seams (CF-E; spine §3.2) — additive, depended on by config db-layer +
     //         health full-taxonomy. Kept COMMENTED (not live default methods) so the seam is
     //         reserved without v1 behaviour and this file does not `use` the diagnostics DTOs.
@@ -695,7 +746,7 @@ mod tests {
     use std::sync::Arc;
     use unblock_model::{
         Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
-        Issue, ListFilters,
+        Issue, LabelCount, ListFilters,
     };
 
     /// A backend-free [`Storage`] used only to prove the trait is implementable and object-safe.
@@ -925,6 +976,30 @@ mod tests {
         // that happens to look clean (D45, spine §3.2 `dangling_dependencies`).
         async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
             Ok(Vec::new())
+        }
+
+        // --- organization (FR-6 remainder, D56) — the NoopStorage posture: the read is empty, the
+        // mutations are NotInitialized (exactly as it treats every other read/mutation pair).
+        async fn list_all_labels(&self) -> Result<Vec<LabelCount>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn rename_label(
+            &self,
+            _old: &str,
+            _new: &str,
+            _actor: &str,
+        ) -> Result<usize, StorageError> {
+            Err(StorageError::NotInitialized)
+        }
+
+        async fn close_issues(
+            &self,
+            _ids: &[String],
+            _reason: &str,
+            _actor: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            Err(StorageError::NotInitialized)
         }
     }
 

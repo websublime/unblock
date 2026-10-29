@@ -89,7 +89,7 @@ SELF='scripts/checks/ub-lp9.25-dangling-blocker-claims.sh'
 # between the segments. A pattern demanding a literal `.` there would never match it, and RC6 — the one
 # row that exists to stop the sibling job going red in this very commit — would fail permanently for a
 # reason having nothing to do with the id being current. `\\?` accepts BOTH spellings, prose and regex.
-CONTRACT_RE='unblock\\?\.mcp\\?\.v1\\?\.10'
+CONTRACT_RE='unblock\\?\.mcp\\?\.v1\\?\.11'
 
 # The FAMILY the knob belongs to — ANY published contract id, current or retired. This is not a second
 # copy of the knob: it is what makes an `EXCLUSIVE` row (below) able to say "no OTHER version literal

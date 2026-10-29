@@ -1,0 +1,31 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LabelRename",
+  "description": "The outcome of a label rename (`issue action: relabel`, FR-6 / D56).",
+  "type": "object",
+  "properties": {
+    "affected_issues": {
+      "description": "The number of non-tombstoned issues changed (renamed and merged alike).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "new_name": {
+      "description": "The label it was renamed to.",
+      "type": "string"
+    },
+    "old_name": {
+      "description": "The label that was renamed.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "old_name",
+    "new_name",
+    "affected_issues"
+  ]
+}

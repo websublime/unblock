@@ -1982,12 +1982,16 @@ row is the decision, this is the storage contract its acceptance criteria (a)–
 - **`rename_label(old, new, actor)`** — `old == new` → `Ok(0)`, no transaction. Otherwise ONE `BEGIN IMMEDIATE`, in
   this order: (1) read AFFECTED = the ids of every non-tombstoned issue carrying `old`, `ORDER BY issue_id`, and MERGED =
   the affected ids that ALSO carry `new` (two streaming `SELECT`s, each binding only `old`/`new`); (2) the merge
-  `DELETE FROM labels WHERE label = ?old AND issue_id IN (SELECT issue_id FROM labels WHERE label = ?new) AND issue_id IN
-  (SELECT id FROM issues WHERE status != 'tombstone')` — the conflicting rows go FIRST, so (3) the rename `UPDATE labels
-  SET label = ?new WHERE label = ?old AND issue_id IN (SELECT id FROM issues WHERE status != 'tombstone')` can never hit
-  the `(issue_id, label)` primary key; (4) per affected id, in id order: `LabelRemoved(old_value = old)`, then — for a
-  non-merged id only — `LabelAdded(new_value = new)`, both with `comment = None`, then `updated_at = now` for that id.
-  **SCALE (NFR-2):** steps (2)-(3) select rows by SUBQUERY and never bind a list of issue ids, and every step-(4)
+  `DELETE FROM labels WHERE label = ?old AND EXISTS (SELECT 1 FROM labels n WHERE n.issue_id = labels.issue_id AND
+  n.label = ?new) AND EXISTS (SELECT 1 FROM issues i WHERE i.id = labels.issue_id AND i.status != 'tombstone')` — the
+  conflicting rows go FIRST, so (3) the rename `UPDATE labels SET label = ?new WHERE label = ?old AND EXISTS (SELECT 1
+  FROM issues i WHERE i.id = labels.issue_id AND i.status != 'tombstone')` can never hit the `(issue_id, label)` primary
+  key; (4) per affected id, in id order: `LabelRemoved(old_value = old)`, then — for a non-merged id only —
+  `LabelAdded(new_value = new)`, both with `comment = None`, then `updated_at = now` for that id.
+  **SCALE (NFR-2):** steps (2)-(3) select rows by CORRELATED `EXISTS` subqueries keyed on the candidate row, so the plan
+  drives from `idx_labels_label` and probes primary keys per candidate — cost proportional to the rows carrying `old`,
+  never a scan of `issues` (an uncorrelated `IN (SELECT id FROM issues …)` would scan every issue; pinned by the
+  `rename_statements_never_scan_issues` query-plan cell) — and they never bind a list of issue ids, and every step-(4)
   statement binds a fixed handful of parameters, so a label on hundreds of thousands of issues never meets SQLite's
   bound-parameter limit (the constraint `HYDRATE_ID_CHUNK` exists for, `crud.rs:542-548`); the cost is O(affected)
   statements in the one transaction. `content_hash` is NOT rewritten: labels are outside it (§1.8). A tombstoned issue's

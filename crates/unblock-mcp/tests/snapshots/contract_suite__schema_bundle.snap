@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.10",
+  "contract_version": "unblock.mcp.v1.11",
   "issue": {
     "input": {
       "$defs": {
@@ -83,7 +83,7 @@ expression: schema_bundle()
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `issue` tool input (spine §5.2 — EXACT shape; 8 actions).",
+      "description": "The `issue` tool input (spine §5.2 — EXACT shape; 10 actions).",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -668,6 +668,97 @@ expression: schema_bundle()
             "id"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Rename a label on every non-tombstoned issue; an issue already carrying the new name keeps\none copy (D56).",
+          "properties": {
+            "action": {
+              "const": "relabel",
+              "type": "string"
+            },
+            "agent_name": {
+              "default": null,
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "harness": {
+              "default": null,
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "default": null,
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "new_name": {
+              "description": "The label it becomes.",
+              "type": "string"
+            },
+            "old_name": {
+              "description": "The label to rename.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "old_name",
+            "new_name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Close every epic whose children are all closed, nested epics cascading child before parent\n(D56).",
+          "properties": {
+            "action": {
+              "const": "close_eligible",
+              "type": "string"
+            },
+            "agent_name": {
+              "default": null,
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dry_run": {
+              "default": false,
+              "description": "When `true`, report the epics that would close and write nothing.",
+              "type": "boolean"
+            },
+            "harness": {
+              "default": null,
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "default": null,
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "type": "object"
         }
       ],
       "title": "IssueInput",
@@ -675,6 +766,34 @@ expression: schema_bundle()
     },
     "output": {
       "$defs": {
+        "CloseEligibleOutcome": {
+          "description": "The outcome of closing every eligible epic (`issue action: close_eligible`, FR-6 / D56).",
+          "properties": {
+            "count": {
+              "description": "The number of entries in `epic_ids`.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "dry_run": {
+              "description": "Whether this was a dry run (nothing written).",
+              "type": "boolean"
+            },
+            "epic_ids": {
+              "description": "The epic ids closed (or, on a dry run, that would close), in close order: by cascade round,\nthen by id ascending, so every child epic precedes its parent.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "epic_ids",
+            "count",
+            "dry_run"
+          ],
+          "type": "object"
+        },
         "CloseOutcome": {
           "description": "The outcome of a close-with-suggestions operation (FR-11).",
           "properties": {
@@ -1162,6 +1281,31 @@ expression: schema_bundle()
         "IssueType": {
           "type": "string"
         },
+        "LabelRename": {
+          "description": "The outcome of a label rename (`issue action: relabel`, FR-6 / D56).",
+          "properties": {
+            "affected_issues": {
+              "description": "The number of non-tombstoned issues changed (renamed and merged alike).",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "new_name": {
+              "description": "The label it was renamed to.",
+              "type": "string"
+            },
+            "old_name": {
+              "description": "The label that was renamed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "old_name",
+            "new_name",
+            "affected_issues"
+          ],
+          "type": "object"
+        },
         "Priority": {
           "description": "Issue priority (spine §1.2): a transparent newtype over `i32`, valid range `0..=4`.\n\nOrdering is numeric, so `CRITICAL < HIGH < MEDIUM < LOW < BACKLOG` — this is the order the\nhybrid ready-sort relies on. `Default` is [`Priority::MEDIUM`]. The wire form is the bare\ninteger (`#[serde(transparent)]`), and `Display` renders `\"P{n}\"`.\n\n# Examples\n\n```\nuse unblock_model::Priority;\nuse std::str::FromStr;\n\nassert_eq!(Priority::default(), Priority::MEDIUM);\nassert_eq!(Priority::CRITICAL.to_string(), \"P0\");\nassert_eq!(Priority::from_str(\"p1\").unwrap(), Priority::HIGH);\nassert!(Priority::from_str(\"P5\").is_err());\nassert!(Priority::CRITICAL < Priority::BACKLOG);\n```",
           "format": "int32",
@@ -1192,9 +1336,17 @@ expression: schema_bundle()
         {
           "$ref": "#/$defs/DeletePlanOutput",
           "description": "The resolved delete plan (was the ad-hoc `delete_plan_json`)."
+        },
+        {
+          "$ref": "#/$defs/LabelRename",
+          "description": "The `relabel` outcome: the renamed label and the number of issues changed."
+        },
+        {
+          "$ref": "#/$defs/CloseEligibleOutcome",
+          "description": "The `close_eligible` outcome: the epic ids closed (or that would close), in close order."
         }
       ],
-      "description": "The `issue` tool success union — the 5 success shapes across the 8 actions (spine §5.3, D25).\n\n`#[serde(untagged)]` ⇒ each arm serializes as its inner value directly (wire-identical to the\npre-D25 ad-hoc values). The large arms are boxed to keep `clippy::large_enum_variant` clean.",
+      "description": "The `issue` tool success union — the 7 success shapes across the 10 actions (spine §5.3, D25;\nD56 appends `Relabel` and `CloseEligible`).\n\n`#[serde(untagged)]` ⇒ each arm serializes as its inner value directly (wire-identical to the\npre-D25 ad-hoc values). The large arms are boxed to keep `clippy::large_enum_variant` clean.",
       "title": "IssueOutput"
     }
   },
@@ -2903,6 +3055,47 @@ expression: schema_bundle()
             "older_than"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The label catalog: every label carried by a non-tombstoned issue, with its issue count.",
+          "properties": {
+            "kind": {
+              "const": "labels",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Epic rollups: child counts and close eligibility, for every open epic or one epic by id.",
+          "properties": {
+            "eligible_only": {
+              "default": false,
+              "description": "Keep only the epics eligible for close.",
+              "type": "boolean"
+            },
+            "id": {
+              "default": null,
+              "description": "One epic by id (any status except tombstone) instead of every open, non-template epic.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "epics",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
         }
       ],
       "title": "QueryInput",
@@ -3049,6 +3242,54 @@ expression: schema_bundle()
         },
         "DependencyType": {
           "type": "string"
+        },
+        "EpicStatus": {
+          "description": "Epic completion status with child counts (spine §1.7; derived rollup, populated v1.1).",
+          "properties": {
+            "closed_children": {
+              "description": "Number of closed child issues.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "eligible_for_close": {
+              "description": "Whether the epic is eligible to be closed.",
+              "type": "boolean"
+            },
+            "epic": {
+              "$ref": "#/$defs/Issue",
+              "description": "The epic issue."
+            },
+            "total_children": {
+              "description": "Total number of child issues.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "epic",
+            "total_children",
+            "closed_children",
+            "eligible_for_close"
+          ],
+          "type": "object"
+        },
+        "EpicStatusList": {
+          "description": "The CD-2 object-wrap for `query{epics}`: `{\"epics\":[…]}` (spine §5.3, D56).",
+          "properties": {
+            "epics": {
+              "description": "The epic rollups, ordered by epic id ascending.",
+              "items": {
+                "$ref": "#/$defs/EpicStatus"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "epics"
+          ],
+          "type": "object"
         },
         "Issue": {
           "description": "The primary issue entity (spine §1.6).\n\n`content_hash` is `#[serde(skip)]` — it never appears in JSONL and is recomputed on load (it is\nthe import idempotency key, FR-26). `compaction_level` always serializes as an integer (`0` when\n`None`) for `bd` conformance. All other optional fields are omitted when empty.",
@@ -3345,6 +3586,42 @@ expression: schema_bundle()
         "IssueType": {
           "type": "string"
         },
+        "LabelCount": {
+          "description": "One label-catalog row (`query kind: labels`, FR-6 / D56).",
+          "properties": {
+            "count": {
+              "description": "The number of non-tombstoned issues carrying the label, whatever their status.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "label": {
+              "description": "The label value.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "count"
+          ],
+          "type": "object"
+        },
+        "LabelList": {
+          "description": "The CD-2 object-wrap for `query{labels}`: `{\"labels\":[…]}` (spine §5.3, D56).",
+          "properties": {
+            "labels": {
+              "description": "The labels, ordered by label in byte order.",
+              "items": {
+                "$ref": "#/$defs/LabelCount"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "labels"
+          ],
+          "type": "object"
+        },
         "Priority": {
           "description": "Issue priority (spine §1.2): a transparent newtype over `i32`, valid range `0..=4`.\n\nOrdering is numeric, so `CRITICAL < HIGH < MEDIUM < LOW < BACKLOG` — this is the order the\nhybrid ready-sort relies on. `Default` is [`Priority::MEDIUM`]. The wire form is the bare\ninteger (`#[serde(transparent)]`), and `Display` renders `\"P{n}\"`.\n\n# Examples\n\n```\nuse unblock_model::Priority;\nuse std::str::FromStr;\n\nassert_eq!(Priority::default(), Priority::MEDIUM);\nassert_eq!(Priority::CRITICAL.to_string(), \"P0\");\nassert_eq!(Priority::from_str(\"p1\").unwrap(), Priority::HIGH);\nassert!(Priority::from_str(\"P5\").is_err());\nassert!(Priority::CRITICAL < Priority::BACKLOG);\n```",
           "format": "int32",
@@ -3363,9 +3640,17 @@ expression: schema_bundle()
         {
           "$ref": "#/$defs/CountList",
           "description": "The `count` buckets (`{\"counts\":[…]}`)."
+        },
+        {
+          "$ref": "#/$defs/LabelList",
+          "description": "The `labels` catalog (`{\"labels\":[…]}`)."
+        },
+        {
+          "$ref": "#/$defs/EpicStatusList",
+          "description": "The `epics` rollups (`{\"epics\":[…]}`)."
         }
       ],
-      "description": "The `query` tool success union (spine §5.3, D25). Both arms are CD-2 object-wrapped (§5.3) so the\n`structuredContent` is always a JSON object, never a bare array. `#[serde(untagged)]` ⇒ the arm's\nwrapper value is emitted directly (`{\"issues\":[…]}` / `{\"counts\":[…]}`).",
+      "description": "The `query` tool success union (spine §5.3, D25). Every arm is CD-2 object-wrapped (§5.3) so the\n`structuredContent` is always a JSON object, never a bare array. `#[serde(untagged)]` ⇒ the arm's\nwrapper value is emitted directly (`{\"issues\":[…]}` / `{\"counts\":[…]}` / `{\"labels\":[…]}` /\n`{\"epics\":[…]}`).",
       "title": "QueryOutput"
     }
   },

@@ -47,6 +47,14 @@ schema_test!(dependency, "dependency", unblock_model::Dependency);
 schema_test!(comment, "comment", unblock_model::Comment);
 schema_test!(event, "event", unblock_model::Event);
 schema_test!(epic_status, "epic_status", unblock_model::EpicStatus);
+// D56 (FR-6, v1.1): the three organization result types (spine §1.10).
+schema_test!(label_count, "label_count", unblock_model::LabelCount);
+schema_test!(label_rename, "label_rename", unblock_model::LabelRename);
+schema_test!(
+    close_eligible_outcome,
+    "close_eligible_outcome",
+    unblock_model::CloseEligibleOutcome
+);
 
 schema_test!(list_filters, "list_filters", unblock_model::ListFilters);
 schema_test!(

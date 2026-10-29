@@ -79,7 +79,7 @@ RANGE_ALT_RE='D\(56\|55\|'
 # The LIVE published contract version. D55 does NOT move it, so this row is the affirmative record of
 # that. It tracks the LIVE id, so a later decision's bump moves it in that decision's implementation
 # commit.
-CONTRACT_RE='unblock\.mcp\.v1\.10'
+CONTRACT_RE='unblock\.mcp\.v1\.11'
 
 # The SAME two spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte rather than a regex operator. DERIVED, never hand-written a second time. `printf '%s'`
@@ -305,5 +305,5 @@ check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
 check_table_floor 'row-anchored (Q)' "$q_count" 83 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
-say "OK — update_error's variant match and status read, the pure classifier with its 403|429 and 401 arms, the message function, the token state, both variants and the three code arms are in the tree, no code line of update.rs or exit.rs spells reqwest, every unit and update_refusal_ cell is declared, the unblock-error comments and the published RateLimited text stand, the tracker names ub-e47, the PRD row and its D34 note, the spine, both crate plans, ci-cd §4, RELEASING.md, the smoke headers, the update-smoke env comment, README, both roadmaps and the task carry D55, the retargeted sibling rows are in place, this gate is both specified and wired, the contract stays unblock.mcp.v1.10, and the live D-range is current at every prose site and every sibling script's knob"
+say "OK — update_error's variant match and status read, the pure classifier with its 403|429 and 401 arms, the message function, the token state, both variants and the three code arms are in the tree, no code line of update.rs or exit.rs spells reqwest, every unit and update_refusal_ cell is declared, the unblock-error comments and the published RateLimited text stand, the tracker names ub-e47, the PRD row and its D34 note, the spine, both crate plans, ci-cd §4, RELEASING.md, the smoke headers, the update-smoke env comment, README, both roadmaps and the task carry D55, the retargeted sibling rows are in place, this gate is both specified and wired, the contract is the live unblock.mcp.v1.11, and the live D-range is current at every prose site and every sibling script's knob"
 exit 0

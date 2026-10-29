@@ -596,6 +596,29 @@ impl Storage for StorageInjector {
     async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, unblock_storage::StorageError> {
         self.inner.dangling_dependencies().await
     }
+
+    // D56 (FR-6 remainder): not gated — delegate, like every other non-gated method.
+    async fn list_all_labels(
+        &self,
+    ) -> Result<Vec<unblock_model::LabelCount>, unblock_storage::StorageError> {
+        self.inner.list_all_labels().await
+    }
+    async fn rename_label(
+        &self,
+        old: &str,
+        new: &str,
+        actor: &str,
+    ) -> Result<usize, unblock_storage::StorageError> {
+        self.inner.rename_label(old, new, actor).await
+    }
+    async fn close_issues(
+        &self,
+        ids: &[String],
+        reason: &str,
+        actor: &str,
+    ) -> Result<Vec<String>, unblock_storage::StorageError> {
+        self.inner.close_issues(ids, reason, actor).await
+    }
 }
 
 #[tokio::test]

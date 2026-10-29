@@ -3,11 +3,11 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: capabilities()
 ---
 {
-  "contract_version": "unblock.mcp.v1.10",
+  "contract_version": "unblock.mcp.v1.11",
   "tools": [
     {
       "name": "issue",
-      "description": "Create, show, update, close, reopen, delete, or restore issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
+      "description": "Create, show, update, close, reopen, delete, restore, relabel, or close_eligible issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     },
     {
       "name": "claim",
@@ -19,7 +19,7 @@ expression: capabilities()
     },
     {
       "name": "query",
-      "description": "Query issues: list, ready, blocked, search, count, or stale."
+      "description": "Query issues: list, ready, blocked, search, count, stale, labels, or epics."
     },
     {
       "name": "dep",

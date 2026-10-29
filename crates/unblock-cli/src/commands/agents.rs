@@ -301,6 +301,9 @@ mod tests {
             "reopen",
             "delete",
             "restore",
+            // D56 (FR-6 remainder): the two organization actions are appended last.
+            "relabel",
+            "close_eligible",
         ] {
             assert!(
                 block.contains(&format!("| `issue` | `action: {action}` |")),
@@ -315,7 +318,10 @@ mod tests {
     #[test]
     fn managed_block_names_query_discriminant_kind() {
         let block = managed_block(&unblock_mcp::agents_digest());
-        for kind in ["list", "ready", "blocked", "search", "count", "stale"] {
+        // D56 appends the `labels` catalog and the `epics` rollup kinds.
+        for kind in [
+            "list", "ready", "blocked", "search", "count", "stale", "labels", "epics",
+        ] {
             assert!(
                 block.contains(&format!("| `query` | `kind: {kind}` |")),
                 "query {kind} must render keyed `kind`"

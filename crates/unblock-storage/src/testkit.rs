@@ -81,6 +81,14 @@ pub trait StorageTestkit: Storage {
     /// predicate — the obligation is the equivalence, not the syntax.
     async fn testkit_sql_matches_external_prefix(&self, probe: &str) -> Result<bool, StorageError>;
 
+    /// Read the RAW stored `content_hash` column of `id` — straight from the backend, NEVER through
+    /// a [`Storage`] read (D56 clause (10) "RAW HASH"), or `None` when no row exists.
+    ///
+    /// Every `Storage` read recomputes the hash on load, so a read-path hash would HIDE a stale
+    /// column: this seam is the only way the `close_issues`/`rename_label` contract cells can prove
+    /// the stored column was recomputed (close) or left byte-identical (rename, a skipped close).
+    async fn testkit_raw_content_hash(&self, id: &str) -> Result<Option<String>, StorageError>;
+
     // --- T0.8 contention-lab instrumentation seams (RK-1 / NFR-3) ---------------------------------
     //
     // The counters + toggles below exist solely so the M0 contention-lab gate
@@ -212,6 +220,17 @@ where
     contract_epic_child_rollup(factory().await).await;
     contract_closed_since(factory().await).await;
     contract_orphan_candidates(factory().await).await;
+
+    // Organization (FR-6 remainder, D56 — spine §3.2.1 "Organization (D56)").
+    contract_list_all_labels_counts_live_issues_in_byte_order(factory().await).await;
+    contract_rename_label_pair(factory().await).await;
+    contract_rename_label_merge(factory().await).await;
+    contract_rename_label_tombstone_skip(factory().await).await;
+    contract_rename_label_noop(factory().await).await;
+    contract_rename_label_missing_label(factory().await).await;
+    contract_close_issues_closes_in_given_order(factory().await).await;
+    contract_close_issues_skips_closed_and_tombstoned(factory().await).await;
+    contract_close_issues_missing_id_rolls_back(factory().await).await;
 
     // Cross-cutting invariants.
     contract_noop_update_writes_no_event(factory().await).await;
@@ -3311,6 +3330,409 @@ pub async fn contract_epic_child_rollup<S: Storage>(storage: S) {
         vec![("ub-epic".to_string(), (3, 2))],
         "3 non-template parent-child children, 2 closed (template + Blocks ignored)"
     );
+}
+
+// --------------------------------------------------------------------------------------------------
+// Organization (FR-6 remainder, D56 — spine §3.2.1 "Organization (D56)")
+//
+// "RAW HASH" below is the STORED `issues.content_hash` column, read through the
+// `StorageTestkit::testkit_raw_content_hash` seam — never through a `Storage` read, which recomputes
+// the hash on load and would hide a stale column (D56 clause (10)).
+// --------------------------------------------------------------------------------------------------
+
+/// Tombstone `id` through the public soft-delete path.
+async fn tombstone<S: Storage>(storage: &S, id: &str) {
+    storage
+        .delete_issue(
+            &DeletePlan {
+                mode: DeleteMode::Tombstone,
+                targets: vec![id.to_string()],
+                cascade_children: Vec::new(),
+            },
+            "a",
+        )
+        .await
+        .expect("tombstone");
+}
+
+/// An issue carrying `labels`, created at the fixed epoch.
+async fn labelled<S: Storage>(storage: &S, id: &str, labels: &[&str]) {
+    let mut seeded = issue(id, id);
+    seeded.labels = labels.iter().map(ToString::to_string).collect();
+    storage.create_issue(&seeded, "a").await.expect("create");
+}
+
+/// The issue's events written AFTER the first `skip` ones, as `(type, old, new)` triples.
+async fn events_after<S: Storage>(
+    storage: &S,
+    id: &str,
+    skip: usize,
+) -> Vec<(String, Option<String>, Option<String>)> {
+    event_triples(storage, id)
+        .await
+        .into_iter()
+        .skip(skip)
+        .collect()
+}
+
+/// `list_all_labels` (D56 clause (6)) is the label CATALOG: one row per distinct label carried by a
+/// NON-tombstoned issue, counting such issues WHATEVER their status — open, in-progress, deferred,
+/// closed, template and ephemeral all count — a label only tombstoned issues carry is absent, and
+/// the rows are in BYTE order (uppercase before lowercase).
+pub async fn contract_list_all_labels_counts_live_issues_in_byte_order<S: Storage>(storage: S) {
+    assert!(
+        storage.list_all_labels().await.unwrap().is_empty(),
+        "empty store → empty catalog"
+    );
+
+    labelled(&storage, "ub-open", &["shared", "Zeta"]).await;
+    let mut in_progress = issue("ub-prog", "in progress");
+    in_progress.status = Status::InProgress;
+    in_progress.labels = vec!["shared".to_string()];
+    storage.create_issue(&in_progress, "a").await.unwrap();
+    let mut deferred = issue("ub-def", "deferred");
+    deferred.status = Status::Deferred;
+    deferred.defer_until = Some(ts(2030, 1, 1));
+    deferred.labels = vec!["shared".to_string(), "beta".to_string()];
+    storage.create_issue(&deferred, "a").await.unwrap();
+    let mut closed = issue("ub-closed", "closed");
+    closed.status = Status::Closed;
+    closed.closed_at = Some(ts(2026, 1, 2));
+    closed.labels = vec!["shared".to_string()];
+    storage.create_issue(&closed, "a").await.unwrap();
+    let mut template = issue("ub-tmpl", "template");
+    template.is_template = true;
+    template.labels = vec!["shared".to_string()];
+    storage.create_issue(&template, "a").await.unwrap();
+    let mut ephemeral = issue("ub-eph", "ephemeral");
+    ephemeral.ephemeral = true;
+    ephemeral.labels = vec!["shared".to_string()];
+    storage.create_issue(&ephemeral, "a").await.unwrap();
+    labelled(&storage, "ub-dead", &["shared", "gone"]).await;
+    tombstone(&storage, "ub-dead").await;
+
+    let catalog = storage.list_all_labels().await.unwrap();
+    assert_eq!(
+        catalog,
+        vec![
+            unblock_model::LabelCount {
+                label: "Zeta".to_string(),
+                count: 1
+            },
+            unblock_model::LabelCount {
+                label: "beta".to_string(),
+                count: 1
+            },
+            unblock_model::LabelCount {
+                label: "shared".to_string(),
+                count: 6
+            },
+        ],
+        "byte order (`Z` < `b`), every live status counted, the tombstone-only `gone` absent"
+    );
+}
+
+/// `rename_label` RENAME PAIR (D56 (a)): an issue carrying only `old` carries `new` and not `old`
+/// afterwards, with `LabelRemoved(old_value = old)` THEN `LabelAdded(new_value = new)`, an advanced
+/// `updated_at` and a byte-identical RAW HASH (labels are outside the hash, spine §1.8).
+pub async fn contract_rename_label_pair<S: Storage + StorageTestkit>(storage: S) {
+    labelled(&storage, "ub-1", &["keep", "old"]).await;
+    let before = storage.get_issue("ub-1").await.unwrap().unwrap();
+    let raw_before = storage.testkit_raw_content_hash("ub-1").await.unwrap();
+    let seen = event_triples(&storage, "ub-1").await.len();
+
+    let affected = storage.rename_label("old", "new", "a").await.unwrap();
+    assert_eq!(affected, 1);
+
+    let after = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(after.labels, vec!["keep".to_string(), "new".to_string()]);
+    assert_eq!(
+        events_after(&storage, "ub-1", seen).await,
+        vec![
+            ("label_removed".to_string(), Some("old".to_string()), None),
+            ("label_added".to_string(), None, Some("new".to_string())),
+        ],
+        "the value-carrying pair, remove before add"
+    );
+    assert!(after.updated_at > before.updated_at, "updated_at advances");
+    assert_eq!(
+        storage.testkit_raw_content_hash("ub-1").await.unwrap(),
+        raw_before,
+        "the RAW content_hash column is byte-identical"
+    );
+}
+
+/// `rename_label` MERGE (D56 (b)): an issue carrying BOTH names ends with ONE `new` row, exactly one
+/// `LabelRemoved(old)` and NO `LabelAdded`, is counted, and no constraint error is raised — beside
+/// an ordinary renamed issue, both counted in `affected_issues`.
+pub async fn contract_rename_label_merge<S: Storage>(storage: S) {
+    labelled(&storage, "ub-both", &["new", "old"]).await;
+    labelled(&storage, "ub-plain", &["old"]).await;
+    let seen_both = event_triples(&storage, "ub-both").await.len();
+    let seen_plain = event_triples(&storage, "ub-plain").await.len();
+
+    let affected = storage
+        .rename_label("old", "new", "a")
+        .await
+        .expect("a merge never trips the labels primary key");
+    assert_eq!(affected, 2, "merged and renamed issues are both counted");
+
+    assert_eq!(
+        storage.get_issue("ub-both").await.unwrap().unwrap().labels,
+        vec!["new".to_string()],
+        "the merged issue keeps exactly one `new` row"
+    );
+    assert_eq!(
+        events_after(&storage, "ub-both", seen_both).await,
+        vec![("label_removed".to_string(), Some("old".to_string()), None)],
+        "a merged issue gets the remove only — its `new` label was not added"
+    );
+    assert_eq!(
+        storage.get_issue("ub-plain").await.unwrap().unwrap().labels,
+        vec!["new".to_string()]
+    );
+    assert_eq!(
+        events_after(&storage, "ub-plain", seen_plain).await,
+        vec![
+            ("label_removed".to_string(), Some("old".to_string()), None),
+            ("label_added".to_string(), None, Some("new".to_string())),
+        ]
+    );
+}
+
+/// `rename_label` TOMBSTONE SKIP (D56 (c)): a tombstoned issue carrying `old` still carries it, gets
+/// no event, keeps its `updated_at` and is not counted — and so does a tombstoned issue carrying
+/// BOTH `old` and `new`, which the merge `DELETE` and the MERGED read must skip too.
+///
+/// The id order is load-bearing: the tombstoned both-labels issue (`ub-a-dead`) sorts BEFORE the
+/// live merged one (`ub-b-merged`), so a MERGED read that drops the tombstone filter misaligns the
+/// merge-join and hands `ub-b-merged` a `LabelAdded` it must not get, and a merge `DELETE` that drops
+/// it strips `ub-a-dead`'s `old` row.
+pub async fn contract_rename_label_tombstone_skip<S: Storage>(storage: S) {
+    labelled(&storage, "ub-live", &["old"]).await;
+    labelled(&storage, "ub-dead", &["old"]).await;
+    tombstone(&storage, "ub-dead").await;
+    labelled(&storage, "ub-a-dead", &["new", "old"]).await;
+    tombstone(&storage, "ub-a-dead").await;
+    labelled(&storage, "ub-b-merged", &["new", "old"]).await;
+    let mut dead_before = Vec::new();
+    for id in ["ub-dead", "ub-a-dead"] {
+        dead_before.push((
+            storage.get_issue(id).await.unwrap().unwrap(),
+            event_triples(&storage, id).await,
+        ));
+    }
+    let merged_seen = event_triples(&storage, "ub-b-merged").await.len();
+
+    assert_eq!(
+        storage.rename_label("old", "new", "a").await.unwrap(),
+        2,
+        "only the two live issues are counted"
+    );
+
+    for (before, events) in dead_before {
+        let id = before.id.as_str();
+        let after = storage.get_issue(id).await.unwrap().unwrap();
+        assert_eq!(after.labels, before.labels, "{id}: tombstone untouched");
+        assert_eq!(after.updated_at, before.updated_at, "{id}: updated_at");
+        assert_eq!(event_triples(&storage, id).await, events, "{id}: no event");
+    }
+    assert_eq!(
+        storage.get_issue("ub-live").await.unwrap().unwrap().labels,
+        vec!["new".to_string()]
+    );
+    assert_eq!(
+        storage
+            .get_issue("ub-b-merged")
+            .await
+            .unwrap()
+            .unwrap()
+            .labels,
+        vec!["new".to_string()]
+    );
+    assert_eq!(
+        events_after(&storage, "ub-b-merged", merged_seen).await,
+        vec![("label_removed".to_string(), Some("old".to_string()), None)],
+        "the live merged issue gets the remove only"
+    );
+}
+
+/// `rename_label` NO-OP (D56 (d), first half): `old == new` returns `0` and changes nothing — no row,
+/// no event, no `updated_at`.
+pub async fn contract_rename_label_noop<S: Storage>(storage: S) {
+    labelled(&storage, "ub-1", &["same"]).await;
+    let before = storage.get_issue("ub-1").await.unwrap().unwrap();
+    let events = event_triples(&storage, "ub-1").await;
+
+    assert_eq!(storage.rename_label("same", "same", "a").await.unwrap(), 0);
+
+    let after = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(after.labels, before.labels);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert_eq!(event_triples(&storage, "ub-1").await, events);
+}
+
+/// `rename_label` of a label NO live issue carries (D56 (d), second half): `0`, no row and no event
+/// (bd-faithful, so a retry is idempotent).
+pub async fn contract_rename_label_missing_label<S: Storage>(storage: S) {
+    labelled(&storage, "ub-1", &["x"]).await;
+    let before = storage.get_issue("ub-1").await.unwrap().unwrap();
+    let events = event_triples(&storage, "ub-1").await;
+
+    assert_eq!(storage.rename_label("nope", "new", "a").await.unwrap(), 0);
+
+    let after = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(after.labels, vec!["x".to_string()]);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert_eq!(event_triples(&storage, "ub-1").await, events);
+    assert!(
+        storage
+            .list_all_labels()
+            .await
+            .unwrap()
+            .iter()
+            .all(|row| row.label != "new"),
+        "no `new` row was written"
+    );
+}
+
+/// `close_issues` REAL CLOSE (D56 (l), storage half): every id closes in the GIVEN order with
+/// `closed_at` set, the reason persisted, `updated_at` advanced, a RAW HASH equal to the recomputed
+/// hash of the new row and different from the pre-close one, and `StatusChanged(open → closed)`
+/// then `Closed` — byte-for-byte what `update_issue` writes for `issue close`.
+pub async fn contract_close_issues_closes_in_given_order<S: Storage + StorageTestkit>(storage: S) {
+    for id in ["ub-a", "ub-b"] {
+        let mut epic = issue(id, id);
+        epic.issue_type = IssueType::Epic;
+        storage.create_issue(&epic, "a").await.unwrap();
+    }
+    let raw_a = storage.testkit_raw_content_hash("ub-a").await.unwrap();
+    let raw_b = storage.testkit_raw_content_hash("ub-b").await.unwrap();
+
+    let closed = storage
+        .close_issues(
+            &["ub-b".to_string(), "ub-a".to_string()],
+            "All children completed",
+            "a",
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed, vec!["ub-b".to_string(), "ub-a".to_string()]);
+
+    for (id, raw_before) in [("ub-a", raw_a), ("ub-b", raw_b)] {
+        let row = storage.get_issue(id).await.unwrap().unwrap();
+        assert_eq!(row.status, Status::Closed);
+        assert!(row.closed_at.is_some(), "{id}: closed_at derived");
+        assert_eq!(row.close_reason.as_deref(), Some("All children completed"));
+        assert!(row.updated_at > ts(2026, 1, 1), "{id}: updated_at advanced");
+        let raw_after = storage.testkit_raw_content_hash(id).await.unwrap();
+        assert_eq!(
+            raw_after.as_deref(),
+            Some(row.compute_content_hash().as_str()),
+            "{id}: the RAW column holds the recomputed hash"
+        );
+        assert_ne!(raw_after, raw_before, "{id}: the RAW column moved");
+        // A freshly created epic with no relation carries exactly its one creation event.
+        assert_eq!(
+            events_after(&storage, id, 1).await,
+            vec![
+                (
+                    "status_changed".to_string(),
+                    Some("open".to_string()),
+                    Some("closed".to_string())
+                ),
+                ("closed".to_string(), None, None),
+            ],
+            "{id}: StatusChanged then Closed"
+        );
+    }
+}
+
+/// `close_issues` SKIP (D56 (p), first half): an already-closed id whose `close_reason` DIFFERS and a
+/// tombstoned id are SKIPPED UNTOUCHED — `close_reason`, `updated_at` and the RAW HASH unchanged, no
+/// event — and absent from the result.
+pub async fn contract_close_issues_skips_closed_and_tombstoned<S: Storage + StorageTestkit>(
+    storage: S,
+) {
+    let mut done = issue("ub-done", "done");
+    done.issue_type = IssueType::Epic;
+    done.status = Status::Closed;
+    done.closed_at = Some(ts(2026, 1, 2));
+    done.close_reason = Some("Closed by hand".to_string());
+    storage.create_issue(&done, "a").await.unwrap();
+    let mut dead = issue("ub-dead", "dead");
+    dead.issue_type = IssueType::Epic;
+    storage.create_issue(&dead, "a").await.unwrap();
+    tombstone(&storage, "ub-dead").await;
+
+    let mut before = Vec::new();
+    for id in ["ub-done", "ub-dead"] {
+        before.push((
+            storage.get_issue(id).await.unwrap().unwrap(),
+            storage.testkit_raw_content_hash(id).await.unwrap(),
+            event_triples(&storage, id).await,
+        ));
+    }
+
+    let closed = storage
+        .close_issues(
+            &["ub-done".to_string(), "ub-dead".to_string()],
+            "All children completed",
+            "a",
+        )
+        .await
+        .unwrap();
+    assert!(closed.is_empty(), "skipped ids are absent from the result");
+
+    for (row, raw, events) in before {
+        let id = row.id.as_str();
+        let after = storage.get_issue(id).await.unwrap().unwrap();
+        assert_eq!(after.close_reason, row.close_reason, "{id}: close_reason");
+        assert_eq!(after.updated_at, row.updated_at, "{id}: updated_at");
+        assert_eq!(after.status, row.status, "{id}: status");
+        assert_eq!(
+            storage.testkit_raw_content_hash(id).await.unwrap(),
+            raw,
+            "{id}: RAW HASH"
+        );
+        assert_eq!(event_triples(&storage, id).await, events, "{id}: no event");
+    }
+}
+
+/// `close_issues` ROLLBACK (D56 (p), second half): over `[valid, missing]` — the missing id AFTER a
+/// valid one — the call fails `IssueNotFound` and the valid epic's close is rolled back: row, RAW
+/// HASH and events unchanged (D44 one-transaction invariant).
+pub async fn contract_close_issues_missing_id_rolls_back<S: Storage + StorageTestkit>(storage: S) {
+    let mut valid = issue("ub-valid", "valid");
+    valid.issue_type = IssueType::Epic;
+    storage.create_issue(&valid, "a").await.unwrap();
+    let before = storage.get_issue("ub-valid").await.unwrap().unwrap();
+    let raw_before = storage.testkit_raw_content_hash("ub-valid").await.unwrap();
+    let events_before = event_triples(&storage, "ub-valid").await;
+
+    let err = storage
+        .close_issues(
+            &["ub-valid".to_string(), "ub-missing".to_string()],
+            "All children completed",
+            "a",
+        )
+        .await
+        .expect_err("a missing id fails the batch");
+    assert!(
+        matches!(&err, StorageError::IssueNotFound { id } if id == "ub-missing"),
+        "IssueNotFound names the missing id: {err:?}"
+    );
+
+    let after = storage.get_issue("ub-valid").await.unwrap().unwrap();
+    assert_eq!(after.status, Status::Open, "the valid close rolled back");
+    assert_eq!(after.closed_at, None);
+    assert_eq!(after.close_reason, before.close_reason);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert_eq!(
+        storage.testkit_raw_content_hash("ub-valid").await.unwrap(),
+        raw_before
+    );
+    assert_eq!(event_triples(&storage, "ub-valid").await, events_before);
 }
 
 // --------------------------------------------------------------------------------------------------

@@ -215,7 +215,7 @@ pub mod parked {
     use super::{Arc, Storage};
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
     use unblock_model::{
         Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
@@ -237,6 +237,17 @@ pub mod parked {
         /// [`new_gated_bulk`](Self::new_gated_bulk) — opt-in, so every existing single-create-gated
         /// caller is unaffected).
         bulk_armed: AtomicBool,
+        /// The D56 organization gate (armed ONLY by
+        /// [`new_gated_organization`](Self::new_gated_organization)): parks the first
+        /// `epic_child_rollup` or `rename_label` call — both run INSIDE the engine's write guard on
+        /// the `close_eligible` / `rename_label` paths, so a parked call proves the guard is held.
+        org_armed: AtomicBool,
+        /// The D56 close gate (armed ONLY by [`new_gated_close`](Self::new_gated_close)): parks the
+        /// first `close_issues` call, so a test can prove the guard is STILL held while the close
+        /// transaction runs, not only during the snapshot read.
+        close_armed: AtomicBool,
+        /// The number of `close_issues` calls observed (D56: one call = one transaction).
+        close_calls: AtomicUsize,
     }
 
     impl ParkedStorage {
@@ -250,6 +261,9 @@ pub mod parked {
                 entered: Notify::new(),
                 armed: AtomicBool::new(true),
                 bulk_armed: AtomicBool::new(false),
+                org_armed: AtomicBool::new(false),
+                close_armed: AtomicBool::new(false),
+                close_calls: AtomicUsize::new(0),
             })
         }
 
@@ -264,7 +278,73 @@ pub mod parked {
                 entered: Notify::new(),
                 armed: AtomicBool::new(false),
                 bulk_armed: AtomicBool::new(true),
+                org_armed: AtomicBool::new(false),
+                close_armed: AtomicBool::new(false),
+                close_calls: AtomicUsize::new(0),
             })
+        }
+
+        /// Wrap an inner storage with EVERY gate disarmed — a plain delegate that only counts
+        /// `close_issues` calls (D56).
+        #[must_use]
+        pub fn new_passthrough(inner: Arc<dyn Storage>) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                gate: Notify::new(),
+                entered: Notify::new(),
+                armed: AtomicBool::new(false),
+                bulk_armed: AtomicBool::new(false),
+                org_armed: AtomicBool::new(false),
+                close_armed: AtomicBool::new(false),
+                close_calls: AtomicUsize::new(0),
+            })
+        }
+
+        /// Wrap an inner storage; the first `epic_child_rollup` or `rename_label` call parks until
+        /// released (D56 — the organization mutations' guard-holding window). Every other gate stays
+        /// disarmed.
+        #[must_use]
+        pub fn new_gated_organization(inner: Arc<dyn Storage>) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                gate: Notify::new(),
+                entered: Notify::new(),
+                armed: AtomicBool::new(false),
+                bulk_armed: AtomicBool::new(false),
+                org_armed: AtomicBool::new(true),
+                close_armed: AtomicBool::new(false),
+                close_calls: AtomicUsize::new(0),
+            })
+        }
+
+        /// Wrap an inner storage; the first `close_issues` call parks until released (D56 — the
+        /// real `close_eligible` run's close transaction). Every other gate stays disarmed.
+        #[must_use]
+        pub fn new_gated_close(inner: Arc<dyn Storage>) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                gate: Notify::new(),
+                entered: Notify::new(),
+                armed: AtomicBool::new(false),
+                bulk_armed: AtomicBool::new(false),
+                org_armed: AtomicBool::new(false),
+                close_armed: AtomicBool::new(true),
+                close_calls: AtomicUsize::new(0),
+            })
+        }
+
+        /// The number of `close_issues` calls observed so far.
+        #[must_use]
+        pub fn close_calls(&self) -> usize {
+            self.close_calls.load(Ordering::SeqCst)
+        }
+
+        /// Park here when the D56 organization gate is armed (one-shot).
+        async fn park_if_organization_armed(&self) {
+            if self.org_armed.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.gate.notified().await;
+            }
         }
 
         /// Wait until the parked write has entered the gated mutation (it is now holding the
@@ -453,6 +533,7 @@ pub mod parked {
             self.inner.list_events(issue_id).await
         }
         async fn epic_child_rollup(&self) -> Result<Vec<(String, (usize, usize))>, StorageError> {
+            self.park_if_organization_armed().await;
             self.inner.epic_child_rollup().await
         }
         async fn closed_since(
@@ -468,6 +549,31 @@ pub mod parked {
         // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
         async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
             self.inner.dangling_dependencies().await
+        }
+        async fn list_all_labels(&self) -> Result<Vec<unblock_model::LabelCount>, StorageError> {
+            self.inner.list_all_labels().await
+        }
+        async fn rename_label(
+            &self,
+            old: &str,
+            new: &str,
+            actor: &str,
+        ) -> Result<usize, StorageError> {
+            self.park_if_organization_armed().await;
+            self.inner.rename_label(old, new, actor).await
+        }
+        async fn close_issues(
+            &self,
+            ids: &[String],
+            reason: &str,
+            actor: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+            if self.close_armed.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.gate.notified().await;
+            }
+            self.inner.close_issues(ids, reason, actor).await
         }
     }
 }
@@ -744,6 +850,25 @@ pub mod collide {
         // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
         async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
             self.inner.dangling_dependencies().await
+        }
+        async fn list_all_labels(&self) -> Result<Vec<unblock_model::LabelCount>, StorageError> {
+            self.inner.list_all_labels().await
+        }
+        async fn rename_label(
+            &self,
+            old: &str,
+            new: &str,
+            actor: &str,
+        ) -> Result<usize, StorageError> {
+            self.inner.rename_label(old, new, actor).await
+        }
+        async fn close_issues(
+            &self,
+            ids: &[String],
+            reason: &str,
+            actor: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            self.inner.close_issues(ids, reason, actor).await
         }
     }
 }
@@ -1063,6 +1188,25 @@ pub mod race {
         // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
         async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
             self.inner.dangling_dependencies().await
+        }
+        async fn list_all_labels(&self) -> Result<Vec<unblock_model::LabelCount>, StorageError> {
+            self.inner.list_all_labels().await
+        }
+        async fn rename_label(
+            &self,
+            old: &str,
+            new: &str,
+            actor: &str,
+        ) -> Result<usize, StorageError> {
+            self.inner.rename_label(old, new, actor).await
+        }
+        async fn close_issues(
+            &self,
+            ids: &[String],
+            reason: &str,
+            actor: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            self.inner.close_issues(ids, reason, actor).await
         }
     }
 }

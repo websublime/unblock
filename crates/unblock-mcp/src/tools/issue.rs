@@ -1,9 +1,10 @@
-//! Tool **#1 `issue`** — the 8-action issue lifecycle (spine §5.1/§5.2).
+//! Tool **#1 `issue`** — the 10-action issue lifecycle (spine §5.1/§5.2).
 //!
-//! Actions: `create` / `create_bulk` / `show` / `update` / `close` / `reopen` / `delete` / `restore`,
-//! mapped to `Session::{create_issue, create_bulk, get, update, close_with_suggestions, update,
-//! delete, restore}`. `create_bulk` (D22) is the 8th ACTION — a discriminator arm on this ONE tool,
-//! so it does NOT grow the tool count (spine §5.1/§6.6).
+//! Actions: `create` / `create_bulk` / `show` / `update` / `close` / `reopen` / `delete` / `restore`
+//! / `relabel` / `close_eligible`, mapped to `Session::{create_issue, create_bulk, get, update,
+//! close_with_suggestions, update, delete, restore, rename_label, close_eligible}`. `create_bulk`
+//! (D22) is the 8th ACTION — a discriminator arm on this ONE tool, so it does NOT grow the tool count
+//! (spine §5.1/§6.6); D56 appends `relabel` and `close_eligible` (FR-6) on the same rule.
 //!
 //! - `create` maps [`IssueInput::Create`] → the engine-owned [`unblock_engine::NewIssue`] and calls
 //!   the **MINTING** `Session::create_issue` (D21 — the engine mints the id under the write permit).
@@ -13,6 +14,10 @@
 //! - `reopen` is an `update` patch to a non-terminal status — there is NO `Session::reopen`.
 //! - `restore` is SINGLE-ID (scalar, D20) → `Session::restore(id)` (the dedicated un-tombstone path),
 //!   NOT `update`.
+//! - `relabel` (D56) → `Session::rename_label(old_name, new_name)` → `IssueOutput::Relabel`;
+//!   `close_eligible` (D56) → `Session::close_eligible(dry_run)` → `IssueOutput::CloseEligible`,
+//!   whose list key is `epic_ids`, never `close`'s `closed`. Both flatten the discarded
+//!   `Attribution` (D52).
 
 use chrono::{DateTime, Utc};
 // D42 SEAM: this is the CRATE-LOCAL `Parameters` (`crate::tools::args`), NOT rmcp's. It defers
@@ -33,7 +38,7 @@ use crate::tools::dto::{Attribution, DepInput};
 use crate::tools::output::{DeleteModeOutput, DeletePlanOutput, IdOnly, IssueList, IssueOutput};
 use crate::tools::{engine_err_json, err_json, ok_json};
 
-/// The `issue` tool input (spine §5.2 — EXACT shape; 8 actions).
+/// The `issue` tool input (spine §5.2 — EXACT shape; 10 actions).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 // §5.2a (CD-1): inject the root `"type": "object"` so the published inputSchema is MCP-conformant. A
@@ -140,6 +145,29 @@ pub(crate) enum IssueInput {
     Restore {
         /// The issue id.
         id: String,
+        #[serde(flatten)]
+        attribution: Attribution,
+    },
+    /// Rename a label on every non-tombstoned issue; an issue already carrying the new name keeps
+    /// one copy (D56).
+    //
+    // D56 — `Relabel` and `CloseEligible` are APPENDED LAST: schemars emits the variants in
+    // DECLARATION order and `CONTRACT_HASH` digests those bytes; each variant's `///` doc comment is
+    // contract bytes (its schema `description`).
+    Relabel {
+        /// The label to rename.
+        old_name: String,
+        /// The label it becomes.
+        new_name: String,
+        #[serde(flatten)]
+        attribution: Attribution,
+    },
+    /// Close every epic whose children are all closed, nested epics cascading child before parent
+    /// (D56).
+    CloseEligible {
+        /// When `true`, report the epics that would close and write nothing.
+        #[serde(default)]
+        dry_run: bool,
         #[serde(flatten)]
         attribution: Attribution,
     },
@@ -342,10 +370,10 @@ fn create_dep_source_rejected(index: usize, source: &str) -> StructuredError {
 
 #[rmcp::tool_router(router = issue_router, vis = "pub(crate)")]
 impl UnblockServer {
-    /// Create, inspect, or mutate issues (the 7-action issue lifecycle, FR-1a/1b/1c).
+    /// Create, inspect, or mutate issues (the 10-action issue lifecycle, FR-1a/1b/1c, FR-6).
     #[tool(
         name = "issue",
-        description = "Create, show, update, close, reopen, delete, or restore issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
+        description = "Create, show, update, close, reopen, delete, restore, relabel, or close_eligible issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     )]
     pub(crate) async fn issue(&self, Parameters(raw, _): Parameters<IssueInput>) -> CallToolResult {
         // D42 PROLOGUE: the ONLY deserialization of tool arguments. The NFR-18 quota already
@@ -488,6 +516,21 @@ impl UnblockServer {
             }
             IssueInput::Restore { id, attribution: _ } => match self.session.restore(&id).await {
                 Ok(issue) => ok_json(&IssueOutput::Issue(Box::new(issue))),
+                Err(err) => engine_err_json(&err),
+            },
+            IssueInput::Relabel {
+                old_name,
+                new_name,
+                attribution: _,
+            } => match self.session.rename_label(&old_name, &new_name).await {
+                Ok(rename) => ok_json(&IssueOutput::Relabel(rename)),
+                Err(err) => engine_err_json(&err),
+            },
+            IssueInput::CloseEligible {
+                dry_run,
+                attribution: _,
+            } => match self.session.close_eligible(dry_run).await {
+                Ok(outcome) => ok_json(&IssueOutput::CloseEligible(outcome)),
                 Err(err) => engine_err_json(&err),
             },
         }
