@@ -52,6 +52,18 @@ expression: contract_rows()
     true
   ],
   [
+    "Config::UnknownKey",
+    "CONFIG_ERROR",
+    7,
+    false
+  ],
+  [
+    "Config::FaultyDbConfig",
+    "CONFIG_ERROR",
+    7,
+    false
+  ],
+  [
     "WorkspaceNotOpen",
     "NOT_INITIALIZED",
     2,

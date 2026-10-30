@@ -288,7 +288,7 @@ pub async fn run(_args: &McpArgs, overrides: &CliOverrides) -> Result<Option<u8>
         &mut std::io::stderr().lock(),
     );
     tracing::debug!("mcp: workspace opened");
-    let cfg = session_config(&ctx);
+    let cfg = session_config();
 
     let session = Session::open(ctx, cfg)
         .await?

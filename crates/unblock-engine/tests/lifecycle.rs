@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{session, session_with};
+use common::session;
 use unblock_engine::{EngineError, Session, SessionConfig};
 
 #[tokio::test]
@@ -324,22 +324,6 @@ async fn doctor_schema_findings_report_the_stamp_and_the_build_version_separatel
         detail("schema_expected"),
         "the whole point: on a drifted database the two findings must DISAGREE — a pair that cannot \
          disagree cannot stop `doctor` printing `healthy` beside a contradicting number"
-    );
-}
-
-#[tokio::test]
-async fn open_with_jsonl_export_knob_is_accepted() {
-    // The jsonl_export knob is wired (its export body is the T2.4 seam); open must still succeed.
-    let session = session_with(SessionConfig {
-        jsonl_export: true,
-        ..SessionConfig::default()
-    })
-    .await;
-    assert!(
-        session
-            .ready(&unblock_model::ListFilters::default())
-            .await
-            .is_ok()
     );
 }
 

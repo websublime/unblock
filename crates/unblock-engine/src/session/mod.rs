@@ -1,5 +1,5 @@
 //! The [`Session`] struct (the single shared state) + [`SessionConfig`], with the per-concern
-//! `impl Session` modules (lifecycle / read / write / interchange / organization).
+//! `impl Session` modules (lifecycle / read / write / interchange / organization / config).
 //!
 //! `Session` is the single mutation home (FR-9): MCP and CLI are thin adapters over this surface, so
 //! behaviour cannot drift. Writes serialize through one `Arc<tokio::sync::Semaphore>` with **one
@@ -9,8 +9,19 @@
 //! **NO `policy` field** (OQ-1 RESOLVED): `unblock-policy` ships only free functions — `ready()`
 //! calls `unblock_policy::cmp_ready` directly and `close_with_suggestions` consumes `is_ready` as a
 //! free fn. `sync`/`health` are typed not-wired seams (no handle field in v1).
+//!
+//! **Runtime configuration (FR-13 full, PRD §4 D57).** The startup keys are an immutable
+//! [`StartupConfig`]; the runtime keys are a LIVE snapshot, `Arc<std::sync::RwLock<Arc<RuntimeConfig>>>`,
+//! swapped only by `config_set`/`config_unset` (`session/config.rs`). The lock is never held across
+//! an `.await` — its critical sections only clone or replace an `Arc` — and a poisoned lock is
+//! recovered with [`PoisonError::into_inner`] (a poisoned lock still holds a whole snapshot). Every
+//! MUTATION takes the snapshot ONCE, AFTER `acquire()`, and uses that snapshot's actor throughout;
+//! every fallible method that reads, writes or reports on the workspace first applies the clause
+//! (2a) fail-closed gate ([`Session::gated_runtime`]) — EXEMPT are only `open`, the four `config_*`
+//! methods and `shutdown`.
 
 pub(crate) mod bulk;
+pub(crate) mod config;
 pub(crate) mod ids;
 pub(crate) mod interchange;
 pub(crate) mod lifecycle;
@@ -23,22 +34,24 @@ pub(crate) mod write;
 pub use lifecycle::MigrateOutcome;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use tokio::sync::Semaphore;
-use unblock_config::ResolvedConfig;
+use unblock_config::{ConfigReloader, RuntimeConfig, StartupConfig};
 use unblock_storage::Storage;
+
+use crate::error::{EngineError, Result};
 
 /// Engine-behaviour knobs passed to [`Session::open`] (spine §4.1).
 ///
 /// Post-CF-D, `workspace_dir`/`actor`/the resolved config arrive via the `WorkspaceContext`
 /// (config-owned) and are **no longer** here. `SessionConfig` carries only the bool engine knobs —
-/// **verbatim per spine §4.1**. `Default` = all-false.
+/// **verbatim per spine §4.1**. `Default` = all-false. (D57 DELETED `jsonl_export`: it duplicated
+/// the RUNTIME key, which a reload changes, so a copy here would go stale; nothing reads either copy
+/// — the consumer is tracked as `ub-p1h`.)
 #[derive(Debug, Clone, Default)]
 pub struct SessionConfig {
-    /// Auto-export JSONL after mutating ops (FR-7). *(v1: the export path is the sync seam, T2.4.)*
-    pub jsonl_export: bool,
     /// Run the import seam during `open()` if set (FR-8). *(v1: delegates to the sync seam, T2.4 —
     /// `open(import_on_open=true)` returns `FeatureNotWired{"sync"}` until then.)*
     pub import_on_open: bool,
@@ -58,10 +71,14 @@ pub struct Session {
     pub(crate) storage: Arc<dyn Storage>,
     /// The single write permit (1 permit, D14, spine §4.2). Reads never touch it (FR-10).
     pub(crate) write_permit: Arc<Semaphore>,
-    /// The resolved config VALUES the session reads (config-owned, from the context).
-    pub(crate) config: ResolvedConfig,
-    /// The authoritative actor (spine §4.1, from the context).
-    pub(crate) actor: String,
+    /// The STARTUP config values (D57: immutable for the session's life — never reloaded).
+    pub(crate) config: StartupConfig,
+    /// The LIVE runtime snapshot (D57 clause (8)) — actor, output format, search cap, their sources
+    /// and the DB layer's faults. Swapped only by `config_set`/`config_unset`; the outer `Arc` lets
+    /// their spawned commit+swap tail own the cell.
+    pub(crate) runtime: Arc<RwLock<Arc<RuntimeConfig>>>,
+    /// Re-resolves the runtime keys for this live session (moved in from the context, D57).
+    pub(crate) reloader: ConfigReloader,
     /// The project root (the dir that contains `.unblock/`, from the context).
     pub(crate) workspace_dir: PathBuf,
     /// The discovered `.unblock/` directory (from the context's `ConfigPaths`).
@@ -97,10 +114,39 @@ impl Session {
         crate::shutdown::is_shutdown_requested(&self.shutdown)
     }
 
-    /// The authoritative actor for this session (spine §4.1).
+    /// The current runtime snapshot (D57): a clone of the snapshot's `Arc`, taken under the read
+    /// lock with no `.await`. A poisoned lock is recovered — it still holds a whole snapshot.
     #[must_use]
-    pub fn actor(&self) -> &str {
-        &self.actor
+    pub fn runtime(&self) -> Arc<RuntimeConfig> {
+        Arc::clone(&self.runtime.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// The authoritative actor of the CURRENT runtime snapshot (spine §4.1; D57: owned, because a
+    /// `config set actor` can replace it while the caller holds the value).
+    #[must_use]
+    pub fn actor(&self) -> String {
+        self.runtime().actor.clone()
+    }
+
+    /// Replace the runtime snapshot (the swap half of `config_set`/`config_unset`, D57 clause (7)).
+    /// The write lock only replaces an `Arc`, so it cannot be poisoned mid-update.
+    pub(crate) fn swap_runtime(cell: &RwLock<Arc<RuntimeConfig>>, next: Arc<RuntimeConfig>) {
+        *cell.write().unwrap_or_else(PoisonError::into_inner) = next;
+    }
+
+    /// The fail-closed gate (PRD §4 D57 clause (2a)): the current snapshot, or
+    /// `ConfigError::FaultyDbConfig` (→ [`EngineError::Config`], `CONFIG_ERROR`, the recovery hint)
+    /// when it holds a BLOCKING DB config fault. Every gated method calls it before any storage
+    /// call — a mutation AFTER `acquire()`, so the snapshot it gates on is the one it then uses.
+    ///
+    /// # Errors
+    /// [`EngineError::Config`] (`FaultyDbConfig`) while a blocking fault exists.
+    pub(crate) fn gated_runtime(&self) -> Result<Arc<RuntimeConfig>> {
+        let runtime = self.runtime();
+        match runtime.blocking_fault_error() {
+            Some(source) => Err(EngineError::Config { source }),
+            None => Ok(runtime),
+        }
     }
 
     /// The project root (the directory that contains `.unblock/`).
@@ -124,7 +170,6 @@ mod tests {
     #[test]
     fn session_config_default_is_all_false() {
         let cfg = SessionConfig::default();
-        assert!(!cfg.jsonl_export);
         assert!(!cfg.import_on_open);
         assert!(!cfg.remote);
     }
@@ -132,12 +177,11 @@ mod tests {
     #[test]
     fn session_config_round_trips_debug_clone() {
         let cfg = SessionConfig {
-            jsonl_export: true,
-            import_on_open: false,
+            import_on_open: true,
             remote: false,
         };
         let cloned = cfg.clone();
-        assert_eq!(cloned.jsonl_export, cfg.jsonl_export);
-        assert!(format!("{cfg:?}").contains("jsonl_export"));
+        assert_eq!(cloned.import_on_open, cfg.import_on_open);
+        assert!(format!("{cfg:?}").contains("import_on_open"));
     }
 }

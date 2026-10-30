@@ -258,6 +258,11 @@ pub mod parked {
         close_armed: AtomicBool,
         /// The number of `close_issues` calls observed (D56: one call = one transaction).
         close_calls: AtomicUsize,
+        /// The D57 config gate (armed ONLY by [`new_gated_config`](Self::new_gated_config)): parks
+        /// the first `set_config`/`unset_config` call AFTER it has COMMITTED — inside the engine's
+        /// commit+swap task, which owns the write guard — so a test can prove the guard is held
+        /// across the commit and that a caller future dropped after the commit still swaps.
+        config_armed: AtomicBool,
     }
 
     impl ParkedStorage {
@@ -274,6 +279,7 @@ pub mod parked {
                 org_armed: AtomicBool::new(false),
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
             })
         }
 
@@ -291,6 +297,7 @@ pub mod parked {
                 org_armed: AtomicBool::new(false),
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
             })
         }
 
@@ -307,6 +314,7 @@ pub mod parked {
                 org_armed: AtomicBool::new(false),
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
             })
         }
 
@@ -324,6 +332,7 @@ pub mod parked {
                 org_armed: AtomicBool::new(true),
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
             })
         }
 
@@ -340,6 +349,25 @@ pub mod parked {
                 org_armed: AtomicBool::new(false),
                 close_armed: AtomicBool::new(true),
                 close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
+            })
+        }
+
+        /// Wrap an inner storage; the first `set_config`/`unset_config` call COMMITS, then parks
+        /// until released (D57 — the `config_set`/`config_unset` commit+swap tail). Every other gate
+        /// stays disarmed.
+        #[must_use]
+        pub fn new_gated_config(inner: Arc<dyn Storage>) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                gate: Notify::new(),
+                entered: Notify::new(),
+                armed: AtomicBool::new(false),
+                bulk_armed: AtomicBool::new(false),
+                org_armed: AtomicBool::new(false),
+                close_armed: AtomicBool::new(false),
+                close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(true),
             })
         }
 
@@ -352,6 +380,14 @@ pub mod parked {
         /// Park here when the D56 organization gate is armed (one-shot).
         async fn park_if_organization_armed(&self) {
             if self.org_armed.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.gate.notified().await;
+            }
+        }
+
+        /// Park here, AFTER a committed config write, when the D57 config gate is armed (one-shot).
+        async fn park_if_config_armed(&self) {
+            if self.config_armed.swap(false, Ordering::SeqCst) {
                 self.entered.notify_one();
                 self.gate.notified().await;
             }
@@ -591,11 +627,15 @@ pub mod parked {
         }
 
         async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
-            self.inner.set_config(key, value).await
+            let committed = self.inner.set_config(key, value).await;
+            self.park_if_config_armed().await;
+            committed
         }
 
         async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
-            self.inner.unset_config(key).await
+            let committed = self.inner.unset_config(key).await;
+            self.park_if_config_armed().await;
+            committed
         }
     }
 }

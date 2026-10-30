@@ -11,7 +11,6 @@
 //! Each handler returns `Result<Option<u8>, CliError>`: `Some(128+signo)` = an `mcp` signal exit;
 //! `None` = success (exit 0). `run_with` maps that through the exit boundary.
 
-use unblock_config::WorkspaceContext;
 use unblock_engine::SessionConfig;
 
 use crate::cli::{Cli, Command};
@@ -42,11 +41,11 @@ pub async fn dispatch(cli: Cli) -> Result<Option<u8>, CliError> {
 /// Assemble the `SessionConfig` the storage-opening commands pass to `Session::open`.
 ///
 /// **`import_on_open` MUST stay false in v1** — `true` returns `FeatureNotWired{"sync"}` (exit 1),
-/// the DR-13 trap. `remote` is `false` (v1). `jsonl_export` mirrors the resolved config value.
+/// the DR-13 trap. `remote` is `false` (v1). (D57 deleted the `jsonl_export` copy: the engine reads
+/// the live runtime snapshot, so a copy here would go stale on a reload.)
 #[must_use]
-pub fn session_config(ctx: &WorkspaceContext) -> SessionConfig {
+pub fn session_config() -> SessionConfig {
     SessionConfig {
-        jsonl_export: ctx.config.runtime.jsonl_export,
         import_on_open: false,
         remote: false,
     }
@@ -55,46 +54,10 @@ pub fn session_config(ctx: &WorkspaceContext) -> SessionConfig {
 #[cfg(test)]
 mod tests {
     use super::session_config;
-    use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
-    use unblock_storage::LibsqlStorage;
 
-    async fn workspace_context(jsonl_export: bool) -> WorkspaceContext {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("unblock.db");
-        let storage =
-            LibsqlStorage::open_local(&db_path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
-                .await
-                .expect("open db");
-        let mut config = ResolvedConfig::default();
-        config.runtime.jsonl_export = jsonl_export;
-        config.runtime.actor = "tester".to_string();
-        config.runtime.sources.actor = unblock_model::ConfigSource::OsUser;
-        WorkspaceContext {
-            storage: std::sync::Arc::new(storage),
-            workspace_dir: tmp.path().to_path_buf(),
-            config,
-            reloader: unblock_config::ConfigReloader::new(
-                unblock_config::CliOverrides::default(),
-                unblock_config::EnvOverrides::default(),
-                Some("tester".to_string()),
-                None,
-                None,
-            ),
-            paths: ConfigPaths {
-                unblock_dir: tmp.path().to_path_buf(),
-                db_path,
-                jsonl_path: tmp.path().join("issues.jsonl"),
-            },
-            source: WorkspaceSource::WalkUp,
-            schema_version_before_migrate: 0,
-        }
-    }
-
-    #[tokio::test]
-    async fn session_config_never_imports_on_open_and_mirrors_jsonl() {
-        let ctx = workspace_context(true).await;
-        let cfg = session_config(&ctx);
-        assert!(cfg.jsonl_export, "mirrors ctx.config.jsonl_export");
+    #[test]
+    fn session_config_never_imports_on_open() {
+        let cfg = session_config();
         assert!(!cfg.import_on_open, "DR-13 trap: must stay false");
         assert!(!cfg.remote, "v1: remote stays false");
     }
