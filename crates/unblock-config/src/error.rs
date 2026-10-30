@@ -79,8 +79,12 @@ pub enum ConfigError {
     ///
     /// Maps to [`ErrorCode::ConfigParseError`] (exit 7). The variant identifier is `Parse` (spine
     /// §2.1) even though it maps to the `ConfigParseError` code; the inner [`toml::de::Error`] is
-    /// absorbed (its message is surfaced, the type never re-exposed past this boundary).
-    #[snafu(display("failed to parse {}: {source}", path.display()))]
+    /// absorbed (its message is surfaced, the type never re-exposed past this boundary). The
+    /// display carries the parser's MESSAGE and byte offset only — never `toml`'s source-line
+    /// excerpt, which would echo a malformed line verbatim (a credential typed unquoted is refused by
+    /// the parse before the NFR-18 deny could redact it, and since D57 a reload failure is reported
+    /// in-band to an MCP client).
+    #[snafu(display("failed to parse {}: {}", path.display(), parse_summary(source)))]
     Parse {
         /// The TOML deserialization failure.
         source: toml::de::Error,
@@ -106,11 +110,19 @@ pub enum ConfigError {
     /// `validate_actor` — over-length / NUL / control char), a path-injecting or absolute
     /// `db_filename` / `jsonl_filename` / `--db` (Seam B), an unparseable `UNBLOCK_OUTPUT_FORMAT`,
     /// an unsupported `backend`, and a forbidden `[remote] auth_token` in `config.toml` (NFR-18).
-    #[snafu(display("invalid config value for `{key}` = `{value}`: {reason}"))]
+    /// The display ECHOES `key` and `value` through [`shown`] (clipped to
+    /// [`unblock_error::MAX_ECHOED_BYTES`], control characters escaped), because both can be
+    /// attacker-controlled (an MCP `config` argument, a hand-written database row); an EMPTY `value`
+    /// is not echoed.
+    #[snafu(display(
+        "invalid config value for `{}`{}: {reason}",
+        shown(key),
+        shown_value(value)
+    ))]
     InvalidValue {
         /// The config key whose value was rejected.
         key: String,
-        /// The rejected value (terminal-safe; rendered as-supplied).
+        /// The rejected value (echoed through [`shown`]; empty when no value was supplied).
         value: String,
         /// Why the value was rejected.
         reason: String,
@@ -122,8 +134,9 @@ pub enum ConfigError {
     /// Maps to [`ErrorCode::ConfigError`] (exit 7, not retryable); `context` carries `key` and
     /// `layer` (the §1.10 [`ConfigSource`], only ever `User` or `Db`, wire `"user"`/`"db"`).
     #[snafu(display(
-        "`{key}` is a startup-only key and cannot be set in the {} configuration layer; set it on \
+        "`{}` is a startup-only key and cannot be set in the {} configuration layer; set it on \
          the command line, in the environment or in the project file .unblock/config.toml",
+        shown(key),
         source_name(*layer)
     ))]
     StartupKeyInRuntimeLayer {
@@ -134,10 +147,11 @@ pub enum ConfigError {
     },
 
     /// The `issue` tool's `config` action named a key this build does not know (PRD §4 D57 clause
-    /// (7)). Maps to [`ErrorCode::ConfigError`] (exit 7); `context` carries `key`.
+    /// (7)). Maps to [`ErrorCode::ConfigError`] (exit 7); `context` carries `key` (clipped).
     #[snafu(display(
-        "unknown config key `{key}` (the runtime layer keys are actor, output_format and \
-         search_cap)"
+        "unknown config key `{}` (the runtime layer keys are actor, output_format and \
+         search_cap)",
+        shown(key)
     ))]
     UnknownKey {
         /// The unknown key.
@@ -174,11 +188,57 @@ pub(crate) fn source_name(source: ConfigSource) -> &'static str {
     }
 }
 
+/// Echo attacker-controllable text (an MCP `config` argument, a hand-written database row, a user
+/// file value) into a message: CLIPPED to [`unblock_error::MAX_ECHOED_BYTES`] (spine §2.4 — each
+/// origin clips its own attacker-controlled text) and with every control character ESCAPED
+/// (`\n` → `\\n`, ESC → `\\u{1b}`), so the echo is always one printable line. Printable text,
+/// non-ASCII included, is unchanged.
+#[must_use]
+pub(crate) fn shown(text: &str) -> String {
+    let clipped = unblock_error::clip(text);
+    let mut out = String::with_capacity(clipped.len());
+    for c in clipped.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The echoed-value part of `InvalidValue`'s message (a space, `=`, a space and the quoted value), or
+/// nothing for an empty value (a refusal that read no value, e.g. `config get jsonl_export`, never
+/// prints a misleading empty echo).
+fn shown_value(value: &str) -> String {
+    if value.is_empty() {
+        String::new()
+    } else {
+        format!(" = `{}`", shown(value))
+    }
+}
+
+/// A TOML parse failure without the parser's source excerpt: its message and, when known, the byte
+/// offset it points at (see [`ConfigError::Parse`]).
+fn parse_summary(err: &toml::de::Error) -> String {
+    let message = shown(err.message());
+    match err.span() {
+        Some(span) => format!("{message} (at byte {})", span.start),
+        None => message,
+    }
+}
+
+/// [`unblock_error::clip`] as an owned `String` — the `context` echo of a key (JSON escapes control
+/// characters itself, so only the size is bounded there).
+fn clipped(text: &str) -> String {
+    unblock_error::clip(text).into_owned()
+}
+
 /// The `FaultyDbConfig` message: the blocking keys and why each row blocks.
 fn faulty_db_config_message(faults: &[DbConfigFault]) -> String {
     let rows: Vec<String> = faults
         .iter()
-        .map(|f| format!("`{}` ({})", f.key, f.fault.reason))
+        .map(|f| format!("`{}` ({})", shown(&f.key), shown(&f.fault.reason)))
         .collect();
     format!(
         "the workspace is fail-closed: the database config table holds a blocking row for {}",
@@ -206,13 +266,13 @@ fn faulty_db_config_hint(faults: &[DbConfigFault]) -> String {
                      replace it with issue {{\"action\":\"config\",\"op\":\"set\",\"key\":{key},\
                      \"value\":\"<valid value>\"}} (or remove it with \
                      issue {{\"action\":\"config\",\"op\":\"unset\",\"key\":{key}}})",
-                    f.key
+                    shown(&f.key)
                 )
             } else {
                 format!(
                     "`{}` cannot be set in the database: remove it with \
                      issue {{\"action\":\"config\",\"op\":\"unset\",\"key\":{key}}}",
-                    f.key
+                    shown(&f.key)
                 )
             }
         })
@@ -277,19 +337,19 @@ impl CodedError for ConfigError {
         let mut map = Map::new();
         match self {
             Self::StartupKeyInRuntimeLayer { key, layer } => {
-                map.insert("key".to_string(), Value::String(key.clone()));
+                map.insert("key".to_string(), Value::String(clipped(key)));
                 map.insert(
                     "layer".to_string(),
                     Value::String(source_name(*layer).to_string()),
                 );
             }
             Self::UnknownKey { key } => {
-                map.insert("key".to_string(), Value::String(key.clone()));
+                map.insert("key".to_string(), Value::String(clipped(key)));
             }
             Self::FaultyDbConfig { faults } => {
                 let keys = faults
                     .iter()
-                    .map(|f| Value::String(f.key.clone()))
+                    .map(|f| Value::String(clipped(&f.key)))
                     .collect();
                 map.insert("keys".to_string(), Value::Array(keys));
             }

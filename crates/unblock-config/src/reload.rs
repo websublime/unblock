@@ -162,8 +162,10 @@ impl RuntimeValue {
     }
 }
 
-/// The wire name of an [`OutputFormat`] (its serde `snake_case` spelling — the single string table).
-pub(crate) fn output_format_name(format: OutputFormat) -> String {
+/// The canonical wire name of an [`OutputFormat`] (its serde `snake_case` spelling) — the ONE string
+/// table for the stored and `effective` `output_format` value (a `config` row, a `ConfigEntry`).
+#[must_use]
+pub fn output_format_name(format: OutputFormat) -> String {
     match serde_json::to_value(format) {
         Ok(serde_json::Value::String(name)) => name,
         // `OutputFormat` is a unit-variant enum with `rename_all = "snake_case"`, so serde always

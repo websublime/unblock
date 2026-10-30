@@ -14,19 +14,23 @@
 //! [`load_user_config`] is the SINGLE HOME of every user-file refusal, applied in this order: the TOML
 //! parse ([`ConfigError::Parse`] → `CONFIG_PARSE_ERROR`), the NFR-18 credential deny, the startup-key
 //! refusal ([`ConfigError::StartupKeyInRuntimeLayer`] with `layer: User`, either `jsonl_filename`
-//! spelling) and the `jsonl_export` refusal ([`ConfigError::InvalidValue`] naming `ub-p1h`). An
+//! spelling), the `jsonl_export` refusal ([`ConfigError::InvalidValue`] naming `ub-p1h`) and the
+//! layer-value bounds (a blank or out-of-policy `actor`, a `search_cap` outside `1..=i64::MAX` —
+//! [`ConfigError::InvalidValue`]), so `unblock init`'s pre-check refuses every user file the open
+//! would (PRD §4 D57 clause (6)). An
 //! unknown key keeps the SF-4 rule (warned on `unblock.config`, ignored). Every path that reads the
 //! file — both open facades, the reloader and [`user_output_format`] — goes through it, so no path
 //! can accept a user file another path refuses.
 
 use std::path::{Path, PathBuf};
 
+use snafu::ResultExt;
 use unblock_model::{ConfigSource, OutputFormat};
 
 use crate::env::EnvSource;
-use crate::error::ConfigError;
-use crate::keys::{KeyClass, STARTUP_KEYS, classify};
-use crate::reload::jsonl_export_refusal;
+use crate::error::{ConfigError, IoSnafu};
+use crate::keys::{KeyClass, RuntimeKey, STARTUP_KEYS, classify};
+use crate::reload::{jsonl_export_refusal, parse_runtime_value};
 use crate::schema::{CONFIG_FILENAME, ProjectConfig};
 
 /// The directory under the user configuration root that holds unblock's user file.
@@ -58,14 +62,20 @@ fn absolute(value: Option<String>) -> Option<PathBuf> {
 }
 
 /// Load the user file for `env` — the SINGLE HOME of every user-file refusal (PRD §4 D57 clause
-/// (3)/(6)). `unblock init` calls it BEFORE it creates `.unblock/` or writes any file.
+/// (3)/(6)). `unblock init` calls it BEFORE it creates `.unblock/` or writes any file, so EVERY user
+/// file a later open would refuse is refused here first — which is why the layer-value bounds the
+/// open applies are applied here too, not only after the merge.
 ///
 /// # Errors
 ///
-/// In order: [`ConfigError::Io`] (unreadable file), [`ConfigError::Parse`] (malformed TOML or a
-/// wrong-typed known key), [`ConfigError::InvalidValue`] (a credential, NFR-18),
+/// In order: [`ConfigError::Io`] (a file that cannot be stat'ed or read — never silently an empty
+/// layer), [`ConfigError::Parse`] (malformed TOML or a wrong-typed known key, e.g. a non-wire
+/// `output_format`), [`ConfigError::InvalidValue`] (a credential, NFR-18),
 /// [`ConfigError::StartupKeyInRuntimeLayer`] (`layer: User` — any startup key, either
-/// `jsonl_filename` spelling), [`ConfigError::InvalidValue`] (`jsonl_export`, naming `ub-p1h`).
+/// `jsonl_filename` spelling), [`ConfigError::InvalidValue`] (`jsonl_export`, naming `ub-p1h`),
+/// then [`ConfigError::InvalidValue`] for a layer value out of bounds — an `actor` that is blank or
+/// fails `validate_actor` after trimming, a `search_cap` outside `1..=i64::MAX` — by the same per-key
+/// rules a `config set` value and a database row are held to.
 pub fn load_user_config(env: &dyn EnvSource) -> Result<ProjectConfig, ConfigError> {
     load_user_file(user_config_path(env).as_deref())
 }
@@ -91,7 +101,11 @@ pub(crate) fn load_user_file(path: Option<&Path>) -> Result<ProjectConfig, Confi
     let Some(path) = path else {
         return Ok(ProjectConfig::default());
     };
-    if !path.exists() {
+    // `try_exists`, not `exists`: a stat error (EACCES on a parent, ELOOP) is an `Io` error, never
+    // a silently empty layer that drops the user's `actor`/`output_format` from resolution.
+    if !path.try_exists().context(IoSnafu {
+        path: path.to_path_buf(),
+    })? {
         return Ok(ProjectConfig::default());
     }
     // Parse + NFR-18 credential deny (the project file's own rules), unknown keys NOT yet warned:
@@ -107,8 +121,23 @@ pub(crate) fn load_user_file(path: Option<&Path>) -> Result<ProjectConfig, Confi
     if let Some(value) = user.jsonl_export {
         return Err(jsonl_export_refusal(&value.to_string()));
     }
+    check_layer_bounds(&user)?;
     user.warn_unknown_keys();
     Ok(user)
+}
+
+/// The layer-value bounds (PRD §4 D57 clauses (4)/(5)/(6)): the user file's `actor` and
+/// `search_cap` must each pass the per-key parser a `config set` value and a database row pass, so a
+/// user file the open would refuse is refused by [`load_user_config`] itself — before `init` writes
+/// anything. (`output_format` is a closed enum, already enforced by the parse.)
+fn check_layer_bounds(user: &ProjectConfig) -> Result<(), ConfigError> {
+    if let Some(actor) = &user.actor {
+        parse_runtime_value(RuntimeKey::Actor, actor)?;
+    }
+    if let Some(cap) = user.search_cap {
+        parse_runtime_value(RuntimeKey::SearchCap, &cap.to_string())?;
+    }
+    Ok(())
 }
 
 /// The first startup key `user` carries, by its wire spelling ([`STARTUP_KEYS`] order for the typed
@@ -226,6 +255,75 @@ mod tests {
         let env = MapEnv::new(&[("HOME", "relative/home"), ("XDG_CONFIG_HOME", "")]);
         assert_eq!(user_config_path(&env), None, "no absolute home → no path");
         assert_eq!(user_config_path(&MapEnv::new(&[])), None);
+    }
+
+    /// **D57 criterion (f) — "the FIRST absolute of `HOME`, `USERPROFILE`"** with BOTH absolute:
+    /// `HOME` wins.
+    ///
+    /// MUTANT KILLED: probing `USERPROFILE` before `HOME`.
+    #[test]
+    fn home_beats_userprofile_when_both_are_absolute() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = abs(tmp.path(), "home");
+        let profile = abs(tmp.path(), "profile");
+        let env = MapEnv::new(&[("HOME", &home), ("USERPROFILE", &profile)]);
+        assert_eq!(
+            user_config_path(&env),
+            Some(
+                PathBuf::from(&home)
+                    .join(".config")
+                    .join("unblock")
+                    .join("config.toml")
+            )
+        );
+    }
+
+    /// **D57 clause (6), the user-file half of "any user file the open would refuse"**: the
+    /// layer-value bounds are applied by `load_user_config` itself — a `search_cap` of `0` or above
+    /// `i64::MAX`, a blank actor and an over-long actor are each `InvalidValue` (`CONFIG_ERROR`)
+    /// naming the key — so `unblock init`'s pre-check refuses them before it writes anything.
+    ///
+    /// MUTANT KILLED: dropping `check_layer_bounds` (the open would then refuse a file `init`'s
+    /// pre-check accepted, leaving a half-made scaffold).
+    #[test]
+    fn out_of_bound_layer_values_are_refused() {
+        let long_actor = format!("actor = \"{}\"\n", "a".repeat(201));
+        for (contents, key) in [
+            ("search_cap = 0\n", "search_cap"),
+            ("search_cap = 9223372036854775807\n", ""),
+            ("actor = \"   \"\n", "actor"),
+            (long_actor.as_str(), "actor"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = user_file(tmp.path(), contents);
+            let loaded = load_user_config(&env);
+            if key.is_empty() {
+                // i64::MAX itself is IN bounds.
+                assert!(loaded.is_ok(), "{contents}: {loaded:?}");
+                continue;
+            }
+            let err = loaded.expect_err(contents);
+            assert!(
+                matches!(&err, ConfigError::InvalidValue { key: k, .. } if k == key),
+                "{contents}: {err:?}"
+            );
+            assert_eq!(err.code(), ErrorCode::ConfigError);
+        }
+    }
+
+    /// A user file that cannot be STAT'ed (its "directory" is a regular file, `ENOTDIR`) is a
+    /// `ConfigError::Io`, never a silently empty layer — `try_exists`, not `exists`.
+    ///
+    /// MUTANT KILLED: `path.exists()`, which maps every stat error to "absent".
+    #[test]
+    fn an_unstatable_user_file_is_an_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("xdg-is-a-file");
+        std::fs::write(&not_a_dir, "").unwrap();
+        let env = MapEnv::new(&[("XDG_CONFIG_HOME", &not_a_dir.to_string_lossy())]);
+        let err = load_user_config(&env).expect_err("a stat error is not an empty layer");
+        assert!(matches!(err, ConfigError::Io { .. }), "{err:?}");
+        assert_eq!(err.code(), ErrorCode::IoError);
     }
 
     /// Write `contents` as the user file under an absolute `XDG_CONFIG_HOME` and return the env.

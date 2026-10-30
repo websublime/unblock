@@ -60,3 +60,7 @@ proptest = { workspace = true }
 # Golden snapshots: error (variant->code->exit) table, default WorkspaceConfig, ConfigPaths fixture,
 # startup/runtime key lists (T1.3).
 insta = { workspace = true }
+# D57 criterion (e2) "warned": a scoped capture layer (the `unblock-sync` reliability_tracing
+# precedent) asserts the `unblock.config` warn on an unknown user-file key and an unknown DB row.
+# Already a workspace dependency (no new crate meets cargo-deny).
+tracing-subscriber = { workspace = true }

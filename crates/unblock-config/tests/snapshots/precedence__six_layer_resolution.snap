@@ -4,13 +4,13 @@ expression: runtime
 ---
 RuntimeConfig {
     actor: "db-actor",
-    output_format: Markdown,
-    jsonl_export: true,
+    output_format: Csv,
+    jsonl_export: false,
     search_cap: 7,
     sources: RuntimeSources {
         actor: Db,
-        output_format: User,
-        jsonl_export: Project,
+        output_format: Env,
+        jsonl_export: Cli,
         search_cap: User,
     },
     db_faults: [

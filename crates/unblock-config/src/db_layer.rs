@@ -12,13 +12,21 @@
 //! - `jsonl_export` is a runtime key but NOT a layer key (its consumer is `ub-p1h`): an
 //!   `invalid_value` fault;
 //! - a STARTUP key (either `jsonl_filename` spelling) is a `startup_key` fault;
-//! - anything else is an `unknown_key` fault (SF-4 forward compatibility — warned, never blocking).
+//! - anything else is an `unknown_key` fault (SF-4 forward compatibility — warned, never blocking);
+//! - a cell that was not stored as `TEXT` (a hand-written row, which `Storage::read_config` returns
+//!   in its [`unblock_storage::NON_TEXT_CELL_MARKER`] spelling rather than skip) is an
+//!   `invalid_value` fault whatever its key, removable with `config unset` of the key as listed.
+//!
+//! Every fault REASON echoes the row's key and value only through [`crate::error`]'s clipped,
+//! control-escaped spelling, so a hand-written row can never inject a newline or an escape sequence
+//! into a message, the `unblock mcp` startup line or a terminal.
 //!
 //! A faulty row NEVER contributes a value, and the layer never fails an open: the faults travel in
 //! `RuntimeConfig::db_faults`, and a blocking one fail-closes the engine `Session` instead.
 
 use unblock_model::{ConfigFault, ConfigFaultKind, DbConfigFault, OutputFormat};
 
+use crate::error::shown;
 use crate::keys::{KeyClass, RuntimeKey, classify};
 use crate::reload::{RuntimeValue, parse_runtime_value};
 
@@ -75,8 +83,35 @@ pub fn decode_db_rows(rows: &[(String, String)]) -> Vec<DbConfigFault> {
     db_layer(rows).1
 }
 
+/// The storage class of a cell `Storage::read_config` returned in its non-`TEXT` spelling —
+/// [`unblock_storage::NON_TEXT_CELL_MARKER`], a lowercase storage class, `:`, uppercase hex — or
+/// `None` for an ordinary `TEXT` cell.
+fn non_text_class(cell: &str) -> Option<&str> {
+    let (class, hex) = cell
+        .strip_prefix(unblock_storage::NON_TEXT_CELL_MARKER)?
+        .split_once(':')?;
+    let well_formed = !class.is_empty()
+        && class.bytes().all(|b| b.is_ascii_lowercase())
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b));
+    well_formed.then_some(class)
+}
+
 /// Classify and decode one row: its value when it is a sound layer-key row, else its fault.
 fn decode_row(key: &str, value: &str) -> Result<RuntimeValue, ConfigFault> {
+    for (column, cell) in [("key", key), ("value", value)] {
+        if let Some(class) = non_text_class(cell) {
+            return Err(ConfigFault {
+                kind: ConfigFaultKind::InvalidValue,
+                reason: format!(
+                    "the row's {column} is stored as {class}, not TEXT (a hand-written row no \
+                     build can decode); remove it with config unset of `{}`",
+                    shown(key)
+                ),
+            });
+        }
+    }
     let runtime_key = match classify(key) {
         Some(KeyClass::Runtime(RuntimeKey::JsonlExport)) => {
             return Err(ConfigFault {
@@ -91,15 +126,16 @@ fn decode_row(key: &str, value: &str) -> Result<RuntimeValue, ConfigFault> {
             return Err(ConfigFault {
                 kind: ConfigFaultKind::StartupKey,
                 reason: format!(
-                    "`{key}` is a startup-only key; set it on the command line, in the environment \
-                     or in the project file .unblock/config.toml"
+                    "`{}` is a startup-only key; set it on the command line, in the environment \
+                     or in the project file .unblock/config.toml",
+                    shown(key)
                 ),
             });
         }
         None => {
             return Err(ConfigFault {
                 kind: ConfigFaultKind::UnknownKey,
-                reason: format!("`{key}` is not a key this build knows"),
+                reason: format!("`{}` is not a key this build knows", shown(key)),
             });
         }
     };

@@ -338,3 +338,50 @@ async fn open_with_storage_with_cli_rejects_over_long_actor() {
         }
     }
 }
+
+/// **D57 criterion (n), the resolve-only half (the facade `unblock agents` uses)**: over a workspace
+/// whose `config` table holds `actor` and `output_format` rows, the STORAGE-BEARING open resolves
+/// both from the DB layer, while the RESOLVE-ONLY open resolves them over FIVE layers — the DB
+/// layer invisible, its rows contributing nothing and no fault recorded.
+#[tokio::test]
+async fn the_resolve_only_open_never_reads_the_db_layer() {
+    use unblock_config::OutputFormat;
+    use unblock_model::ConfigSource;
+
+    let workspace = fresh_workspace();
+    {
+        let ctx = open_with_storage(workspace.path()).await.expect("open");
+        ctx.storage.set_config("actor", "db-actor").await.unwrap();
+        ctx.storage
+            .set_config("output_format", "csv")
+            .await
+            .unwrap();
+        ctx.storage.set_config("db_filename", "x.db").await.unwrap();
+    }
+
+    let with_db = open_with_storage(workspace.path()).await.expect("open");
+    let runtime = &with_db.config.runtime;
+    assert_eq!(
+        (runtime.actor.as_str(), runtime.sources.actor),
+        ("db-actor", ConfigSource::Db)
+    );
+    assert_eq!(
+        (runtime.output_format, runtime.sources.output_format),
+        (OutputFormat::Csv, ConfigSource::Db)
+    );
+    assert_eq!(runtime.db_faults.len(), 1, "the startup-key row is a fault");
+    drop(with_db);
+
+    let resolved = open_workspace(workspace.path()).await.expect("resolve");
+    let runtime = &resolved.config.runtime;
+    assert_eq!(
+        (runtime.actor.as_str(), runtime.sources.actor),
+        ("unblock", ConfigSource::Default),
+        "no DB actor, and (empty env) no $USER either"
+    );
+    assert_eq!(
+        (runtime.output_format, runtime.sources.output_format),
+        (OutputFormat::Json, ConfigSource::Default)
+    );
+    assert!(runtime.db_faults.is_empty(), "no row is read, so no fault");
+}

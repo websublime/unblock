@@ -98,7 +98,9 @@ pub use keys::{
     KeyClass, LAYER_KEYS, RUNTIME_KEYS, RuntimeKey, STARTUP_KEYS, StartupKey, classify,
 };
 pub use paths::ConfigPaths;
-pub use reload::{ConfigReloader, canonicalize_runtime_value, classify_runtime_key};
+pub use reload::{
+    ConfigReloader, canonicalize_runtime_value, classify_runtime_key, output_format_name,
+};
 pub use schema::{ProjectConfig, RemoteTable};
 pub use user_config::{load_user_config, user_config_path, user_output_format};
 

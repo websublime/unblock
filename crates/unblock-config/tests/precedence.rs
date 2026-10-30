@@ -393,8 +393,11 @@ fn jsonl_export_resolves_over_cli_env_project_defaults_only() {
     }
 }
 
-/// **D57 criterion (a) — the GOLDEN six-layer resolution**: one representative stack with every
-/// layer set for some key, pinned with its sources.
+/// **D57 criterion (a) — the GOLDEN six-layer resolution**: one representative stack in which EVERY
+/// layer sets at least one key — CLI `jsonl_export`, env `output_format`, project `jsonl_export`,
+/// user `output_format` and `search_cap`, DB `actor`/`search_cap` (plus a startup-key and an
+/// unknown-key row), `$USER` — pinned with its sources: the CLI beats the project, env beats the
+/// user, the user beats the DB, and the DB beats `$USER`.
 #[test]
 fn six_layer_resolution_golden() {
     let dir = tempfile::tempdir().unwrap();
@@ -409,8 +412,14 @@ fn six_layer_resolution_golden() {
         ("zz_future".to_string(), "1".to_string()),
     ];
     let runtime = unblock_config::ConfigReloader::new(
-        CliOverrides::default(),
-        EnvOverrides::default(),
+        CliOverrides {
+            jsonl_export: Some(false),
+            ..CliOverrides::default()
+        },
+        EnvOverrides {
+            output_format: Some(OutputFormat::Csv),
+            ..EnvOverrides::default()
+        },
         Some("os-user".to_string()),
         Some(project_file),
         Some(user_file),
