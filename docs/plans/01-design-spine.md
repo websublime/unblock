@@ -428,6 +428,33 @@ pub struct CloseEligibleOutcome { pub epic_ids: Vec<String>, pub count: usize, p
 // `count == epic_ids.len()`. NOT bd's `closed` key: `issue close` already returns `closed` as an `Issue` inside the
 // same untagged `IssueOutput` union (§5.3), and one key with two types would make the wire ambiguous (D56 clause (4)).
 
+// --- FR-13 full (D57, v1.1) — the `issue action: config` result row; reaches L7 (§5.3) ---
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigSource { Cli, Env, Project, User, Db, OsUser, Default }
+// The layer that supplied a resolved RUNTIME value (D57 clause (1)): `os_user` is the actor's `$USER` fallback
+// (D57 clause (5)), `default` the built-in default. Declaration order is the precedence order, highest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigFaultKind { StartupKey, InvalidValue, UnknownKey }
+impl ConfigFaultKind { pub const fn is_blocking(self) -> bool; } // = matches!(self, StartupKey | InvalidValue) — the ONE
+// blocking predicate: the engine fail-closed gate, the cli `mcp` startup line and `unblock init`'s check all call it.
+// D57 clause (2a): why a DB `config` row contributes no value. `startup_key` and `invalid_value` are BLOCKING (the
+// workspace fail-closes until the row is unset or replaced); `unknown_key` is not (SF-4 forward compatibility).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct ConfigFault { pub kind: ConfigFaultKind, pub reason: String }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct DbConfigFault { pub key: String, pub value: String, pub fault: ConfigFault } // one faulty row, as read
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct ConfigEntry { pub key: String, pub value: Option<String>, pub effective: Option<String>,
+                         pub source: Option<ConfigSource>, pub fault: Option<ConfigFault> }
+// `key` = a D57 LAYER key (`actor`, `output_format`, `search_cap`), or (only when a row holds it) any other key; `value` = the DB `config` row as stored, `None`
+// when no row exists (read from the database at call time); `effective` = the canonical string of the value the live
+// session resolved and `source` = the layer that supplied it — both `Some` EXACTLY when `key` is a layer key;
+// `fault` = the row's D57 clause (2a) fault, `None` for a sound or absent row. A DB value shadowed by a higher layer
+// reads `value` = the row, `effective`/`source` = the higher layer — the shadow is visible in the same response
+// (D57 clause (7)).
+
 // --- diagnostics (CF-B: defined normatively here; referenced by engine/render/mcp) ---
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -609,6 +636,26 @@ impl unblock_error::CodedError for ConfigError {
 > The set grows **additively at T1.3** (e.g. `Parse → ConfigParseError` (the **variant identifier is `Parse`**;
 > the `ErrorCode::ConfigParseError` mapping is unchanged), `InvalidValue → ConfigError`,
 > `Io → IoError`) — no T1.3a code is renumbered or removed.
+>
+> **[D57] (v1.1) — three more variants, still onto EXISTING codes.** `StartupKeyInRuntimeLayer { key: String, layer:
+> ConfigSource }` → `ErrorCode::ConfigError` (exit 7, not retryable; `context` = `{ "key", "layer" }`; `layer` is the
+> §1.10 `ConfigSource`, only ever `User` or `Db`, so the wire strings are `"user"`/`"db"` and the layer has ONE name)
+> refuses a STARTUP key in the user file (`User`), or named by `config set` — or by `config get`/`unset` when no row
+> holds it and the session's snapshot lists no fault for it — (`Db`); `UnknownKey { key: String }` →
+> `ErrorCode::ConfigError` refuses an unknown key named by `config set`, by `config get` when no row holds it, or by
+> `config unset` when no row holds it AND the snapshot lists no fault for it (that `unset` exception is the
+> cross-process repair of §4.1; `get` has none) (an
+> unknown key that is merely READ from the user file stays the SF-4 warn-and-ignore, and an unknown DB row is a
+> non-blocking `unknown_key` fault); `FaultyDbConfig { faults: Vec<DbConfigFault> }` → `ErrorCode::ConfigError` is the
+> D57 clause (2a) FAIL-CLOSED gate — `context` = `{ "keys": [the blocking keys] }`, and it is the FIRST `ConfigError`
+> variant with a production `hint()`: one line per blocking key naming the exact recovery call — for a NON-layer key
+> (a `startup_key` fault or a `jsonl_export` row) `issue {"action":"config","op":"unset","key":"<key>"}`; for a
+> LAYER key with an `invalid_value` fault, `issue {"action":"config","op":"get","key":"<key>"}` first and then
+> `issue {"action":"config","op":"set","key":"<key>","value":"<valid value>"}` (or `op:"unset"`), so an agent whose
+> gate is stale does not delete a valid value another process already wrote. So
+> `ErrorCode::ConfigError`'s `hint_shape` moves `None` → `ContextualText` (§2.2, honesty rule satisfied by this site)
+> under the D57 contract bump. The other two keep `hint()` at the default `None`. The `config_error_variant_code_exit_table` golden
+> (`unblock-config` `src/error.rs`) gains all three rows; `ErrorCode::ALL` stays 36.
 
 ### 2.2 ErrorCode (stable, SCREAMING_SNAKE in JSON)
 
@@ -651,10 +698,11 @@ impl ErrorCode {
     //     StaticText     -> InvalidPriority | InvalidStatus | InvalidType
     //                       (ModelError::hint() -> the pinned PRIORITY_DETAIL_HINT /
     //                        VALID_STATUS_HINT / VALID_TYPE_HINT constants, hints.rs)
-    //     ContextualText -> ValidationFailed | SchemaMismatch    (site-composed guidance: the mcp
+    //     ContextualText -> ValidationFailed | SchemaMismatch | ConfigError (site-composed guidance: the mcp
     //                       over-quota + bulk-markdown-parse hints; and, since D46 (v1.0.1), the
-    //                       STALE-SCHEMA self-correction hint — see the D46 note below)
-    //     None           -> every other code (the remaining 30 of 36)
+    //                       STALE-SCHEMA self-correction hint — see the D46 note below; and, since D57 (v1.1),
+    //                       the `ConfigError::FaultyDbConfig` recovery hint naming `issue config unset <key>`, §2.1)
+    //     None           -> every other code (the remaining 30 of 36; 29 since D57)
     //   D46 (v1.0.1) — `SchemaMismatch` MOVES OFF `None`, and the shape is `ContextualText` rather
     //   than `StaticText` for a reason that is a FACT about this code, not a preference: ONE code
     //   serves TWO OPPOSITE directions. A database BELOW this build's version (or a stamp that lies
@@ -921,13 +969,53 @@ pub trait Storage: Send + Sync {
     //      plus a column list on every step) was REJECTED: no non-column step can populate it, so it
     //      degrades silently to a no-op sentinel for that version, and it adds a per-step surface the
     //      clause (6) content pin does not hash — trading a stated bound for a hidden one.
+    //      [D57] STEP 3 TAKES THE "EXTEND THE SENTINEL" BRANCH (PRD §4 D57 clause (9), v1.1). Step 3 is the first
+    //      ordinary `MigrationKind::Sql` step — `CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY NOT NULL,
+    //      value TEXT NOT NULL)`, unconditional under (i), additive and so implicit on open under (iv) — and
+    //      `CURRENT_SCHEMA_VERSION` becomes 3. The `IF NOT EXISTS` is the STATEMENT's own idempotence, not a Rust-side
+    //      probe deciding which DDL runs, so (i) holds; it is REQUIRED because the lying-stamp recovery below resets
+    //      the stamp and replays the ladder, and a plain CREATE would then fail `table config already exists` on a
+    //      database that has the table — a recovery that loops, which this clause forbids. "EXTEND" IS LITERAL: the
+    //      sentinel witnesses the UNION of step 2's `COMMENTS_STEP_COLUMNS` (on `comments`) and step 3's
+    //      `CONFIG_STEP_COLUMNS` = `[("key", "TEXT"), ("value", "TEXT")]` (on `config`, via `PRAGMA
+    //      table_info(config)` — an absent table reads as zero columns), so a stamp that lies about `comments` is
+    //      still refused once step 3 exists (the existing `a_lying_stamp_is_refused_naming_the_missing_column` cell
+    //      is KEPT on its stamp-2 seed — which now reaches the sentinel with `from = 2`, `to = 3` — and gains a stamp-3
+    //      twin). The const assertion beside MIGRATIONS now requires the
+    //      newest step to be the version-3 `Sql` step the sentinel's newest half witnesses (it compares the newest
+    //      step's `version` against `CONFIG_STEP_VERSION` and its kind's discriminant against `Sql`'s). The
+    //      EVERY SENTINEL FAILURE IS A LYING STAMP, whatever `from` is: the sentinel runs AFTER the ladder, so a
+    //      stamp-2 database lying about `comments` (the D46 seed) first runs step 3 and then fails with `from = 2`,
+    //      `to = 3`. The `from == to` dispatch below (Miguel's 2026-08-03 ruling) was a faithful proxy for "the
+    //      sentinel fired" only while no step followed the lied-about stamp, so D57 replaces the PROXY, not the
+    //      ruling: `StorageError::Migration` gains `gaps: Vec<SchemaGap>` (`pub enum SchemaGap { CommentsColumn(
+    //      &'static str), ConfigTable, ConfigColumn(&'static str) }`, in `unblock-storage` `src/error.rs`), EMPTY on
+    //      every genuine step failure and NON-EMPTY exactly when `witness_newest_step` raised it, and `hint()`
+    //      dispatches the lying-stamp text on `!gaps.is_empty()` — the stale-direction text ("run `unblock migrate`")
+    //      is reachable only with empty `gaps`. `context()` surfaces the gaps; the `reason` names each gap by the step
+    //      that adds it (`comments` columns: schema version 2; the `config` table and columns: version 3). THE
+    //      LYING-STAMP HINT BRANCHES ON THE GAPS, and each branch terminates: `comments` columns missing → reset the stamp to BASELINE (`1`), then
+    //      `unblock migrate` (step 2 senses and adds only the missing columns; step 3 creates the table only if
+    //      absent); `config` table ABSENT → reset the stamp to `2`, then `unblock migrate`; `config` table PRESENT
+    //      but missing a column → `DROP TABLE config` (its rows are unreadable to every binary and are LOST —
+    //      disclosed in the hint), then reset to `2`, then `unblock migrate`; when several hold, the hint combines
+    //      them in that order and names the LOWEST stamp. Hint clauses (b) and (c) below are rewritten accordingly (the single BASELINE reset of (b) becomes the per-gap reset above): step 2
+    //      INSPECTS before it acts, and step 3 creates its table only if absent, so replaying either leaves every
+    //      existing row untouched. The PROMISE in this clause — the sentinel witnesses the NEWEST step's own
+    //      postcondition — is unchanged and strengthened (it keeps witnessing step 2's as well).
+    //      The "schema version N adds" reason strings (`unblock-storage` `src/libsql/migrations.rs` and `src/error.rs`,
+    //      `unblock-config` `src/error.rs`) name each gap by the STEP that adds it — version 2 for the `comments`
+    //      columns, version 3 for the `config` table and columns — never `{CURRENT_SCHEMA_VERSION}` for all of them;
+    //      and `BLESSED_SCHEMA_CONTENT_DIGEST` is re-blessed because
+    //      the ladder the digest hashes grew; `SCHEMA_SQL` itself stays FROZEN.
     //      THE ERROR CARRIES A HINT (NORMATIVE — D46). "Actionable" is delivered literally: the failure
     //      attaches a `StructuredError.hint` (§2.4) saying WHAT HAPPENED and WHAT TO RUN — the stamp
     //      found, the version this build expects, the columns actually missing on the lying-stamp path,
     //      and a recovery THE PRODUCT CAN ACTUALLY PERFORM IN THAT STATE. It is NOT a per-code
     //      constant, because this code also serves the opposite direction ((vi)) where the remedy is
     //      the opposite instruction.
-    //      THE LYING-STAMP TEXT IS ITS OWN, AND `Migration` BRANCHES ON `from == to` (Miguel's
+    //      [D57: the DISPATCH is `!gaps.is_empty()` since step 3 — see the note above; the text and the rule below
+    //      stand.] THE LYING-STAMP TEXT IS ITS OWN, AND `Migration` BRANCHES ON `from == to` (Miguel's
     //      ruling, 2026-08-03, after the Verify gate). The variant is SHARED: a genuine step failure
     //      carries two DIFFERENT versions and is correctly told to run `unblock migrate`; the sentinel
     //      carries the SAME version twice, because the stamp it fired on already equals CURRENT. On
@@ -1161,11 +1249,26 @@ pub trait Storage: Send + Sync {
     //   a closed/deferred/tombstoned blocker EXISTS and is NOT dangling (§3.2.1 `dangling`, the TRAP).
     async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError>;
 
-    // --- [v1.1] reserved seams (CF-E: additive; depended on by config db-layer + health full-taxonomy) ---
-    //   These are reserved now so unblock-config can read persisted config from the DB layer
-    //   and unblock-health can run the full diagnostic taxonomy through storage. v1 impls may
-    //   return Err(ErrorCode::NothingToDo)/empty; the SIGNATURES are pinned so dependents compile.
-    // [v1.1] async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError>; // persisted key/value config rows
+    // --- config table (FR-13 full, D57, v1.1) — the CF-E `read_config` reservation LANDS, with its write seam. ALL
+    //     TWELVE `impl Storage` blocks gain all three with NO default body (the D56 list: NoopStorage, LibsqlStorage;
+    //     engine ParkedStorage/CollisionForcer/RaceInjector/WidenedStorage; mcp RecordingStorage/GateStorage/
+    //     FailListStorage; sync testutil FakeStorage, tests FakeStorage, StorageInjector) — a default body would let a
+    //     delegating wrapper silently stop forwarding. `RecordingStorage` is the mcp zero-write spy, so its
+    //     `set_config`/`unset_config` delegations MUST call `record()`. Storage stores OPAQUE strings: it never classifies
+    //     a key or parses a value (unblock-config owns both, D57 clause (2)). Rows are `(String, String)` pairs — there is
+    //     NO `ConfigKv` type. Semantics: §3.2.1 "Config table (D57)". ---
+    async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError>;
+    //  PURE READ of every `config` row, ORDER BY key ASC (BINARY). No permit, no lock (FR-10).
+    async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError>;
+    //  ONE `BEGIN IMMEDIATE`: `INSERT INTO config (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET
+    //  value = excluded.value`. No `Event` (events are per issue, §1.7).
+    async fn unset_config(&self, key: &str) -> Result<bool, StorageError>;
+    //  ONE `BEGIN IMMEDIATE`: `DELETE FROM config WHERE key = ?1`; `true` iff a row was deleted. No `Event`.
+
+    // --- [v1.1] reserved seams (CF-E: additive; depended on by health full-taxonomy) ---
+    //   Reserved so unblock-health can run the full diagnostic taxonomy through storage. They are COMMENTED
+    //   declarations, NOT default methods: no impl carries them until the FR-16-full task lands them, which then adds
+    //   them to every `impl Storage` block. (The CF-E `read_config` reservation that sat here landed with D57, above.)
     // [v1.1] async fn diagnostic_probe(&self, kind: DiagnosticKind) -> Result<DiagnosticReport, StorageError>; // full-taxonomy probe
     // [v1.1] async fn diagnostic_probes(&self) -> Result<Vec<DiagnosticReport>, StorageError>; // batch probe for health
 }
@@ -2017,6 +2120,25 @@ row is the decision, this is the storage contract its acceptance criteria (a)–
   the D26 primitive's child definition (a `parent-child` edge, child row present, child not a template; closed =
   `closed` OR `tombstone`) IS `EpicStatus`'s, so `stats.epics_eligible` and the epic read cannot disagree.
 
+**Config table (D57, v1.1 — normative).** The three FR-13-full methods (§3.2) over the schema-step-3 `config` table
+(§3.2 clause (v) `[D57]` note); the PRD §4 D57 row is the decision, this is the storage contract its criterion (m)
+is tested against.
+
+- **`read_config()`** — `SELECT key, value FROM config ORDER BY key ASC`. A pure read on the read connection: no
+  permit, no `.write.lock` (FR-10). On a database below stamp 3 it is never reached, because every open path migrates
+  first (§3.2 clause (iv)); a missing table on a stamp-3 database is the sentinel's `SchemaMismatch`, never an empty
+  result.
+- **`set_config(key, value)`** — ONE `BEGIN IMMEDIATE` running `INSERT INTO config (key, value) VALUES (?1, ?2) ON
+  CONFLICT(key) DO UPDATE SET value = excluded.value` — an UPSERT, deliberately NOT `INSERT OR REPLACE` (which deletes
+  and re-inserts) and NOT ignore-on-conflict (which would drop the write silently). It binds exactly two parameters and
+  writes no `Event`.
+- **`unset_config(key)`** — ONE `BEGIN IMMEDIATE` running `DELETE FROM config WHERE key = ?1`; returns
+  `changes() == 1`. Deleting an absent key is `Ok(false)`, never an error. No `Event`.
+- **What storage does NOT do.** It never classifies a key (startup vs runtime vs unknown) and never parses a value:
+  `unblock-config` owns both (D57 clause (2)), and the engine validates BEFORE it calls `set_config` (§4.1
+  `config_set`). The table's primary key makes a duplicate key impossible, so the FR-16-full "duplicate config rows"
+  probe (unblock-health plan) has nothing to find in this table.
+
 **EventType-per-mutation (the T0.7 oracle).** Model `EventType` = 17 named (Created, Updated,
 StatusChanged, PriorityChanged, AssigneeChanged, Commented, Closed, Reopened, DependencyAdded,
 DependencyRemoved, LabelAdded, LabelRemoved, Compacted, Deleted, Restored, **CommentEdited**, **CommentRedacted**
@@ -2045,6 +2167,7 @@ DependencyRemoved, LabelAdded, LabelRemoved, Compacted, Deleted, Restored, **Com
 | add / remove label | `LabelAdded` / `LabelRemoved` |
 | label rename (`relabel`, D56) — per affected issue | `LabelRemoved(old)` + `LabelAdded(new)` · a MERGED issue (it already carried `new`): `LabelRemoved(old)` only · a tombstoned issue: **none** |
 | close eligible epics (`close_eligible`, D56) — per closed epic, cascade order (child before parent) | `StatusChanged` + `Closed` (the `update status` row above, verbatim) · an already-closed or tombstoned id: **none** (skipped untouched) · dry run: **none** |
+| config set / unset (`issue action: config`, D57) | **none** — a `config` row is workspace state, not an issue (no `issue_id` to key an event on); the table keeps no history |
 
 > **NOTE (restore carve-out — the T0.7 oracle is normative here).** `restore` (D20) is a **DEDICATED** path
 > that emits **ONLY `Restored`**. Although a tombstone→active restore is a terminal→non-terminal transition,
@@ -2156,13 +2279,28 @@ pub struct ConfigPaths {
 }
 
 // ResolvedConfig is config-owned (DEFINED in unblock-config) — the resolved, validated config
-// VALUES the engine/Session reads (NOT paths, NOT actor: actor is the top-level context field per
-// §4.1; paths live in ConfigPaths). Both contexts below embed it by value. Its concrete v1 field set
+// VALUES the engine/Session reads (NOT paths, which live in ConfigPaths; through v1 NOT actor either — actor was the
+// top-level context field per §4.1 — and since D57 the actor IS inside it, in `runtime`, see the [D57] note below). Both contexts below embed it by value. Its concrete v1 field set
 // is pinned by the unblock-config crate plan (`docs/plans/crates/unblock-config.md` §2/§3): it is
 // DEFAULTED in the T1.3a minimal subset and RESOLVED for real (layered TOML/env/CLI) at T1.3.
 // It carries the ADDITIVE `id_prefix` field (D21/T1.8, default "ub", `normalize_prefix`-normalized): the
-// engine id-allocator reads `ctx.config.id_prefix` at mint time to render `ub-<hash>`/`ub-<slug>-<hash>`
+// engine id-allocator reads `ctx.config.id_prefix` (since D57 `ctx.config.startup.id_prefix`) at mint time to render `ub-<hash>`/`ub-<slug>-<hash>`
 // (the prefix is config-derived, NOT a constant — faithful to the original `IdConfig::with_prefix`).
+// [D57] (v1.1) ResolvedConfig is PARTITIONED by key class — the FR-13 startup/runtime split is now a TYPE, not a list:
+//   pub struct ResolvedConfig { pub startup: StartupConfig, pub runtime: RuntimeConfig }
+//   pub struct StartupConfig { pub db_filename: String, pub jsonl_filename: String, pub id_prefix: String,
+//                              pub write_lock_timeout_ms: u64 }          // read ONCE at open; never reloaded
+//   pub struct RuntimeConfig { pub actor: String, pub output_format: OutputFormat, pub jsonl_export: bool,
+//                              pub search_cap: usize, pub sources: RuntimeSources,
+//                              pub db_faults: Vec<DbConfigFault> }  // re-resolved by reload_runtime; db_faults = the
+//                              // D57 clause (2a) faulty rows (§1.10), any blocking one fail-closes the Session
+//   pub struct RuntimeSources { pub actor: ConfigSource, pub output_format: ConfigSource,
+//                               pub jsonl_export: ConfigSource, pub search_cap: ConfigSource }  // §1.10 ConfigSource
+//   `actor` MOVES from the contexts' top level into `RuntimeConfig` (it is a runtime key, D57 clause (5)); the
+//   reserved, unprojected `deletions_retention_days`/`backend` stay unprojected. All four are DEFINED in unblock-config,
+//   and `ResolvedConfig`, `StartupConfig` and `RuntimeConfig` all implement `Default` (the T1.3a defaults, no faults,
+//   and EVERY source `ConfigSource::Default`, the actor's included — the literal `"unblock"` IS the built-in tier; a
+//   harness snapshot built from an `os_user` actor sets `sources.actor = OsUser` itself, §4 D57 block) so struct-literal test contexts keep compiling.
 pub struct ResolvedConfig { /* config-owned; see the unblock-config crate plan for the pinned field set */ }
 
 // WorkspaceSource is config-owned (DEFINED in unblock-config) — which precedence tier of workspace
@@ -2181,8 +2319,9 @@ pub enum WorkspaceSource {
 #[derive(Debug, Clone)]
 pub struct ResolvedContext {
     pub workspace_dir: PathBuf,        // project root (the dir that CONTAINS `.unblock/`)
-    pub actor: String,                 // authoritative actor (§4.1) — NOT inside ResolvedConfig
-    pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config)
+                                       // [D57] the top-level `actor` field is REMOVED: read `config.runtime.actor`
+    pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config); runtime keys over FIVE layers
+                                       // here — this facade never opens the DB, so the DB layer is invisible (D57 (6))
     pub paths: ConfigPaths,            // config-owned: resolved `.unblock/` + db/jsonl paths (T1.3a)
     pub source: WorkspaceSource,       // which discovery tier bound the dir (D39 — ADDITIVE)
 }
@@ -2193,8 +2332,10 @@ pub async fn open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError
 pub struct WorkspaceContext {
     pub storage: Arc<dyn Storage>,     // NON-OPTIONAL (G-5): always present once built
     pub workspace_dir: PathBuf,        // project root (the dir that CONTAINS `.unblock/`)
-    pub actor: String,                 // authoritative actor (§4.1) — NOT inside ResolvedConfig
-    pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config)
+                                       // [D57] the top-level `actor` field is REMOVED: read `config.runtime.actor`
+    pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config); runtime keys over all SIX layers
+    pub reloader: ConfigReloader,      // [D57] config-owned — re-resolves the runtime keys for a LIVE session;
+                                       // `ConfigReloader::default()` for a context built by struct literal
     pub paths: ConfigPaths,            // config-owned: resolved `.unblock/` + db/jsonl paths (T1.3a)
     pub source: WorkspaceSource,       // which discovery tier bound the dir (D39 — ADDITIVE)
     pub schema_version_before_migrate: i64, // D46 clause (10) — ADDITIVE. `PRAGMA user_version` read via the
@@ -2331,6 +2472,112 @@ pub async fn open_with_storage_with_cli(cli: &CliOverrides) -> Result<WorkspaceC
 > on undefined-in-spec behaviour, not a stable-surface change), no new `ErrorCode`, the 0–8 exit table unchanged,
 > `CONTRACT_HASH`/`CONTRACT_VERSION` unmoved, and no new CLI flag. `roots` (SEP-2577) is rejected.
 
+> **Layered configuration — FR-13 full (D57, v1.1 — normative).** ONE order, highest first: **CLI > env
+> (`UNBLOCK_*`) > project `.unblock/config.toml` > user `config.toml` > DB `config` table > defaults** (PRD §4 D57
+> clause (1)), folded by `merge_layers` highest-first exactly as in v1, over a six-arm `ConfigLayer` (`Cli`, `Env`,
+> `Project`, `User`, `Db`, `Defaults`) that STAYS `pub(crate)` with `merge_layers`: SF-5 permits widening it, but no
+> caller outside the crate needs it, and its `Defaults` arm carries the crate-private `Defaults` type
+> (`private_interfaces`). The STARTUP keys resolve over
+> CLI > env > project > defaults; each RUNTIME key over every layer that carries it (`search_cap` has no CLI or env
+> slot; the actor's bottom is `$USER` > `"unblock"`). The user layer, the DB layer and the `config` action carry only
+> the three LAYER keys `actor`, `output_format` and `search_cap`; `jsonl_export` resolves over CLI > env > project >
+> defaults only (nothing reads it — its consumer is `ub-p1h`, PRD §4 D57 clause (2)): in the user file it is
+> `ConfigError::InvalidValue` naming `ub-p1h`, in a DB row a blocking `invalid_value` fault. **The USER layer** is `$XDG_CONFIG_HOME/unblock/config.toml`
+> when `XDG_CONFIG_HOME` is a non-empty ABSOLUTE path, else `<home>/.config/unblock/config.toml` with `<home>` = the
+> first of `HOME`, `USERPROFILE` that is non-empty and ABSOLUTE (a relative one is no home), on every OS, read through
+> the injected `EnvSource` (no `directories` crate); no home or an absent file → empty layer; parsed as a
+> `ProjectConfig` with the same credential-deny and unknown-key-warn rules, then a `jsonl_export` → `InvalidValue` and any STARTUP key (either
+> `jsonl_filename` spelling) → `ConfigError::StartupKeyInRuntimeLayer { layer: User }` (§2.1, `CONFIG_ERROR`).
+> **The DB layer** is `Storage::read_config()`'s rows, decoded TOLERANTLY (PRD §4 D57 clause (2a)): a runtime row
+> whose value decodes (the per-key string parser the env layer uses, §3.2.1 "Config table (D57)") contributes it
+> (a runtime row means a LAYER-key row; a `jsonl_export` row is an `invalid_value` fault);
+> every other row becomes a `DbConfigFault` (§1.10) in `RuntimeConfig.db_faults` and contributes nothing —
+> `startup_key` and `invalid_value` faults are BLOCKING, `unknown_key` is warned only. The DB layer therefore never
+> fails an open. **The actor chain** is `--actor` > `UNBLOCK_ACTOR` > project `[actor]` > user `actor` > DB `actor`
+> > `$USER` > `"unblock"` (D10 as amended by D57), every tier trimmed, still bounded by `validate_actor`. **The
+> `search_cap` bound** `1..=i64::MAX` is checked on the RESOLVED value whatever layer supplied it (`InvalidValue`; a
+> DB row out of range is an `invalid_value` fault).
+>
+> **TWO-PHASE OPEN.** `open_with_storage*` (1) discovers, loads the project and user files and the env layer, resolves
+> the STARTUP keys and `ConfigPaths`; (2) opens libsql with `db_path` + `write_lock_timeout_ms`, records
+> `schema_version_before_migrate`, migrates (schema step 3 runs here on a stamp-2 database); (3) reads
+> `read_config()` — a failure wraps as `ConfigError::DbOpenFailed { source }`, forwarding `code()` and `hint()` as D46
+> does, no new variant — and resolves the RUNTIME keys over all six layers with the DB faults; (4) builds the
+> `ConfigReloader` and returns the context. Every workspace command takes this path, `unblock init` included (it
+> opens through `open_with_storage_with_cli`, over a fresh database with no rows). `open_workspace*` (resolve-only —
+> `unblock agents` only) runs (1) and resolves the runtime keys over five layers: the DB layer is INVISIBLE there, a
+> documented divergence (D57 clause (6)). The facade SIGNATURES are unchanged; the shared open body takes its
+> `EnvSource` as an internal parameter (the D39 `discover_unblock_dir` precedent), which is the seam the in-crate D57
+> cells drive with `MapEnv`.
+>
+> **Public user-layer entries (config-owned).** `pub fn load_user_config(env: &dyn EnvSource) -> Result<ProjectConfig,
+> ConfigError>` is the SINGLE HOME of every user-file refusal — it resolves the path and applies, in order, the TOML
+> parse (`Parse` → `CONFIG_PARSE_ERROR`), the NFR-18 credential deny, the startup-key refusal
+> (`StartupKeyInRuntimeLayer { layer: User }`) and the `jsonl_export` refusal (`InvalidValue` naming `ub-p1h`); the
+> storage-bearing and resolve-only opens, the reloader and the two entries below all go through it, so no path can
+> accept a user file another path refuses. `unblock init` calls it BEFORE it creates `.unblock/` or writes any file (a
+> failure exits 7 with nothing written). `pub fn user_output_format(env: &dyn EnvSource) ->
+> Result<Option<OutputFormat>, ConfigError>` is `load_user_config(env)?.output_format` — the ONE entry the cli's
+> `pick_cli_format` uses, so the cli never parses TOML itself and `version` warns on exactly the refusals above.
+> `ProcessEnv` is re-exported so the cli can pass the production source. `pub fn decode_db_rows(rows: &[(String,
+> String)]) -> Vec<DbConfigFault>` is the tolerant DB decode's fault half — PURE and INFALLIBLE (no file read), the
+> same decode the open and `reload_runtime` run — which the engine's `config_get`/`config_list` call on the rows they
+> read, so a broken TOML file can never make the read-only repair diagnostics fail.
+>
+> **`ConfigReloader` (config-owned, D57 clause (8)), `#[derive(Debug, Clone)]`** (the contexts derive `Clone`). Built
+> once per storage-bearing open and moved into the `Session`; a reload REPLACES the whole runtime snapshot with what
+> the reloader's captured layers resolve, so a context built by struct literal must hand it the layers that produced
+> its snapshot — a test harness whose snapshot carries actor `"tester"` uses
+> `ConfigReloader::new(CliOverrides::default(), EnvOverrides::default(), Some("tester".into()), None, None)` — the actor
+> at the `$USER` (`os_user`) tier, with the snapshot's `sources.actor = ConfigSource::OsUser` — so a reload re-resolves
+> `"tester"` instead of resetting it to `"unblock"`, while a DB `actor` row still OVERRIDES it exactly as in
+> production (a CLI-tier actor would sit above the DB layer and make the actor-reload criterion unprovable on the
+> harnesses); `Default` is correct only for a snapshot of pure defaults.
+> it CAPTURES what cannot change during a process — the `CliOverrides`, the parsed `EnvOverrides`, the `$USER` value,
+> the project file path and the user file path:
+>
+> ```rust
+> impl ConfigReloader {
+>     /// The injectable constructor; reads nothing (no `$HOME`, no file) until `reload_runtime` is called.
+>     pub fn new(cli: CliOverrides, env: EnvOverrides, os_user: Option<String>,
+>                project_file: Option<PathBuf>, user_file: Option<PathBuf>) -> Self;
+>     /// Re-read the project file and the user file, decode `db_rows` tolerantly (D57 clause (2a) — faults are
+>     /// RETURNED in `RuntimeConfig.db_faults`, never raised), and re-resolve the four runtime keys over the six
+>     /// layers (the captured CLI/env layers re-applied). Fails ONLY on a project- or user-file error. Startup keys
+>     /// are ignored — a startup key edited into the project file mid-session takes effect at the next open. Pure
+>     /// apart from the two file reads; never touches storage, so the engine decides which rows (committed or
+>     /// prospective) it is resolved against.
+>     pub fn reload_runtime(&self, db_rows: &[(String, String)]) -> Result<RuntimeConfig, ConfigError>;
+> }
+> impl Default for ConfigReloader { /* = new(CliOverrides::default(), EnvOverrides::default(), None, None, None) */ }
+> ```
+>
+> Config-side value helpers for the engine's `config` action (all `pub`, all in `unblock-config`):
+> `classify_runtime_key(key) -> Result<RuntimeKey, ConfigError>` — accepts only the three LAYER keys (`jsonl_export` →
+> `InvalidValue` naming `ub-p1h`, startup → `StartupKeyInRuntimeLayer { layer: Db }`,
+> unknown → `UnknownKey`) and `canonicalize_runtime_value(key: RuntimeKey, raw: &str) -> Result<String, ConfigError>`
+> (the env-layer parsers; `search_cap` a decimal integer in `1..=i64::MAX`; `actor` TRIMMED, an empty result
+> refused, then `validate_actor`; `RuntimeKey::JsonlExport` → `InvalidValue` naming `ub-p1h`, exactly as
+> `classify_runtime_key`; any empty value → `InvalidValue`; the result is the canonical string, so `value` always
+> equals the `effective` it yields).
+>
+> **Test isolation (NFR-16).** Because the production facades read `ProcessEnv` (and `std::env::set_var` is `unsafe`
+> under `forbid(unsafe_code)`), unblock-config adds two `#[doc(hidden)]` test entries,
+> `open_with_storage_with_env(start: Option<&Path>, cli: &CliOverrides, env: &dyn EnvSource)` and
+> `open_workspace_with_env(start, cli, env)` — `start` is the walk-up seed exactly as in the internal
+> `open_with_storage_from(start, cli)`/`open_workspace_from(start, cli)`, so the `&Path`-facade cells (walk-up and
+> not-found included) port without binding this repository's own `.unblock/` — the
+> internal open seam, exported so other crates' in-process tests can reach it; production code never calls them.
+> Then: (i) every test that SPAWNS the binary sets `XDG_CONFIG_HOME` and `HOME` to an EMPTY tempdir — the cli harness
+> env scrub (`crates/unblock-cli/tests/common/mod.rs`), whose pinning cell
+> `the_harness_scrubs_every_discovery_and_format_env` (`tests/mcp_stdout_channel.rs`) is extended to both variables,
+> and the one spawn outside the harness, `crates/unblock-cli/tests/init_agents.rs` (its `sh` spawn), sets them too;
+> (ii) every IN-PROCESS caller of a production facade in a test moves to the `_with_env` entries over a `MapEnv`
+> with no user file: `crates/unblock-cli/tests/cli_engine_parity.rs`, `migrate_doctor.rs`,
+> `shutdown_failure_injection.rs` and `tests/common/mod.rs`, and `crates/unblock-config/tests/open_workspace.rs`
+> and `tests/discovery.rs` and the `unblock-config` `lib.rs` doctest (in-crate cells may use the seam directly). So
+> no developer's or runner's own user file can change a test's actor, format or snapshot.
+
 **`unblock-engine` CONSUMES** a `WorkspaceContext` — it does **not** construct storage itself, and never sees an `Option<Arc<dyn Storage>>`. `Session::open` takes the already-built storage-bearing context; because `storage` is non-optional there is no unwrap and no None-path mismatch. The resolve-only `ResolvedContext` is for callers that must not touch the DB.
 
 **Result DTO ownership (CF-A — normative):** `CloseOutcome`, `ImportReport`, `ExportReport`, `CountBucket`, `GraphEdge`, `DepTree`, and `DiagnosticReport`/`DiagnosticFinding`/`DiagnosticKind` are **defined in `unblock-model` §1.10** and **re-exported** by `unblock-engine` (`pub use unblock_model::{CloseOutcome, ImportReport, ExportReport, CountBucket, GraphEdge, DepTree, DiagnosticReport, DiagnosticFinding, DiagnosticKind};`). **`DiagnosticFinding` is included explicitly** (it travels inside `DiagnosticReport`, so any consumer reaching it via the engine must see it re-exported — G-10). The engine does **not** redefine them, so `unblock-render` (model + error only) can format engine results without depending on the engine.
@@ -2339,6 +2586,36 @@ pub async fn open_with_storage_with_cli(cli: &CliOverrides) -> Result<WorkspaceC
 
 ```rust
 pub struct Session { /* storage: Arc<dyn Storage>, write_permit: Arc<tokio::sync::Semaphore>, config, actor, paths, shutdown */ }
+// [D57] (v1.1) the FR-13 partition reaches the Session's FIELDS: `config: ResolvedConfig` + `actor: String` become
+//   config:   StartupConfig                               // immutable for the session's life (§4 D57 block)
+//   runtime:  Arc<std::sync::RwLock<Arc<RuntimeConfig>>>  // the LIVE runtime snapshot, actor and db_faults included;
+//                                                         // swapped by `config_set`/`config_unset` (interior
+//                                                         // mutability behind the shared `Arc<Session>`; the outer
+//                                                         // `Arc` lets the spawned commit+swap tail own it)
+//   reloader: ConfigReloader                              // moved in from `WorkspaceContext.reloader`
+// LOCK DISCIPLINE: the `RwLock` is NEVER held across an `.await`; its critical sections only clone or replace an
+// `Arc`, so they cannot panic mid-update, and every `.read()`/`.write()` recovers a poisoned lock with
+// `unwrap_or_else(PoisonError::into_inner)` (a poisoned lock still holds a whole snapshot; no `unwrap`, no
+// `missing_panics_doc`).
+// ACTOR DISCIPLINE: every MUTATION takes `runtime()` ONCE, AFTER `acquire()` (permit + `.write.lock`), and uses that
+// snapshot's actor for every validation, row and event it writes — so one mutation never mixes two actors, and since
+// `config_set`/`config_unset` hold the same guard, a reload never lands inside a mutation. Two v1 paths that read the
+// actor BEFORE the guard change: `add_dep` STAMPS `dep.created_by` itself from its post-acquire snapshot, overwriting
+// the caller's value (the mcp `dep` tool's pre-permit `self.session.actor()` stamp is removed), and `add_comment` runs
+// `CommentValidator::validate_comment` with the post-acquire snapshot's actor. Every READ that consults a runtime key
+// (the `search` default cap, the `info` actor finding) reads `runtime()` once per call. `self.actor` in the sketches
+// below means "the actor of the snapshot this call took".
+// FAIL-CLOSED GATE (D57 clause (2a)): every FALLIBLE public method that reads, writes or reports on the workspace —
+// every read, every mutation, `export_jsonl`/`import_jsonl`/`import_bd`, `diagnostics`, `integrity_check`,
+// `migrate`, `doctor` and `recover` — first checks the snapshot it takes (for a mutation, the post-acquire one); a
+// `db_faults` entry whose `fault.kind.is_blocking()` (§1.10) returns `ConfigError::FaultyDbConfig { faults }`
+// (→ `EngineError::Config`, `CONFIG_ERROR`, the recovery hint) before any storage call. EXEMPT, and the only
+// exemptions: `Session::open` (it must succeed so `unblock mcp` starts), `config_get`/`config_list`/`config_set`/
+// `config_unset` (the repair path) and `shutdown` (a session always closes). The infallible accessors and builders —
+// `runtime()`, `actor()`, `workspace_dir()`, `with_shutdown_flag()`, `is_shutdown_requested()` — return no `Result`
+// and are outside the gate by construction. Over MCP the gate surfaces in-band on tool calls and as `-32603` with
+// `data.code: CONFIG_ERROR` on the three Session-backed `unblock://issues/*` resources; `capabilities`, `schema` and
+// the prompts never reach the `Session` and stay served (§5.4).
 // NO `policy` field (OQ-1 RESOLVED, T1.2): `unblock-policy` ships only FREE FUNCTIONS (`cmp_ready` etc.) —
 // there is no policy struct/trait-object to hold; `ready()` calls `unblock_policy::cmp_ready` directly.
 // A `dyn`-pluggable-policy handle is a v2 additive seam (it would add a field then; it does not exist now).
@@ -2347,7 +2624,10 @@ pub struct Session { /* storage: Arc<dyn Storage>, write_permit: Arc<tokio::sync
 // (config-owned) and are NO LONGER here. SessionConfig carries engine-behaviour knobs only.
 #[derive(Debug, Clone, Default)]
 pub struct SessionConfig {
-    pub jsonl_export: bool,            // auto-export JSONL after mutating ops (FR-7)
+    // [D57] `jsonl_export` is DELETED from this struct: it duplicated the RUNTIME key, which a reload changes, so a
+    //   copy here would go stale. NOTHING reads either copy today (FR-7 automatic export is unwired), so the key
+    //   is NOT a D57 layer key: it resolves over CLI > env > project > defaults only and has no `config` writer
+    //   (PRD §4 D57 clause (2)); its consumer is tracked as `ub-p1h`.
     pub import_on_open: bool,          // run import_jsonl during open() if the JSONL is newer (FR-8)
     pub remote: bool,                  // v1: always false (D15). Under D51 the mode selects the LIBRARY, and
                                        // storage is built by unblock-config (CF-D) before the Session exists,
@@ -2578,10 +2858,13 @@ impl Session {
     pub async fn defer(&self, id: &str, until: DateTime<Utc>) -> Result<Issue, EngineError>;
     pub async fn undefer(&self, id: &str) -> Result<Issue, EngineError>;
     pub async fn add_dep(&self, dep: &Dependency) -> Result<(), EngineError>;
+    //   [D57] stamps `dep.created_by` from its post-acquire runtime snapshot's actor (the caller's value is overwritten),
+    //   so the edge row and its `DependencyAdded` event carry ONE actor even across a concurrent `config set actor`.
     pub async fn remove_dep(&self, issue_id: &str, on: &str, ty: &DependencyType) -> Result<(), EngineError>;
     // --- comments (FR-6, D37) — each mutation acquires the write permit (D14) + the D31 `.write.lock` for its whole tx;
     //     the body is validated (non-empty trimmed / NUL-rejected) BEFORE the mutation; author = self.actor (FORK-M1b) ---
     pub async fn add_comment(&self, issue_id: &str, body: &str) -> Result<Comment, EngineError>;   // author = self.actor
+    //   [D57] `validate_comment` runs AFTER `acquire()`, with the post-acquire snapshot's actor (it ran before in v1).
     pub async fn update_comment(&self, comment_id: i64, body: &str) -> Result<Comment, EngineError>; // provenance-preserving (D-D)
     pub async fn delete_comment(&self, comment_id: i64) -> Result<Comment, EngineError>;            // soft-redact (D-E)
     pub async fn close_with_suggestions(&self, id: &str, reason: Option<String>)
@@ -2624,6 +2907,60 @@ impl Session {
     //   (close order). REMOTE-mode residual (D51, no `.write.lock`; routed to the v1.3 lock): the snapshot is guarded by the
     //   in-process permit only, so a child reopened by another process between compute and commit can let an epic close
     //   with an open child, silently.
+
+    // --- runtime configuration (FR-13 full, D57, v1.1) — `src/session/config.rs` (NEW). Backs `issue action: config`
+    //     (§5.2). These four methods are the clause (2a) REPAIR path, so the fail-closed gate never applies to them.
+    //     `set` writes only the three LAYER keys (`unblock_config::classify_runtime_key`: `jsonl_export` → `InvalidValue`
+    //     naming `ub-p1h`, startup →
+    //     `StartupKeyInRuntimeLayer{layer: Db}`, unknown → `UnknownKey`, both `CONFIG_ERROR`, before any write);
+    //     `get` and `unset` reach ANY key that HAS a row, whatever its class, and classify only when no row holds it.
+    //     `EngineError` gains the transparent source `#[snafu(transparent)] Config { source: ConfigError }`
+    //     (forwarding `code()`/`hint()`/`context()`), RETIRING the CF-D note that the engine never calls
+    //     unblock-config. ---
+    pub fn runtime(&self) -> Arc<RuntimeConfig>;        // a clone of the current snapshot's Arc (read lock, no await)
+    pub fn actor(&self) -> String;                      // [D57] OWNED (was `&str`): `self.runtime().actor.clone()`
+    pub async fn config_get(&self, key: &str) -> Result<ConfigEntry, EngineError>;
+    //   read (no permit, FR-10): rows = Storage::read_config(); `value` = the key's row (None when absent); `fault` =
+    //   `unblock_config::decode_db_rows(&rows)` (§4 D57 block — pure, infallible, no file read) over THOSE rows — so a row another process wrote since this session opened
+    //   reports its real fault; `effective`/`source` = the current snapshot when `key` is a layer key, else None. A
+    //   non-layer key with no row → the classify refusal (startup → `StartupKeyInRuntimeLayer{layer: Db}`,
+    //   `jsonl_export` → `InvalidValue`, unknown → `UnknownKey`), with NO `db_faults` exception — that exception belongs
+    //   to `config_unset` alone (PRD §4 D57 clause (7)). `value`/`fault` (fresh) and `effective`/`source` (snapshot) can transiently disagree after another
+    //   process's write or inside a concurrent `config_set`'s commit→swap window — ACCEPTED: `effective` is by
+    //   definition what THIS session currently resolves.
+    pub async fn config_list(&self) -> Result<Vec<ConfigEntry>, EngineError>;
+    //   read: the three layer keys PLUS one entry per row whose key is not a layer key (startup, unknown or
+    //   `jsonl_export` — each carries its fault), all ORDER BY key ASC, each built as `config_get` builds one from the
+    //   ONE `read_config()` call.
+    pub async fn config_set(&self, key: &str, value: &str) -> Result<ConfigEntry, EngineError>;
+    //   guard = acquire() (permit + `.write.lock`, the whole operation), then IN ORDER: (1) classify the key and
+    //   `canonicalize_runtime_value` the value; (2) rows = Storage::read_config() — UNDER the guard, so rows another
+    //   process changed are seen; (3) the prospective row set = rows with `key` upserted to the canonical value (a
+    //   faulty row of that key is REPLACED); (4) next = self.reloader.reload_runtime(&prospective)? — a failure (a
+    //   malformed user or project file included) returns HERE with ZERO writes; remaining faults of OTHER rows do not
+    //   fail it; (5)+(6) the COMMIT AND THE SWAP run as ONE `tokio::spawn`ed task that OWNS `guard` (a
+    //   `MutationGuard`, asserted `Send + 'static` in T4.2), a clone of `storage` and a clone of the `runtime` cell:
+    //   Storage::set_config(key, canonical) — the ONE write transaction (D44 invariant, §4.2) — then
+    //   `*runtime.write() = Arc::new(next)`; the method awaits the task's handle. So a caller future dropped at any
+    //   point after the commit begins cannot separate the commit from the swap or release the guard early (§4.2
+    //   cancel-safety); a dropped future before step (5) has written nothing. The handle's `JoinError`: a PANIC is
+    //   re-raised with `std::panic::resume_unwind`; a CANCELLATION (runtime shutdown) maps to the existing
+    //   `EngineError::ShutdownInProgress`. Returns the entry built from `next` and the written row.
+    pub async fn config_unset(&self, key: &str) -> Result<ConfigEntry, EngineError>;
+    //   as `config_set`, EXCEPT THE ORDER of steps (1)-(2): `unset` reads the rows FIRST and classifies `key` only when NO
+    //   row holds it (so a startup-key or `jsonl_export` row is never refused before it can be deleted); there is no
+    //   value to canonicalize; step (3) = rows minus `key`. When a row holds `key`, step (5) is
+    //   Storage::unset_config(key) — deleting a startup, unknown or `jsonl_export` row is ALLOWED, it is how a clause (2a)
+    //   fault is repaired. When NO row holds `key`: a layer key, or any key the session's snapshot lists among its
+    //   `db_faults` (another process already removed the row — the stale-gate repair, D57 clause (2a)), is a SUCCESS
+    //   with NO write; any other key → the classify refusal. EVERY non-refused `config_set`/`config_unset` — write or
+    //   no write — re-resolves from the rows read under its guard and SWAPS the snapshot (the no-write case swaps
+    //   without a commit, in the same spawned tail), so a repair made by another process reaches this session at its
+    //   next `config` call and a stale gate's own hint always terminates. A non-layer key returns `{key, value: null,
+    //   effective: null, source: null, fault: null}`.
+    //   (`reload_runtime` is a CONFIG-side method — §4 D57 block — and has exactly these two engine call sites; the TRIGGER
+    //   is a non-refused in-process `config_set`/`config_unset`, nothing else: another process's write or a hand edit of
+    //   a TOML file reaches this session at its next open or its own next `config` call, D57 clause (8).)
 
     // --- interchange (FR-7/FR-8/FR-26), delegates to unblock-sync ---
     // T2.4: the export/import BODIES delegate to `unblock_sync::{export_jsonl,import_jsonl}` (cfg-gated behind the
@@ -2693,7 +3030,7 @@ impl Session {
 // CloseOutcome / ImportReport / ExportReport are defined in unblock-model §1.10 and
 // re-exported here (CF-A) — NOT redefined. CountBucket / GraphEdge / DepTree /
 // DiagnosticReport / DiagnosticFinding / DiagnosticKind — and, since D56, EpicStatus / LabelCount / LabelRename /
-// CloseEligibleOutcome — likewise come from unblock-model via the same re-export. SessionConfig + ImportOptions + NewIssue (D21) + NewDep (D44) + MigrateOutcome
+// CloseEligibleOutcome, and since D57 ConfigEntry / ConfigSource — likewise come from unblock-model via the same re-export. SessionConfig + ImportOptions + NewIssue (D21) + NewDep (D44) + MigrateOutcome
 // (D27/AF-2) are engine-owned (above); MigrateOutcome is a plain engine-local return (no
 // JsonSchema, NOT a §1.10 DTO), exported from unblock-engine like the peer ImportOptions
 // (the TRUE engine-local peer — a plain engine-defined return, no JsonSchema; contrast
@@ -2719,7 +3056,7 @@ impl Session {
 
 | # | Tool | Discriminator | Maps to |
 |---|---|---|---|
-| 1 | `issue` | `action: create\|create_bulk\|show\|update\|close\|reopen\|delete\|restore\|relabel\|close_eligible` (D22 `create_bulk` is the 8th `issue` ACTION — a discriminator arm, so it does NOT grow the **tool** count, §6.6; **D56** appends `relabel` and `close_eligible`, FR-6, on the same rule) | FR-1a/1b/1c, FR-6 (D56) |
+| 1 | `issue` | `action: create\|create_bulk\|show\|update\|close\|reopen\|delete\|restore\|relabel\|close_eligible\|config` (D22 `create_bulk` is the 8th `issue` ACTION — a discriminator arm, so it does NOT grow the **tool** count, §6.6; **D56** appends `relabel` and `close_eligible`, FR-6, on the same rule; **D57** appends `config` — `op: get\|set\|unset\|list`, the FR-13 DB-layer writer — on the same rule) | FR-1a/1b/1c, FR-6 (D56), FR-13 (D57) |
 | 2 | `claim` | (none) | FR-2 |
 | 3 | `defer` | `action: defer\|undefer` | FR-3 |
 | 4 | `query` | `kind: list\|ready\|blocked\|search\|count\|stale\|labels\|epics` (**D56** appends `labels` — the label catalog — and `epics` — the epic rollup read, FR-6; discriminator arms, no new tool, §6.6) | FR-4, FR-6 (D56) |
@@ -2868,7 +3205,7 @@ pub enum IssueInput {
     // `Event(Restored)` (§3.2.1 `restore_issue` / §4.1 `Session::restore`). The interface
     // lands now; the `issue`-tool MCP adapter wires this action at T2.2.
     Relabel { old_name: String, new_name: String, #[serde(flatten)] attribution: Attribution },          // D56 — APPENDED
-    CloseEligible { #[serde(default)] dry_run: bool, #[serde(flatten)] attribution: Attribution },      // D56 — APPENDED LAST
+    CloseEligible { #[serde(default)] dry_run: bool, #[serde(flatten)] attribution: Attribution },      // D56 — APPENDED
     // D56 (FR-6, v1.1): `Relabel` → `Session::rename_label(old_name, new_name)` → `IssueOutput::Relabel(LabelRename)`;
     // `CloseEligible` → `Session::close_eligible(dry_run)` → `IssueOutput::CloseEligible(CloseEligibleOutcome)` — its list
     // key is `epic_ids`, never `close`'s `closed` (an `Issue`), so the untagged union stays unambiguous. Both are
@@ -2878,7 +3215,27 @@ pub enum IssueInput {
     // `capabilities()` descriptor), becomes "Create, show, update, close, reopen, delete, restore, relabel, or
     // close_eligible issues. Where an action accepts the optional agent_name, harness and model fields, unblock
     // currently discards them."
+    Config { op: ConfigOp, #[serde(default)] key: Option<String>, #[serde(default)] value: Option<String>,
+             #[serde(flatten)] attribution: Attribution },                                              // D57 — APPENDED LAST
+    // D57 (FR-13 full, v1.1): ONE arm, sub-discriminated by `op`, mapping `Get` → `Session::config_get(key)`, `List` →
+    // `Session::config_list()`, `Set` → `Session::config_set(key, value)`, `Unset` → `Session::config_unset(key)`, each →
+    // `IssueOutput::Config(ConfigList)`. `op` is a plain field, NOT a nested `#[serde(tag)]` + `flatten` (serde cannot
+    // combine `flatten` with `deny_unknown_fields`, D42), so the per-op field rule is an ADAPTER rule, checked before
+    // the engine is called (the D44 adapter-rejection shape — zero writes BY CONSTRUCTION): `key` is REQUIRED for
+    // get/set/unset and FORBIDDEN for list; `value` is REQUIRED for set and FORBIDDEN otherwise; a violation is
+    // `VALIDATION_FAILED` with one `FieldError` on `key` or `value`. The key/value VALUES are validated in the engine
+    // (`CONFIG_ERROR`, §4.1). The arm flattens `Attribution` (D52) because it can mutate. APPENDED after
+    // `CloseEligible` (declaration order is hash-visible); its `///` doc comment, and those of `ConfigOp`'s variants,
+    // are contract bytes — and so are the `///` doc comments of the `key` and `value` FIELDS, which MUST state the
+    // per-op rule (`key`: "Required for get, set and unset; omit for list."; `value`: "Required for set; omit
+    // otherwise."), so the published schema and the `AGENTS.md` digest carry it even though both fields are optional
+    // in the schema. The tool DESCRIPTION, both copies, becomes "Create, show, update, close, reopen, delete,
+    // restore, relabel, or close_eligible issues, or get, set, unset and list runtime configuration with config. Where
+    // an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
 }
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigOp { Get, Set, Unset, List }   // D57 — the `config` arm's `op`; wire "get" | "set" | "unset" | "list"
 
 // DepInput — the ONLY wire shape for a dependency edge declared on `issue create`.
 //
@@ -3164,7 +3521,7 @@ so a bare-array JSON string there is spec-legal. Enforced by an assertion that e
 `structuredContent` is a JSON object.
 
 ```rust
-// issue — the 7 success shapes of the 10 actions (D56 appends `Relabel` and `CloseEligible`):
+// issue — the 8 success shapes of the 11 actions (D56 appends `Relabel` and `CloseEligible`; D57 appends `Config`):
 #[derive(Serialize, JsonSchema)] #[serde(untagged)]
 pub enum IssueOutput {
     Id(IdOnly),                        // quick-create
@@ -3173,8 +3530,11 @@ pub enum IssueOutput {
     Close(Box<CloseOutcome>),          // close — suggest_next -> newly_unblocked (FR-11)
     Delete(DeletePlanOutput),          // the resolved delete plan (was the ad-hoc delete_plan_json)
     Relabel(LabelRename),              // D56 — `relabel`: {"old_name","new_name","affected_issues"} (APPENDED)
-    CloseEligible(CloseEligibleOutcome), // D56 — `close_eligible`: {"epic_ids":[…],"count","dry_run"} (APPENDED LAST; a key distinct from `Close`'s `closed`)
+    CloseEligible(CloseEligibleOutcome), // D56 — `close_eligible`: {"epic_ids":[…],"count","dry_run"} (a key distinct from `Close`'s `closed`)
+    Config(ConfigList),                // D57 — `config` (every op): {"config":[ConfigEntry…]} (APPENDED LAST; the key
+                                       // `config` appears in no other arm, so the untagged union stays unambiguous)
 }
+#[derive(Serialize, JsonSchema)] pub struct ConfigList { pub config: Vec<ConfigEntry> }   // D57 CD-2 object-wrap
 #[derive(Serialize, JsonSchema)] pub struct IdOnly { pub id: String }
 #[derive(Serialize, JsonSchema)] pub struct IssueList { pub issues: Vec<Issue> }   // CD-2 object-wrap: {"issues":[…]} (shared by IssueOutput + QueryOutput)
 #[derive(Serialize, JsonSchema)]
@@ -3580,6 +3940,29 @@ migration. Per D35 an additive `.M` bump is NON-breaking. As in D45/D52, the bum
 the code constant, the re-blessed goldens, README and the claims scripts' `CONTRACT_RE` knobs — never this spec
 commit; until then the live contract stays `unblock.mcp.v1.10`.
 
+**D57 (v1.1) — the contract bumps to `unblock.mcp.v1.12`.** A SIBLING entry appended to this ledger; the entries
+above are NOT renumbered. D57 (PRD §4, tracked as `ub-lp9.2`) lands the FR-13 DB-layer writer as ONE discriminator arm
+on an existing tool (§5.1 row 1, §6.6): `schema_bundle()` moves by the `issue` input arm `config` with its `ConfigOp`
+definition and by the output arm `Config(ConfigList)` with its `ConfigList`/`ConfigEntry`/`ConfigSource`/`ConfigFault`/`ConfigFaultKind` definitions,
+and `capabilities()` moves by the `issue` tool description (§5.2) and by `CONFIG_ERROR`'s `hint_shape`, `none` →
+`contextual_text` (§2.2 — the `FaultyDbConfig` recovery hint is its first production site). On the unblock-error
+side that move is `ErrorCode::hint_shape`'s `ContextualText` arm gaining `Self::ConfigError`
+(`crates/unblock-error/src/code.rs`, with its doc comment's "remaining 30 of 36" becoming 29), the
+`hint_shape_counts_are_the_honest_map` tally (`tests/exit_code_table.rs`: `ContextualText` 2 → 3, `None` 30 → 29) and the
+re-blessed quadruple golden `exit_code_table__golden_exit_code_table.snap` — the same unblock-error legs the D46 entry
+named. So `CONTRACT_HASH` is re-pinned and
+`CONTRACT_VERSION` bumps to `unblock.mcp.v1.12` (unblock-mcp `options.rs`), with the `capabilities` and
+`schema_bundle` goldens re-blessed, the `public_api.rs` assert and the `tests/organization.rs` live-id assert moved, `agents_digest()` moving as in D56 (the managed
+`AGENTS.md` table gains the `config` action; `unblock agents` re-run, `init_agents` snapshot and `agents.rs` asserts
+updated), and a D43 duplicate-key corpus cell added for the `config` arm (`src/duplicate_key_corpus.rs` — the read-to-write
+`op` escalation `{"action":"config","op":"get","key":"actor","op":"unset"}`, shown arm non-mutating), so the `g3`
+every-published-arm cell stays green with no new exemption. D57 mints **no** `ErrorCode` (`ErrorCode::ALL` stays 36 —
+its three `ConfigError` variants map onto `CONFIG_ERROR`), leaves the 0–8 exit table and every OTHER `hint_shape` untouched,
+adds **no** tool, resource or prompt and no `EventType`. Its schema step 3 (§3.2 clause (v) `[D57]` note) is ON-DISK
+state, outside the contract hash and outside D35's stable set. Per D35 an additive `.M` bump is NON-breaking. As in
+D45/D52/D56, the bump rides the IMPLEMENTATION commit with the code constant, the re-blessed goldens, README and the
+claims scripts' `CONTRACT_RE` knobs — never this spec commit; until then the live contract stays `unblock.mcp.v1.11`.
+
 **`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
 exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the
 8 tools with their `oneOf`-derived actions + each action's FULL parameter surface — its required AND
@@ -3666,7 +4049,7 @@ pub struct UpdateArgs { /* --check, --version <tag>, --yes */ }
 
 **The CLI is a pure `CliOverrides` forwarder (D27/AD-3).** `unblock-config` owns ALL layering (CLI > env `UNBLOCK_*` > `.unblock/config.toml` > defaults), `.unblock/` discovery, path confinement, and prefix normalization; the CLI does NOT re-implement precedence. The single CLI-owned resolution seam is **clap `env`**: `--dir`→`UNBLOCK_DIR` and `--actor`→`UNBLOCK_ACTOR` bind via clap `env` (so `--flag > UNBLOCK_*` is free) and `GlobalArgs::to_overrides()` is the ONE place clap types cross into `CliOverrides`. `UNBLOCK_OUTPUT_FORMAT` is parsed strictly by config's env layer (the single strict parse site); the `--output/-o` flag forwards via `CliOverrides.output_format` so `--flag > env` still holds inside config's resolver. `CliOverrides` has NO `id_prefix` field, so `init --prefix` is NOT forwarded — it is written into the scaffold `config.toml` text (see `init`).
 
-**mcp (FR-20 / D27/AD-4).** Opens a `WorkspaceContext` via `open_with_storage_with_cli`, builds a `SessionConfig { jsonl_export: ctx.config.jsonl_export, import_on_open: false, remote: false }` (`import_on_open` MUST stay false in v1 — `true` returns `FeatureNotWired{"sync"}`, exit 1), installs the FR-17 shutdown handle, opens the `Session` + `with_shutdown_flag`, then calls the LIVE **2-arg** `unblock_mcp::run_mcp_server(Arc<Session>, McpServerOptions { cancel, quotas: Quotas::default(), instructions })` (§0.1 — transport is internal `stdio()`; since D43 that internal transport is the duplicate-key-scanning one, and the CLI contract is unchanged). On EOF/first signal the `CancellationToken` cancels; `run_mcp_server` then returns **`Ok(())` (handshake already complete) or `Err(McpServerError::Transport{Cancelled})` (cancel landed DURING the rmcp `initialize` handshake — §0.1)**. **Both** are normal cooperative-shutdown outcomes and **both** MUST run `session.shutdown()` (drain the permit, clean libsql close — FR-17); an `Err(Cancelled)` never skips the clean libsql close.
+**mcp (FR-20 / D27/AD-4).** Opens a `WorkspaceContext` via `open_with_storage_with_cli`, builds a `SessionConfig { jsonl_export: ctx.config.jsonl_export, import_on_open: false, remote: false }` (**[D57]** since v1.1 `SessionConfig { import_on_open: false, remote: false }` — the `jsonl_export` field is deleted by D57 clause (8); and when the opened context holds a blocking DB config fault it prints ONE stderr line naming the blocking keys and the `issue config unset` recovery — no `error[` — and starts anyway, D57 clause (2a)) (`import_on_open` MUST stay false in v1 — `true` returns `FeatureNotWired{"sync"}`, exit 1), installs the FR-17 shutdown handle, opens the `Session` + `with_shutdown_flag`, then calls the LIVE **2-arg** `unblock_mcp::run_mcp_server(Arc<Session>, McpServerOptions { cancel, quotas: Quotas::default(), instructions })` (§0.1 — transport is internal `stdio()`; since D43 that internal transport is the duplicate-key-scanning one, and the CLI contract is unchanged). On EOF/first signal the `CancellationToken` cancels; `run_mcp_server` then returns **`Ok(())` (handshake already complete) or `Err(McpServerError::Transport{Cancelled})` (cancel landed DURING the rmcp `initialize` handshake — §0.1)**. **Both** are normal cooperative-shutdown outcomes and **both** MUST run `session.shutdown()` (drain the permit, clean libsql close — FR-17); an `Err(Cancelled)` never skips the clean libsql close.
 
 - **The signal wins, on the cooperative-shutdown returns (NORMATIVE — D38).** The CLI consults the FR-17 handle's recorded signal (`signal_exit_code()`) **BEFORE** propagating a `run_mcp_server` **or** a `session.shutdown()` error. If a signal was recorded → the command yields **`128+signo`** even when the return is `Err`; that error is reported by `commands/mcp.rs` itself as a **diagnostic only** — never deciding the exit code: a teardown error observed after a signal is a consequence of the cancellation, not an independent fault. **Labelling (NORMATIVE — D38 clause (1a)):** a reported error is routed by CLASS — the cancellation class (`McpServerError::is_cancellation()`, matching **only** `Transport{Cancelled}`) is recorded via `tracing::debug!` (silent at the default level, surfaced by `-vv`), while a GENUINE error keeps its human `error[CODE]: message` **stderr** line (NFR-14). Neither branch may DROP the error. **The same reporting duty binds the UNSIGNALLED path:** if run loop AND teardown both fail, the run-loop error decides the code and the **displaced teardown error is still reported** (`run.and(teardown)` dropped it — a swallowing bug). **Delivery (RATIFIED — D38 design gate, not open):** `mcp::run` returns **`Ok(Some(128+signo))`** and `run_with` (§5.1) casts it straight to `ExitCode`; there is **NO** in-command `std::process::exit` on the first-signal path. **Scope:** the precedence binds those two returns ONLY — a failure raised BEFORE the run loop starts (e.g. `Session::open`) is not a consequence of the cancellation and still casts through the §2.3 0–8 table, so a signal cannot mask an unrelated DB fault. With **no** signal recorded, a genuine `Err` keeps `ErrorCode::InternalError` → **exit 1** (the D27/AF-4 map below), and **SINCE D50** a premature first frame is no longer an `Err` at all, so the class that used to reach exit 1 here either completes a normal handshake or reaches EOF and takes the D40 delegation below — exit 1 for a genuine unsignalled `Err` is unchanged, and `TransportError` is the route that still reaches it, the gate itself being specified in §5.6 — **EXCEPT the unsignalled pre-`initialize` client disconnect (NORMATIVE — D40):** an `Err(McpServerError::Transport{ServerInitializeError::ConnectionClosed(_)})` (the peer closed the connection before completing the `initialize` handshake) is a routine lifecycle event, so `resolve_mcp_exit` intercepts it via the additive `McpServerError::is_pre_handshake_disconnect()` predicate (matching **only** `Transport{ConnectionClosed(_)}`, mirroring `is_cancellation()`) and **delegates the exit code to the `session.shutdown()` teardown** — a clean teardown → `Ok(None)` (exit 0), a failing teardown still decides via its own 0–8 code (a libsql-close fault → exit 8 is NEVER masked into exit 0). The disconnect is reported as a `tracing::debug!` diagnostic (surfaced by `-vv`), and `diagnostic_route` demotes `ConnectionClosed` exactly as it demotes `Cancelled`; nothing is swallowed. This unifies with the already-blessed post-handshake EOF → exit 0. **FR-11 scope (NORMATIVE — REVERSED by D48).** On the signal path the `Ok(Some(_))` arm bypasses `exit::into_exit` entirely. **Since D48, mcp stdout is MCP-framing ONLY on the unsignalled genuine-`Err` path TOO:** that path still renders through `exit::into_exit`, but because `mcp` OWNS stdout as a protocol channel the `Json|Robot` arm writes the FULL `StructuredError` document to **STDERR** — undegraded, `hint` included. FR-11 itself is unchanged and unbroken (the document is still always valid JSON); what is superseded is the ON-STDOUT reading this clause previously asserted. **Exit codes are UNMOVED:** exit 1 for the unsignalled genuine `Err`, the D40 pre-`initialize` disconnect still delegates to the teardown (exit 0, and it renders no error at all), and a pre-run-loop failure still keeps its own §2.3 0–8 code. See PRD §4, D48 and D50.
 - **Pre-handshake frame gate (NORMATIVE — D50).** Before the server has responded to the `initialize` request, the transport stack intercepts every inbound frame that is neither `initialize` nor `ping`, so rmcp never reaches `ExpectedInitializeRequest` from the wire. The rule and its disposition are in §5.6. **Exit codes are UNMOVED and no code changes meaning** — the failure that used to decide exit 1 no longer occurs, so a premature frame followed by EOF reaches the D40 carve-out above and exits 0 on a clean teardown. See PRD §4, D50.
@@ -3679,9 +4062,9 @@ stdout carries ONLY MCP framing (logging is stderr-only, NFR-14). **Supported to
 
 **doctor (D27/AF-1 — doctor-LITE).** Opens the `Session` and composes `diagnostics(Stats|Lint|Info)` + the NEW `Session::integrity_check()` read (§4.1) into a CLI-local `DoctorReport`, mapped onto a `DiagnosticReport { kind: Info, findings }`. At T3.1 it does NOT call `Session::doctor()`/`recover()` (the `health` seam); at **T3.3 (HEALTH-LITE, D29/F4)** it ROUTES through the now-wired `Session::doctor()` (adding file-state anomalies). **Since D45 that same route also carries the dangling-dependency findings** — composed in the ENGINE (§4.1 `doctor()`; `unblock-health` is NOT touched, D29 clause F3 preserved), so the CLI report lists exactly what the `diagnostics {kind:"dangling"}` MCP action lists, in the same pinned order, with no second implementation. **Since D46 (v1.0.1) that same route ALSO carries TWO schema-version findings — the stamp OBSERVED ON DISK and the version THIS BUILD EXPECTS** — composed in the ENGINE (§4.1 `doctor()`) over the EXISTING pure `Storage::schema_version()` read (§3.2), with `unblock-health` again untouched (D29 clause F3 preserved) and no second read path invented in the CLI. **THEIR PLACEMENT IS NORMATIVE (§4.1 `doctor()` carries the same statement): the two schema rows sit AFTER the file-state anomalies and BEFORE the D45 dangling block, which REMAINS the report's trailing suffix** (deterministic overall order, NFR-14) — ruled at the 2026-08-03 design gate because `crates/unblock-engine/tests/dangling.rs:337-341` asserts that suffix and its `:311-312` docstring names the mutant the assertion kills, so appending AFTER the block would redden a required CI step and the cheap repair would retire a live D45 proof. They exist so `doctor` can no longer print `healthy` without also printing the number that would contradict it — the D46 false-green half; they COMPARE nothing and are deliberately **not** a schema-conformance check. **Non-zero exit only on detected corruption:** a non-empty `integrity_check` → `ErrorCode::DatabaseError` (exit 2; §2.3 unchanged, no new code); Lint/orphan, **D45 dangling-dependency and D46 schema-version** findings are advisory (no exit flip); else exit 0. **The D46 findings change the exit rule by exactly zero bytes** — `doctor_exit` stays byte-identical and mutation-pinned, for the same GA-freeze reason the D45 findings did. The advisory classification is deliberate: a dangling edge is a repairable DATA fact, not database corruption, and flipping the exit would change the mutation-pinned `doctor_exit` behaviour on a GA-frozen CLI surface in a patch release (D35). `--repair` + the full taxonomy land at **v1.1**.
 
-**version (D27/AD-5).** Runs with NO workspace. Emits `VersionReport { version, build, commit: Option<_>, rustc: Option<_>, target: Option<_>, features }` from `build.rs`-emitted `option_env!("UNBLOCK_BUILD_*")` (absent = `None`) — NO git invocation / git crate / network / GitHub update-check (NFR-6/D13; the update-check lives only in `unblock update`). Rendered via the same to-`DiagnosticReport` path (kind `Version`).
+**version (D27/AD-5).** Runs with NO workspace. **[D57]** Its own report's format resolves through `pick_cli_format(global, &ProcessEnv, FormatPass::OwnReport)`, whose user tier (`unblock_config::user_output_format`) sits below `UNBLOCK_OUTPUT_FORMAT`; a user file that fails to load is ONE stderr warning there and never fails `version` (PRD §4 D57 clause (6)). Emits `VersionReport { version, build, commit: Option<_>, rustc: Option<_>, target: Option<_>, features }` from `build.rs`-emitted `option_env!("UNBLOCK_BUILD_*")` (absent = `None`) — NO git invocation / git crate / network / GitHub update-check (NFR-6/D13; the update-check lives only in `unblock update`). Rendered via the same to-`DiagnosticReport` path (kind `Version`).
 
-**init (D27/AF-3).** Scaffolds exactly `.unblock/config.toml` (hand-written TOML — `ProjectConfig` is `Deserialize`-only — seeded with the `unblock_model::normalize_prefix`-normalized `--prefix`, default `ub`; the CLI takes a direct `unblock-model` dep) + a migrated empty `unblock.db` opened through `open_with_storage_with_cli` (FR-9 no-drift). NO `.gitignore`/`metadata.json`/`issues.jsonl` (D13/NFR-6/model-B). **Clobber guard:** refuse if `config.toml` OR `unblock.db` is already present in the target without `--force` → a CLI-local `CliError::AlreadyInitialized` → `ErrorCode::AlreadyInitialized` (exit 2; `ConfigError` has no such variant). Reports a CLI-local `InitReport`. The steps run in this order, each only after every earlier step succeeded: resolve the target, run the binds-first check, check the clobber guard, check the sibling guard, create the target, write `config.toml`, open and migrate, write `AGENTS.md` (`--agents` only), render the report, print the hint (a bare `init` only).
+**init (D27/AF-3).** **[D57]** Before it creates a directory or writes a file it calls `unblock_config::load_user_config(&ProcessEnv)` (a bad user file exits 7 with nothing written); after its storage-bearing open it fails with `ConfigError::FaultyDbConfig` when the context's `db_faults` holds a blocking entry (`ConfigFaultKind::is_blocking`), before any `--agents` write (PRD §4 D57 clause (6)). Scaffolds exactly `.unblock/config.toml` (hand-written TOML — `ProjectConfig` is `Deserialize`-only — seeded with the `unblock_model::normalize_prefix`-normalized `--prefix`, default `ub`; the CLI takes a direct `unblock-model` dep) + a migrated empty `unblock.db` opened through `open_with_storage_with_cli` (FR-9 no-drift). NO `.gitignore`/`metadata.json`/`issues.jsonl` (D13/NFR-6/model-B). **Clobber guard:** refuse if `config.toml` OR `unblock.db` is already present in the target without `--force` → a CLI-local `CliError::AlreadyInitialized` → `ErrorCode::AlreadyInitialized` (exit 2; `ConfigError` has no such variant). Reports a CLI-local `InitReport`. The steps run in this order, each only after every earlier step succeeded: resolve the target, run the binds-first check, check the clobber guard, check the sibling guard, create the target, write `config.toml`, open and migrate, write `AGENTS.md` (`--agents` only), render the report, print the hint (a bare `init` only).
 
 - **Target (bug fix, `ub-lp9.14`).** An explicit `--dir`/`UNBLOCK_DIR` whose last component is `.unblock` or `_unblock` is the target as given. Any other explicit `--dir` names a project root, and so does the cwd when no `--dir` is set. `init` probes that root with `unblock-config`'s `probe_workspace_root`, the child probe discovery runs on a `--dir` root (§4 D39, tier 2). The target is an existing `<root>/.unblock/`, else an existing `<root>/_unblock/`, else a new `<root>/.unblock/`, so later discovery at that root binds the directory `init` targets. Without `--force` the clobber guard therefore refuses an existing `_unblock/` workspace (exit 2, `ALREADY_INITIALIZED`, naming that `_unblock/` dir) instead of hiding it behind a new `.unblock/`, and `init --force` re-scaffolds it in place, as it does a `.unblock/`. `init` never walks up and never reads `CLAUDE_PROJECT_DIR`, so the clobber guard, the scaffold and the open all name the same directory. Before this fix a `--dir` naming a project root wrote a stray `<root>/config.toml`, then either failed to open or bound the root's existing workspace, and a bare `init` in a root holding only `_unblock/` created a `.unblock/` that discovery at that root then bound instead.
 - **Sibling guard (bug fix, `ub-lp9.14`).** `init` checks the target's sibling, the other of `.unblock` and `_unblock` in the same parent, when the sibling is a distinct directory. Before the clobber guard, its binds-first check refuses an `_unblock` target beside a distinct `.unblock` directory that holds neither `config.toml` nor `unblock.db`, and a `.unblock` target that is such a directory beside a distinct `_unblock` holding either file, with or without `--force`, because discovery at their root binds the `.unblock/` first and a command that opens storage there creates a fresh database in it. That refusal is the CLI-local `SiblingBindsFirst`, which uses `ALREADY_INITIALIZED` (exit 2) with its own message, because "already initialized" would be false for that `.unblock/`. The message is `<bound> already exists, and discovery binds it before <hidden>`, where `<bound>` is the `.unblock` directory, `<hidden>` is the `_unblock` directory and both pass through `sanitize_inline`. After the clobber guard, if a distinct sibling directory holds `config.toml` or `unblock.db`, `init` refuses with `ALREADY_INITIALIZED` (exit 2) naming the sibling, with or without `--force`, because a second workspace dir at one root hides one of the two from discovery and `--force` only lets `init` replace the target's own scaffold. A `.unblock` target beside an `_unblock` directory holding neither file proceeds, because discovery binds the new `.unblock/` first. Both checks skip a sibling that resolves to the same directory as the target, such as a `.unblock` symlink to the `_unblock` beside it, because that sibling is the target itself, so `init --force` re-scaffolds that workspace. They compare canonical paths, and a path that cannot be canonicalized counts as distinct. They look only in the parent `init` formed, so a target that is a symlink into another parent can still leave two workspace dirs in the parent of the directory it links to, as it could before this fix (follow-up `ub-0p4`). Before this fix `init --dir <root>/.unblock` beside an initialized `<root>/_unblock/` scaffolded a `.unblock/` that every later discovery at that root bound first, and `init --dir <root>/_unblock` beside a distinct `<root>/.unblock/` directory scaffolded a workspace that discovery at that root never binds.
@@ -3726,7 +4109,7 @@ All mutations flow through `Session` (FR-9) and the single write permit (D14); r
 Every error surfaced at L7 maps to exactly one `ErrorCode` and one 0–8 exit code per §2.3 (golden-snapshot pinned).
 
 ### 6.6 MCP tool-count budget
-MCP tool count stays ≤ 8; new domain surface extends existing tools by discriminator before adding tools (RK-3). D22's `create_bulk` is a NEW `action` arm on the existing `issue` tool (NOT a new tool) — the live `list_tools` golden (T2.3) keeps the count at 7. **D37 (the `comment` tool):** the dedicated `comment` tool (D-B) is the deliberate exception to "extend before add" — a distinct domain verb, not an `issue` arm — bringing the count to **8 ≤ 8** at T3.9; the RK-3 budget is now **FULL** and any further domain surface must extend an existing tool by discriminator. **D45 is the first surface to land under that FULL budget and it obeys the rule literally:** the dangling-dependency listing is a new `kind` arm on the existing `diagnostics` tool (§5.1 row 7 / §5.2), NOT a ninth tool — the count stays **8 ≤ 8** and the live `list_tools` assert does not move. **D56 follows the same rule for the FR-6 remainder:** label rename and the explicit close of eligible epics are `issue` actions (`relabel`, `close_eligible`), the label catalog and the epic rollup read are `query` kinds (`labels`, `epics`) — four discriminator arms, NO ninth tool, the count stays **8 ≤ 8**.
+MCP tool count stays ≤ 8; new domain surface extends existing tools by discriminator before adding tools (RK-3). D22's `create_bulk` is a NEW `action` arm on the existing `issue` tool (NOT a new tool) — the live `list_tools` golden (T2.3) keeps the count at 7. **D37 (the `comment` tool):** the dedicated `comment` tool (D-B) is the deliberate exception to "extend before add" — a distinct domain verb, not an `issue` arm — bringing the count to **8 ≤ 8** at T3.9; the RK-3 budget is now **FULL** and any further domain surface must extend an existing tool by discriminator. **D45 is the first surface to land under that FULL budget and it obeys the rule literally:** the dangling-dependency listing is a new `kind` arm on the existing `diagnostics` tool (§5.1 row 7 / §5.2), NOT a ninth tool — the count stays **8 ≤ 8** and the live `list_tools` assert does not move. **D56 follows the same rule for the FR-6 remainder:** label rename and the explicit close of eligible epics are `issue` actions (`relabel`, `close_eligible`), the label catalog and the epic rollup read are `query` kinds (`labels`, `epics`) — four discriminator arms, NO ninth tool, the count stays **8 ≤ 8**. **D57 follows it for FR-13 full:** the DB config layer's writer is ONE `issue` action, `config` (`op: get|set|unset|list`), NO ninth tool and NO CLI verb (D3 untouched) — the count stays **8 ≤ 8**.
 
 ### 6.7 Safety / no-git / no-default-network
 `forbid(unsafe_code)`, no git crate / `Command::new("git")` anywhere (NFR-6/NFR-9). **LOCAL mode is the default build and makes no network CALL on any normal command path.** Network/TLS already links into that build, and exactly two routes put it into any build of this workspace — the default-on `self-update` axoupdater path (FR-25/D17), which calls out only on an explicit `unblock update`, and the non-default, opt-in `remote` feature that selects remote mode's HTTP client (D15/D51). The no-network source-scan whitelists the first; the second needs its own explicitly feature-gated entry before that client lands, or a required job fails for a reason unrelated to its own decision (ci-cd §2). NFR-10 names both routes.

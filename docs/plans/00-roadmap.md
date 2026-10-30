@@ -540,7 +540,7 @@ shape (only additive `contract_version` bumps).
 | FR-1c (D20 seams) | **Restore extensions:** cascade-restore (needs a delete-batch identity to avoid over-reviving independently-tombstoned children) + TTL-refusal of expired tombstones (`deletions_retention_days`, reserved/unenforced in v1) | model, storage, engine, mcp |
 | FR-18 | **Swarm coordination diagnostics:** `scheduler` (ranked, explainable `unblock.scheduler.v1`); `coordination status` (`unblock.coordination.v1`, read-only stale-claim diagnosis). Purely DB-state-derived (Agent Mail dropped, PRD §12) | policy, engine, mcp |
 | FR-19 | **Workflow gates:** policy-driven (`.unblock/policy.toml`) transition gates (ci_green / min_reviewers / security_sign_off) | policy, config, engine, mcp |
-| FR-13 (full) | DB config-table + user-config layers; full startup/runtime partitioning | config, storage, engine |
+| FR-13 (full) | DB config-table + user-config layers; full startup/runtime partitioning. **[D57]** Specified by PRD §4 D57 (`ub-lp9.2`, implementation-plan T4.2): six layers in ONE order, CLI > env > project > user (`$XDG_CONFIG_HOME/unblock/config.toml` else `~/.config/unblock/config.toml`, every OS) > DB `config` table (schema step 3, `CURRENT_SCHEMA_VERSION` `2` → `3`) > defaults; the user and DB layers carry the runtime keys `actor`, `output_format` and `search_cap` only (`jsonl_export` stays CLI/env/project-only and inert until `ub-p1h`) — a startup key in the user file is refused (`CONFIG_ERROR`), and a bad DB row fail-closes every command but the `config` action, which repairs it in-product (`config unset`); the DB layer's writer is the `issue` action `config` (`get`/`set`/`unset`/`list`) — no new tool, no CLI verb — with one contract bump `unblock.mcp.v1.11` → `unblock.mcp.v1.12`; a successful `config set`/`unset` reloads the live session's runtime keys | model, storage, config, engine, mcp, cli |
 | FR-16 (full) | Full Healthy/Drifted/Recoverable/Unsafe taxonomy redefined for a libsql-authoritative world; evidence under `.unblock/.recovery/` | health, engine, cli |
 | FR-21 | Saved queries (named reusable `list` filter sets) | policy, storage, engine, mcp |
 | FR-22 | Audit / flight recorder: append-only `interactions.jsonl`, Tier-1 attribution (capture-only) | engine, sync, mcp |
@@ -549,11 +549,13 @@ shape (only additive `contract_version` bumps).
 | — | **TOON output** (feature-gated) in render | render |
 
 ### Crates touched
-Primarily `unblock-policy`, `unblock-health`, `unblock-config`, `unblock-engine`, `unblock-mcp`,
+Primarily `unblock-policy`, `unblock-health`, `unblock-config`, `unblock-storage`, `unblock-engine`, `unblock-mcp`,
 `unblock-render`, `unblock-cli`. MCP surface grows by DISCRIMINATOR ARMS on the existing eight tools, never a
 ninth (RK-3, spine §6.6) — scheduler, coordination, gates, saved-queries (plan §6). **[D56]** Labels and epic
 rollups are the `issue` actions `relabel`/`close_eligible` and the `query` kinds `labels`/`epics`; comments
-already shipped in v1 as the 8th tool (D37). `unblock-render` needs no FR-6 work (D56 clause (8)).
+already shipped in v1 as the 8th tool (D37). `unblock-render` needs no FR-6 work (D56 clause (8)). **[D57]** The FR-13
+DB config layer's writer is the `issue` action `config`; `unblock-storage` takes the schema-step-3 `config` table and
+three trait methods, and `unblock-sync` only forwards them in its three test doubles.
 
 ---
 
@@ -796,6 +798,11 @@ answered here.
    reopened by another process between compute and commit can let an epic close with an open child, and the
    close succeeds silently. The lock decides the remote-mode serialization this needs (for example
    re-checking eligibility inside the transaction).
+8. **What a DB `config` row MEANS in remote mode (PRD §4 D57 clause (4)).** In local mode a `config` row is one
+   database's state, below every developer's own user file; in remote mode the database is shared, so one
+   developer's `config set` changes the runtime keys every connected developer's next open resolves (and no
+   running session of theirs reloads, because the reload trigger is in-process only). The lock decides whether that
+   team-wide reach is intended, restricted to some keys, or replaced by the committed-versus-per-user config split.
 
 ---
 
@@ -1027,7 +1034,7 @@ not feature-landing): ● substantial work in that release · ◐ incidental / h
 | `unblock-model` | ● | ◐ | ● | ● | ◐ | | ◐ | |
 | `unblock-error` | ● | ◐ D46 | ● | | ◐ | | ◐ | |
 | `unblock-policy` | ● | | ● | ◐ | | | ● | |
-| `unblock-storage` | ● | ● | ◐ | ● | ● | | ● | ◐ |
+| `unblock-storage` | ● | ● | ● | ● | ● | | ● | ◐ |
 | `unblock-sync` | ● | ● | ◐ | | | | ◐ | ◐ |
 | `unblock-health` | ● lite | | ● full | | ◐ | | ● | |
 | `unblock-config` | ● subset | ◐ D46 | ● full | | ● | | | |
@@ -1047,6 +1054,7 @@ Notes:
   shapes); `unblock-mcp` itself takes **no new v1.4 work** (hence it is blank at v1.4 in the table above — the
   web-era ◐ was the retired HTTP-serving touch). It is minted only at v1.4 lock, when PRD §8.1 grows; until
   then the 12-crate set is unchanged.
+- **`v1.1` `unblock-storage` ●** (was ◐): D56's three organization methods plus **D57**'s schema step 3 (the `config` table, `CURRENT_SCHEMA_VERSION` `2` → `3`) and its three config-table methods in every `impl Storage` block.
 - **`v1.0.1`** is the maintenance-patch column (§1, PRD §4 D41 + **D42**): `unblock-storage` ● carries the
   comments forward-migration (**D46**, tracked as `ub-lp9.13` — the `user_version` ladder bumped `1`→`2` with a
   one-time shape-sensing step 2, the migrate/doctor false green closed, and a content pin over the embedded DDL)

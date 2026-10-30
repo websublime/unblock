@@ -76,16 +76,16 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; e
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
 # The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
-# the day a D57 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# the day a D58 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
 # goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves, the
-# prose range `(D1..D56)` and the tokenizer's regex ALTERNATION `\bD(56|55|54|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D57 finding — the lint would stop tokenizing
+# prose range `(D1..D57)` and the tokenizer's regex ALTERNATION `\bD(57|56|55|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D58 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D56'
-RANGE_ALT_RE='D\(56\|55\|'
+RANGE_RE='D1\.\.D57'
+RANGE_ALT_RE='D\(57\|56\|'
 
 # The LIVE published contract version. D56 MOVES it (`unblock.mcp.v1.10` -> `unblock.mcp.v1.11`), so
 # this knob is LIVE from this file's first commit. It tracks the LIVE id, so a later decision's bump
@@ -143,10 +143,13 @@ P1@.unblock/issues.jsonl@\"id\":\"ub-lp9\.1\"@the tracker record names the work 
 #      the PRD §7 EpicStatus row; the spine's §3.2.1 paragraph, its two EventType rows, the §4.1
 #      organization block and the §5.4 ledger entry; the engine, storage and mcp crate plans; both
 #      roadmaps; README's tool-table lines; the T4.1 task.
-# Q98..Q102 are this gate's wiring: SPECIFIED, RUNNING, LISTED in PROCESS.md §3 with the NEWEST
-#      pointer naming it, and in ci-cd §2.1(a).
+# Q98..Q102 are this gate's wiring: SPECIFIED, RUNNING, LISTED in PROCESS.md §3, and in ci-cd §2.1(a);
+#      Q101 pins PROCESS.md §3's newest-reference sentence naming the NEWEST gate, which pins this
+#      script's knobs (retargeted when D57 took the pointer), and Q102 no longer requires §2.1(a) to call
+#      this script the newest.
 # Q103..Q109 are the SIBLING ROWS the D56 spec commit retargeted to this script: d53's Q53, d54's Q67
-#      and Q72, and d55's Q78, Q80, Q81 and Q82.
+#      and Q72, and d55's Q78, Q80, Q81 and Q82 — and which the D57 spec commit retargeted again, to
+#      D57's gate.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@crates/unblock-model/src/results.rs@^pub struct LabelCount \{@pub struct LabelCount \{@the label-catalog entry is still declared; the anchor is the teeth
@@ -249,15 +252,15 @@ Q97@docs/plans/implementation-plan.md@^- \*\*T4\.1 — @FR-6 remainder@the task 
 Q98@docs/plans/ci-cd-and-distribution.md@Named sub-check \(its D56 sibling@d56-organization-claims@this gate is SPECIFIED in its own paragraph — §2.1(a) of that same file also carries this filename, so a bare token stays green with the paragraph deleted
 Q99@.github/workflows/ci.yml@d56-organization-claims@:[0-9]+: +- run: scripts/checks/d56-organization-claims\.sh@this gate actually RUNS in the required doc-lint job; every line naming it must BE the run step, so a commented-out step fails
 Q100@docs/PROCESS.md@d56-organization-claims\.sh. .RANGE_RE@RANGE_ALT_RE@the count-free LIST that IS the rule carries this script's own entry with BOTH knob names
-Q101@docs/PROCESS.md@always the NEWEST script@d56-organization-claims\.sh@PROCESS.md §3 names this gate as the newest reference, which pins every OLDER script's knobs (the next mint retargets it)
-Q102@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@the .ci\(d56\). commit that mints it, .scripts/checks/d56-organization-claims\.sh. .RANGE_RE. \*\*and\*\* .RANGE_ALT_RE., the newest of them@ci-cd §2.1(a)'s enumeration carries this script's knobs and names it as the newest
-Q103@scripts/checks/d53-request-integrity-claims.sh@^Q53@d56-organization-claims@the D53 sibling's newest-pointer row names this gate
-Q104@scripts/checks/d54-parse-error-id-claims.sh@^Q67@d56-organization-claims@the D54 sibling's row pinning d53's Q53 follows the retarget
-Q105@scripts/checks/d54-parse-error-id-claims.sh@^Q72@d56-organization-claims@the D54 sibling's newest-pointer row names this gate
-Q106@scripts/checks/d55-update-refusal-claims.sh@^Q78@d56-organization-claims@the D55 sibling's newest-pointer row names this gate
-Q107@scripts/checks/d55-update-refusal-claims.sh@^Q80@d56-organization-claims@the D55 sibling's row pinning d53's Q53 follows the retarget
-Q108@scripts/checks/d55-update-refusal-claims.sh@^Q81@d56-organization-claims@the D55 sibling's row pinning d54's Q67 follows the retarget
-Q109@scripts/checks/d55-update-refusal-claims.sh@^Q82@d56-organization-claims@the D55 sibling's row pinning d54's Q72 follows the retarget
+Q101@docs/PROCESS.md@always the NEWEST script@d57-config-layers-claims\.sh@PROCESS.md §3 names D57's gate as the newest reference — a script that pins THIS one's knobs, which this script cannot pin itself (retargeted when D57 took the pointer; the next mint retargets it again)
+Q102@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@the .ci\(d56\). commit that mints it, .scripts/checks/d56-organization-claims\.sh. .RANGE_RE. \*\*and\*\* .RANGE_ALT_RE.@ci-cd §2.1(a)'s enumeration carries this script's knobs (it stopped naming this script the newest when D57's gate took the pointer)
+Q103@scripts/checks/d53-request-integrity-claims.sh@^Q53@d57-config-layers-claims@the D53 sibling's newest-pointer row names the NEWEST gate (this one until D57 took the pointer)
+Q104@scripts/checks/d54-parse-error-id-claims.sh@^Q67@d57-config-layers-claims@the D54 sibling's row pinning d53's Q53 follows the retarget (to D57's gate since D57 took the pointer)
+Q105@scripts/checks/d54-parse-error-id-claims.sh@^Q72@d57-config-layers-claims@the D54 sibling's newest-pointer row names the NEWEST gate (this one until D57 took the pointer)
+Q106@scripts/checks/d55-update-refusal-claims.sh@^Q78@d57-config-layers-claims@the D55 sibling's newest-pointer row names the NEWEST gate (this one until D57 took the pointer)
+Q107@scripts/checks/d55-update-refusal-claims.sh@^Q80@d57-config-layers-claims@the D55 sibling's row pinning d53's Q53 follows the retarget (to D57's gate since D57 took the pointer)
+Q108@scripts/checks/d55-update-refusal-claims.sh@^Q81@d57-config-layers-claims@the D55 sibling's row pinning d54's Q67 follows the retarget (to D57's gate since D57 took the pointer)
+Q109@scripts/checks/d55-update-refusal-claims.sh@^Q82@d57-config-layers-claims@the D55 sibling's row pinning d54's Q72 follows the retarget (to D57's gate since D57 took the pointer)
 "
 
 blocked=0
