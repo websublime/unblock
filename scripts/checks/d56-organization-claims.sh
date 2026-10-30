@@ -90,7 +90,7 @@ RANGE_ALT_RE='D\(57\|56\|'
 # The LIVE published contract version. D56 MOVES it (`unblock.mcp.v1.10` -> `unblock.mcp.v1.11`), so
 # this knob is LIVE from this file's first commit. It tracks the LIVE id, so a later decision's bump
 # moves it in that decision's implementation commit.
-CONTRACT_RE='unblock\.mcp\.v1\.11'
+CONTRACT_RE='unblock\.mcp\.v1\.12'
 
 # The SAME spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte rather than a regex operator. DERIVED, never hand-written a second time. `printf '%s'`
@@ -177,8 +177,8 @@ Q22@crates/unblock-mcp/src/tools/output.rs@^    CloseEligible\(@CloseEligible\(C
 Q23@crates/unblock-model/src/results.rs@^    pub epic_ids: @pub epic_ids: Vec<String>,@CloseEligibleOutcome still keys its ids epic_ids, so the key can never fall back to the closed key of close's outcome
 Q24@crates/unblock-mcp/src/tools/query.rs@^ +description = \"Query issues: @\"Query issues: list, ready, blocked, search, count, stale, labels, or epics\.\"@the query tool description names both new kinds (tool-router copy)
 Q25@crates/unblock-mcp/src/resources/capabilities.rs@^ +\"Query issues: @\"Query issues: list, ready, blocked, search, count, stale, labels, or epics\.\"@…and its capabilities() twin says the same
-Q26@crates/unblock-mcp/src/tools/issue.rs@^ +description = \"Create, show, update, close, @restore, relabel, or close_eligible issues\.@the issue tool description names both new actions (tool-router copy)
-Q27@crates/unblock-mcp/src/resources/capabilities.rs@^ +\"Create, show, update, close, @restore, relabel, or close_eligible issues\.@…and its capabilities() twin says the same
+Q26@crates/unblock-mcp/src/tools/issue.rs@^ +description = \"Create, show, update, close, @restore, relabel, or close_eligible issues[.,]@the issue tool description names both new actions (tool-router copy); re-pointed by D57, whose config clause continues the description past issues
+Q27@crates/unblock-mcp/src/resources/capabilities.rs@^ +\"Create, show, update, close, @restore, relabel, or close_eligible issues[.,]@…and its capabilities() twin says the same; re-pointed by D57 for the same continuation
 Q28@crates/unblock-storage/src/libsql/@$OR_IGNORE_RE@$COMMENT_LINE_RE@NEGATIVE: no non-comment libsql line spells OR IGNORE, so the merge-before-rename rule of D56 clause (5) cannot be replaced by an ignore-on-conflict insert; the strict label INSERT is the spine §3.2.1 tripwire
 Q29@crates/unblock-storage/src/testkit.rs@^pub async fn contract_list_all_labels_counts_live_issues_in_byte_order<@pub async fn contract_list_all_labels_counts_live_issues_in_byte_order<@the label-catalog contract cell is still declared
 Q30@crates/unblock-storage/src/testkit.rs@^pub async fn contract_rename_label_pair<@pub async fn contract_rename_label_pair<@the rename-pair contract cell is still declared

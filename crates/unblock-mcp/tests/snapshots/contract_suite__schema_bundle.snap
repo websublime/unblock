@@ -3,10 +3,35 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.11",
+  "contract_version": "unblock.mcp.v1.12",
   "issue": {
     "input": {
       "$defs": {
+        "ConfigOp": {
+          "description": "The `config` action's operation (D57).",
+          "oneOf": [
+            {
+              "const": "get",
+              "description": "Read one key: its database row, the value this session resolved and the layer that supplied it.",
+              "type": "string"
+            },
+            {
+              "const": "set",
+              "description": "Store a layer key's value in the database and reload the session's runtime configuration.",
+              "type": "string"
+            },
+            {
+              "const": "unset",
+              "description": "Remove a key's database row and reload the session's runtime configuration.",
+              "type": "string"
+            },
+            {
+              "const": "list",
+              "description": "List the layer keys plus every other key a database row holds.",
+              "type": "string"
+            }
+          ]
+        },
         "DeleteModeInput": {
           "description": "The delete mode on the wire (spine §5.2 `DeleteModeInput` → [`DeleteMode`]).",
           "oneOf": [
@@ -83,7 +108,7 @@ expression: schema_bundle()
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `issue` tool input (spine §5.2 — EXACT shape; 10 actions).",
+      "description": "The `issue` tool input (spine §5.2 — EXACT shape; 11 actions).",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -759,6 +784,65 @@ expression: schema_bundle()
             "action"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Get, set, unset or list the runtime configuration the database `config` table holds — the\nlayer keys `actor`, `output_format` and `search_cap` (D57).",
+          "properties": {
+            "action": {
+              "const": "config",
+              "type": "string"
+            },
+            "agent_name": {
+              "default": null,
+              "description": "Self-reported agent name. Accepted but currently discarded; unblock neither stores nor returns it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "harness": {
+              "default": null,
+              "description": "Self-reported harness identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "default": null,
+              "description": "The configuration key. Required for get, set and unset; omit for list.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "default": null,
+              "description": "Self-reported model identifier. Accepted but currently discarded; unblock neither stores nor returns it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "$ref": "#/$defs/ConfigOp",
+              "description": "The configuration operation."
+            },
+            "value": {
+              "default": null,
+              "description": "The value to store. Required for set; omit otherwise.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "op"
+          ],
+          "type": "object"
         }
       ],
       "title": "IssueInput",
@@ -865,6 +949,149 @@ expression: schema_bundle()
             "created_at"
           ],
           "type": "object"
+        },
+        "ConfigEntry": {
+          "description": "One runtime configuration entry (`issue action: config`, FR-13 / D57).",
+          "properties": {
+            "effective": {
+              "description": "The canonical value this session resolved, or null when the key is not a runtime layer key.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "fault": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ConfigFault"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The row's fault, or null for a sound or absent row."
+            },
+            "key": {
+              "description": "The configuration key.",
+              "type": "string"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ConfigSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The layer that supplied `effective`, or null when the key is not a runtime layer key."
+            },
+            "value": {
+              "description": "The database `config` row's value, or null when no row holds the key.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "ConfigFault": {
+          "description": "A database `config` row's fault.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/ConfigFaultKind",
+              "description": "What is wrong with the row."
+            },
+            "reason": {
+              "description": "A human description of the fault.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "ConfigFaultKind": {
+          "description": "Why a database `config` row contributes no value.",
+          "oneOf": [
+            {
+              "const": "startup_key",
+              "description": "The row names a startup key, which only the command line, the environment and the project\nfile may set. Blocking.",
+              "type": "string"
+            },
+            {
+              "const": "invalid_value",
+              "description": "The row's value cannot be decoded for its key. Blocking.",
+              "type": "string"
+            },
+            {
+              "const": "unknown_key",
+              "description": "The row names a key this build does not know. Not blocking.",
+              "type": "string"
+            }
+          ]
+        },
+        "ConfigList": {
+          "description": "The CD-2 object-wrap for the `config` action's entries: `{\"config\":[ConfigEntry…]}` (spine §5.3,\nD57) — one entry for `get`/`set`/`unset`, the layer keys plus every other row for `list`.",
+          "properties": {
+            "config": {
+              "description": "The configuration entries, in key order.",
+              "items": {
+                "$ref": "#/$defs/ConfigEntry"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "config"
+          ],
+          "type": "object"
+        },
+        "ConfigSource": {
+          "description": "The layer that supplied a resolved runtime configuration value, highest precedence first.",
+          "oneOf": [
+            {
+              "const": "cli",
+              "description": "A command-line flag.",
+              "type": "string"
+            },
+            {
+              "const": "env",
+              "description": "An `UNBLOCK_*` environment variable.",
+              "type": "string"
+            },
+            {
+              "const": "project",
+              "description": "The project file, `.unblock/config.toml`.",
+              "type": "string"
+            },
+            {
+              "const": "user",
+              "description": "The user file, `config.toml` under the user configuration directory.",
+              "type": "string"
+            },
+            {
+              "const": "db",
+              "description": "A row of the database `config` table.",
+              "type": "string"
+            },
+            {
+              "const": "os_user",
+              "description": "The operating-system user name (the actor's `$USER` fallback).",
+              "type": "string"
+            },
+            {
+              "const": "default",
+              "description": "The built-in default.",
+              "type": "string"
+            }
+          ]
         },
         "DeleteModeOutput": {
           "description": "The delete mode on the output wire (spine §5.3, D25) — mcp-owned, from the RESOLVED model\n[`DeleteMode`] (an OUTPUT type, distinct from the input `DeleteModeInput`).",
@@ -1344,9 +1571,13 @@ expression: schema_bundle()
         {
           "$ref": "#/$defs/CloseEligibleOutcome",
           "description": "The `close_eligible` outcome: the epic ids closed (or that would close), in close order."
+        },
+        {
+          "$ref": "#/$defs/ConfigList",
+          "description": "The `config` outcome (every op): the runtime configuration entries."
         }
       ],
-      "description": "The `issue` tool success union — the 7 success shapes across the 10 actions (spine §5.3, D25;\nD56 appends `Relabel` and `CloseEligible`).\n\n`#[serde(untagged)]` ⇒ each arm serializes as its inner value directly (wire-identical to the\npre-D25 ad-hoc values). The large arms are boxed to keep `clippy::large_enum_variant` clean.",
+      "description": "The `issue` tool success union — the 8 success shapes across the 11 actions (spine §5.3, D25;\nD56 appends `Relabel` and `CloseEligible`; D57 appends `Config`).\n\n`#[serde(untagged)]` ⇒ each arm serializes as its inner value directly (wire-identical to the\npre-D25 ad-hoc values). The large arms are boxed to keep `clippy::large_enum_variant` clean.",
       "title": "IssueOutput"
     }
   },

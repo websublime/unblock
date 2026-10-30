@@ -83,27 +83,31 @@ fn golden_exit_code_table() {
 
 #[test]
 fn hint_shape_counts_are_the_honest_map() {
-    // The D25/FORK-4B honest map: exactly 3 StaticText + 2 ContextualText + 1 SimilarIds; the rest
-    // None. D46 (v1.0.1) moved `SchemaMismatch` off `None` onto `ContextualText` (1 -> 2), which is a
-    // PUBLISHED byte in the mcp `capabilities()` error map — hence the `unblock.mcp.v1.9` bump and the
-    // `CONTRACT_HASH` re-pin that ride the same commit as this count.
+    // The D25/FORK-4B honest map: exactly 3 StaticText + 3 ContextualText + 1 SimilarIds; the rest
+    // (29) None. D46 (v1.0.1) moved `SchemaMismatch` off `None` onto `ContextualText` (1 -> 2), which
+    // is a PUBLISHED byte in the mcp `capabilities()` error map — hence the `unblock.mcp.v1.9` bump
+    // and the `CONTRACT_HASH` re-pin that ride the same commit as this count. D57 (v1.1) moved
+    // `ConfigError` the same way (2 -> 3, `None` 30 -> 29): the `FaultyDbConfig` recovery hint is its
+    // first production hint site — riding the `unblock.mcp.v1.12` bump.
     let mut static_text = 0;
     let mut contextual = 0;
     let mut similar = 0;
+    let mut none = 0;
     for code in ErrorCode::ALL {
         match code.hint_shape() {
             HintShape::StaticText => static_text += 1,
             HintShape::ContextualText => contextual += 1,
             HintShape::SimilarIds => similar += 1,
-            HintShape::None => {}
+            HintShape::None => none += 1,
         }
     }
     assert_eq!(static_text, 3, "exactly 3 StaticText codes");
     assert_eq!(
-        contextual, 2,
-        "exactly 2 ContextualText codes (ValidationFailed + D46's SchemaMismatch)"
+        contextual, 3,
+        "exactly 3 ContextualText codes (ValidationFailed + D46's SchemaMismatch + D57's ConfigError)"
     );
     assert_eq!(similar, 1, "exactly 1 SimilarIds code");
+    assert_eq!(none, 29, "the remaining 29 of 36 codes carry no hint");
 }
 
 #[test]
