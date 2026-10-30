@@ -528,3 +528,50 @@ async fn a_user_file_startup_key_fails_the_open() {
     assert_eq!(structured.context["layer"], "user");
     assert_eq!(structured.context["key"], "id_prefix");
 }
+
+/// **PRD §4 D57 clause (4) ruling — the user file is validated WHOLE**: a user-file value outside
+/// its bounds fails the storage-bearing open (and the resolve-only one) EVEN WHEN a higher layer
+/// shadows it — a project `search_cap = 5` over a user `search_cap = 0`, and a CLI `--actor` over an
+/// over-long user actor — symmetric with a DB row, which is a fault whether or not it would win.
+///
+/// MUTANT KILLED: bounding only the user value that WINS the fold.
+#[tokio::test]
+async fn a_shadowed_out_of_bound_user_value_still_fails_the_open() {
+    let long_actor = format!("actor = \"{}\"\n", "a".repeat(201));
+    for (project, user, cli, key) in [
+        (
+            "search_cap = 5\n",
+            "search_cap = 0\n".to_string(),
+            CliOverrides::default(),
+            "search_cap",
+        ),
+        (
+            "",
+            long_actor,
+            CliOverrides::new().with_actor("bob"),
+            "actor",
+        ),
+    ] {
+        let ws = tempfile::tempdir().unwrap();
+        fs::create_dir(ws.path().join(".unblock")).unwrap();
+        fs::write(ws.path().join(".unblock").join("config.toml"), project).unwrap();
+        let xdg = ws.path().join("xdg");
+        fs::create_dir_all(xdg.join("unblock")).unwrap();
+        fs::write(xdg.join("unblock").join("config.toml"), &user).unwrap();
+        let env = MapEnv::new(&[("XDG_CONFIG_HOME", xdg.to_str().unwrap())]);
+        let err = unblock_config::open_with_storage_with_env(Some(ws.path()), &cli, &env)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("a shadowed bad user `{key}` is refused by the open"));
+        assert!(
+            matches!(&err, unblock_config::ConfigError::InvalidValue { key: k, .. } if k == key),
+            "{key}: {err:?}"
+        );
+        assert!(
+            unblock_config::open_workspace_with_env(Some(ws.path()), &cli, &env)
+                .await
+                .is_err(),
+            "{key}: the resolve-only open refuses it too"
+        );
+    }
+}
