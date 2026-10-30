@@ -39,9 +39,11 @@ async fn build_session(n: usize) -> (Session, tempfile::TempDir) {
     let unblock_dir = workspace_dir.join(".unblock");
     std::fs::create_dir_all(&unblock_dir).expect("create .unblock");
 
-    let config = ResolvedConfig::default();
-    let db_path = unblock_dir.join(&config.db_filename);
-    let jsonl_path = unblock_dir.join(&config.jsonl_filename);
+    let mut config = ResolvedConfig::default();
+    config.runtime.actor = "scale".to_string();
+    config.runtime.sources.actor = unblock_model::ConfigSource::OsUser;
+    let db_path = unblock_dir.join(&config.startup.db_filename);
+    let jsonl_path = unblock_dir.join(&config.startup.jsonl_filename);
 
     let storage = LibsqlStorage::open_local(&db_path, DEFAULT_WRITE_LOCK_TIMEOUT_MS)
         .await
@@ -58,8 +60,14 @@ async fn build_session(n: usize) -> (Session, tempfile::TempDir) {
     let ctx = WorkspaceContext {
         storage,
         workspace_dir,
-        actor: "scale".to_string(),
         config,
+        reloader: unblock_config::ConfigReloader::new(
+            unblock_config::CliOverrides::default(),
+            unblock_config::EnvOverrides::default(),
+            Some("scale".to_string()),
+            None,
+            None,
+        ),
         paths,
         source: WorkspaceSource::WalkUp,
         schema_version_before_migrate: 0,

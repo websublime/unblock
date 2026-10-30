@@ -93,15 +93,42 @@ impl ProjectConfig {
     ///   wrong type.
     /// - [`ConfigError::InvalidValue`] if a forbidden credential key is present (NFR-18).
     pub fn load(unblock_dir: &Path) -> Result<Self, ConfigError> {
-        let path = unblock_dir.join(CONFIG_FILENAME);
+        Self::load_file(&unblock_dir.join(CONFIG_FILENAME))
+    }
+
+    /// Load + parse the project file at `path` — [`ProjectConfig::load`]'s body, taking the FILE
+    /// path so the D57 reloader can re-read the project file it captured at open. A missing file is
+    /// the all-`None` default.
+    ///
+    /// # Errors
+    ///
+    /// As [`ProjectConfig::load`].
+    pub(crate) fn load_file(path: &Path) -> Result<Self, ConfigError> {
         if !path.exists() {
             // No config.toml is the common case (defaults apply); not an error (D2).
             return Ok(Self::default());
         }
-        let contents = std::fs::read_to_string(&path).context(IoSnafu { path: path.clone() })?;
-        let config: Self = toml::from_str(&contents).context(ParseSnafu { path: path.clone() })?;
-        config.deny_credentials()?;
+        let config = Self::parse_file(path)?;
         config.warn_unknown_keys();
+        Ok(config)
+    }
+
+    /// Read, parse and credential-check an EXISTING TOML file in the project file's grammar — the
+    /// shared first half of the project and user loaders (D57: the user loader refuses its startup
+    /// keys BEFORE it warns on unknown ones, so warning is left to each caller).
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Io`], [`ConfigError::Parse`], or [`ConfigError::InvalidValue`] for a
+    /// credential (NFR-18).
+    pub(crate) fn parse_file(path: &Path) -> Result<Self, ConfigError> {
+        let contents = std::fs::read_to_string(path).context(IoSnafu {
+            path: path.to_path_buf(),
+        })?;
+        let config: Self = toml::from_str(&contents).context(ParseSnafu {
+            path: path.to_path_buf(),
+        })?;
+        config.deny_credentials()?;
         Ok(config)
     }
 
@@ -146,7 +173,7 @@ impl ProjectConfig {
     }
 
     /// Emit a `tracing::warn!` for every captured unknown key (SF-4) — never an error.
-    fn warn_unknown_keys(&self) {
+    pub(crate) fn warn_unknown_keys(&self) {
         for key in self.extra.keys() {
             tracing::warn!(
                 target: "unblock.config",

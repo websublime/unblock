@@ -1,27 +1,30 @@
 //! [`ResolvedConfig`] — the resolved, validated config **VALUES** the engine/`Session` reads
-//! (config-owned, spine §4 CF-D) — plus the T1.3 producer [`WorkspaceConfig`] that fills it.
+//! (config-owned, spine §4 CF-D) — plus the producer [`WorkspaceConfig`] that fills it.
 //!
-//! [`ResolvedConfig`] is **NOT** paths (those live in [`crate::ConfigPaths`]) and **NOT** the actor
-//! (that is the top-level context field, spine §4.1). Its v1 shape is pinned by the crate plan
-//! (`docs/plans/crates/unblock-config.md` §2/§3): **DEFAULTED** in the T1.3a minimal subset and
-//! **RESOLVED** for real at T1.3 — the shape does not change.
+//! [`ResolvedConfig`] is **NOT** paths (those live in [`crate::ConfigPaths`]). Since D57 (v1.1) it is
+//! PARTITIONED by key class — the FR-13 startup/runtime split is a TYPE, not a list:
+//! `ResolvedConfig { startup: StartupConfig, runtime: RuntimeConfig }`. The STARTUP keys are read
+//! ONCE at open and never reloaded; the RUNTIME keys (the actor included — it moved here from the
+//! contexts' top level) are re-resolved by [`crate::ConfigReloader::reload_runtime`], and carry the
+//! layer that supplied each ([`RuntimeSources`]) and the database layer's faulty rows
+//! ([`RuntimeConfig::db_faults`], PRD §4 D57 clause (2a)).
 //!
 //! [`WorkspaceConfig`] is the merged, validated config value (startup + runtime keys) produced by
-//! the layered resolver ([`WorkspaceConfig::resolve`]); it *fills* [`ResolvedConfig`] (and feeds
-//! [`crate::ConfigPaths`]) via the infallible [`WorkspaceConfig::into_resolved`] (MF-5). `actor`
-//! follows the global precedence FORK-4 (`--actor` > `UNBLOCK_ACTOR` > `config.toml [actor]` >
-//! `$USER` > `"unblock"`) and is bounded via [`unblock_model::validate_actor`] (Seam A);
-//! `deletions_retention_days` and `backend` are resolved-but-NOT-projected (reserved).
+//! the layered resolver; it *fills* [`ResolvedConfig`] (and feeds [`crate::ConfigPaths`]). The ONE
+//! order (PRD §4 D57 clause (1)) is **CLI > env `UNBLOCK_*` > project `.unblock/config.toml` > user
+//! `config.toml` > DB `config` table > defaults**; startup keys resolve over CLI > env > project >
+//! defaults only, and the actor's bottom is `$USER` > `"unblock"` (clause (5)), bounded via
+//! [`unblock_model::validate_actor`] (Seam A). `deletions_retention_days` and `backend` are
+//! resolved-but-NOT-projected (reserved).
 
-use unblock_model::{OutputFormat, normalize_prefix, validate_actor};
+use unblock_model::{ConfigSource, DbConfigFault, OutputFormat, normalize_prefix, validate_actor};
 
-use crate::actor::resolve_actor_layered;
 use crate::cli::CliOverrides;
+use crate::db_layer::{DbLayer, db_layer};
 use crate::env::{EnvOverrides, EnvSource};
 use crate::error::ConfigError;
 use crate::merge::{ConfigLayer, merge_layers};
 use crate::schema::ProjectConfig;
-
 /// The locked default database filename (PRD §12.5).
 pub(crate) const DB_FILENAME: &str = "unblock.db";
 
@@ -50,45 +53,46 @@ pub(crate) const DEFAULT_WRITE_LOCK_TIMEOUT_MS: u64 =
 /// while leaving every genuine tuning choice (short or long) untouched.
 pub(crate) const MIN_WRITE_LOCK_TIMEOUT_MS: u64 = 100;
 
+/// The largest resolved `search_cap` (PRD §4 D57 clause (4)): `SQLite`'s `LIMIT` is a signed 64-bit
+/// integer, so a larger cap overflows it. The bound `1..=i64::MAX` holds on EVERY layer.
+// `i64::MAX` is non-negative, so the cast is lossless; `usize` is 64-bit on every supported target.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub(crate) const MAX_SEARCH_CAP: usize = i64::MAX as usize;
+
 /// The resolved, validated config values the engine/`Session` consumes (config-owned, spine §4
-/// CF-D).
+/// CF-D), PARTITIONED by key class since D57 (v1.1).
 ///
-/// Embedded **by value** in both [`crate::ResolvedContext`] and [`crate::WorkspaceContext`]. In the
-/// T1.3a minimal subset every field is the locked default ([`ResolvedConfig::default`]); the T1.3
-/// layered resolver fills the values for real without changing this shape.
-#[derive(Debug, Clone)]
+/// Embedded **by value** in both [`crate::ResolvedContext`] and [`crate::WorkspaceContext`].
+/// [`ResolvedConfig::default`] is the T1.3a defaults with no faults and every source
+/// [`ConfigSource::Default`], so struct-literal test contexts keep compiling.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolvedConfig {
-    /// The output format for rendered command output (re-exported from `unblock-model`, G-7/CF-J).
-    /// T1.3a default = [`OutputFormat::Json`] (the model's own `Default`).
-    pub output_format: OutputFormat,
-    /// Auto-export JSONL after mutating ops (FR-7). T1.3a default = `false`.
-    pub jsonl_export: bool,
-    /// Search-result cap (FR-4). T1.3a default = `50`.
-    pub search_cap: usize,
-    /// The database filename inside `.unblock/`. T1.3a default = `"unblock.db"` (PRD §12.5).
+    /// The STARTUP keys — read ONCE at open, never reloaded.
+    pub startup: StartupConfig,
+    /// The RUNTIME keys — re-resolved by [`crate::ConfigReloader::reload_runtime`].
+    pub runtime: RuntimeConfig,
+}
+
+/// The STARTUP keys (PRD §4 D57 clause (2)) — resolved over CLI > env > project > defaults only
+/// and read ONCE at open. (`backend` and `deletions_retention_days` stay resolved-but-unprojected.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupConfig {
+    /// The database filename inside `.unblock/`. Default = `"unblock.db"` (PRD §12.5).
     pub db_filename: String,
-    /// The JSONL export filename inside `.unblock/`. T1.3a default = `"issues.jsonl"`
-    /// (PRD §12.5).
+    /// The JSONL export filename inside `.unblock/`. Default = `"issues.jsonl"` (PRD §12.5).
     pub jsonl_filename: String,
-    /// The issue-id prefix the engine allocator mints with (D21/T1.8 ADDITIVE). Default = `"ub"`,
-    /// `normalize_prefix`-normalized. The engine reads `ctx.config.id_prefix` at mint time to render
-    /// `ub-<hash>`/`ub-<slug>-<hash>` (config-derived, not a constant).
+    /// The issue-id prefix the engine allocator mints with (D21/T1.8). Default = `"ub"`,
+    /// `normalize_prefix`-normalized. The engine reads `ctx.config.startup.id_prefix` at mint time.
     pub id_prefix: String,
-    /// The `.unblock/.write.lock` acquire timeout in ms (D31/T3.4.1 ADDITIVE). Default = `30_000`.
-    /// STARTUP-only; threaded DOWN to `LibsqlStorage::open_local` at open. Resolved values are
-    /// clamped UP to [`MIN_WRITE_LOCK_TIMEOUT_MS`] (a `0`/near-zero timeout would fail-fast every
-    /// mutation — see [`WorkspaceConfig::resolve`]).
+    /// The `.unblock/.write.lock` acquire timeout in ms (D31/T3.4.1). Default = `30_000`; threaded
+    /// DOWN to `LibsqlStorage::open_local` at open; clamped UP to [`MIN_WRITE_LOCK_TIMEOUT_MS`].
     pub write_lock_timeout_ms: u64,
 }
 
-impl Default for ResolvedConfig {
-    /// The T1.3a defaults: `Json` / `false` / `50` / `"unblock.db"` / `"issues.jsonl"` / `"ub"` /
-    /// `30_000` (the D31 write-lock timeout).
+impl Default for StartupConfig {
+    /// The T1.3a defaults: `"unblock.db"` / `"issues.jsonl"` / `"ub"` / `30_000`.
     fn default() -> Self {
         Self {
-            output_format: OutputFormat::default(),
-            jsonl_export: false,
-            search_cap: DEFAULT_SEARCH_CAP,
             db_filename: DB_FILENAME.to_string(),
             jsonl_filename: JSONL_FILENAME.to_string(),
             id_prefix: DEFAULT_ID_PREFIX.to_string(),
@@ -97,15 +101,100 @@ impl Default for ResolvedConfig {
     }
 }
 
+/// The RUNTIME keys (PRD §4 D57 clause (2)) — re-resolved by a live session's reload — plus the
+/// layer that supplied each and the database layer's faulty rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeConfig {
+    /// The resolved actor: `--actor` > `UNBLOCK_ACTOR` > project `actor` > user `actor` > DB `actor`
+    /// > `$USER` > `"unblock"` (D10 as amended by D57), trimmed and bounded by `validate_actor`.
+    pub actor: String,
+    /// The output format for rendered command output (re-exported from `unblock-model`, G-7/CF-J).
+    pub output_format: OutputFormat,
+    /// Auto-export JSONL after mutating ops (FR-7). NOT a layer key (consumer tracked as `ub-p1h`):
+    /// resolved over CLI > env > project > defaults only.
+    pub jsonl_export: bool,
+    /// Search-result cap (FR-4), bounded to `1..=i64::MAX` on every layer. Default = `50`.
+    pub search_cap: usize,
+    /// The layer that supplied each runtime value.
+    pub sources: RuntimeSources,
+    /// The database `config` table's faulty rows (PRD §4 D57 clause (2a)): any whose
+    /// `fault.kind.is_blocking()` fail-closes the engine `Session`.
+    pub db_faults: Vec<DbConfigFault>,
+}
+
+impl Default for RuntimeConfig {
+    /// The T1.3a defaults (`"unblock"` / `Json` / `false` / `50`), no faults, every source
+    /// [`ConfigSource::Default`] — the actor's included, since the literal `"unblock"` IS the
+    /// built-in tier.
+    fn default() -> Self {
+        Self {
+            actor: crate::actor::DEFAULT_ACTOR.to_string(),
+            output_format: OutputFormat::default(),
+            jsonl_export: false,
+            search_cap: DEFAULT_SEARCH_CAP,
+            sources: RuntimeSources::default(),
+            db_faults: Vec::new(),
+        }
+    }
+}
+
+impl RuntimeConfig {
+    /// The fail-closed gate's error (PRD §4 D57 clause (2a)): `Some(ConfigError::FaultyDbConfig)`
+    /// carrying every BLOCKING row ([`unblock_model::ConfigFaultKind::is_blocking`] — the ONE
+    /// predicate) when at least one exists, else `None`. The engine gate, the cli `mcp` startup line
+    /// and `unblock init`'s check all go through it.
+    #[must_use]
+    pub fn blocking_fault_error(&self) -> Option<ConfigError> {
+        let faults: Vec<DbConfigFault> = self
+            .db_faults
+            .iter()
+            .filter(|f| f.fault.kind.is_blocking())
+            .cloned()
+            .collect();
+        if faults.is_empty() {
+            None
+        } else {
+            Some(ConfigError::FaultyDbConfig { faults })
+        }
+    }
+}
+
+/// The layer that supplied each runtime value (spine §1.10 [`ConfigSource`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeSources {
+    /// The source of [`RuntimeConfig::actor`] (`os_user` for the `$USER` fallback).
+    pub actor: ConfigSource,
+    /// The source of [`RuntimeConfig::output_format`].
+    pub output_format: ConfigSource,
+    /// The source of [`RuntimeConfig::jsonl_export`].
+    pub jsonl_export: ConfigSource,
+    /// The source of [`RuntimeConfig::search_cap`].
+    pub search_cap: ConfigSource,
+}
+
+impl Default for RuntimeSources {
+    /// Every source [`ConfigSource::Default`].
+    fn default() -> Self {
+        Self {
+            actor: ConfigSource::Default,
+            output_format: ConfigSource::Default,
+            jsonl_export: ConfigSource::Default,
+            search_cap: ConfigSource::Default,
+        }
+    }
+}
+
 /// The lowest-precedence defaults layer (FR-13). Guarantees a value for every non-reserved field.
 ///
-/// `actor` carries the **already-resolved** FORK-4 actor (the chain runs in
-/// [`WorkspaceConfig::resolve`] before this layer is built), so the merge fold always has a resolved
-/// actor at the bottom; `deletions_retention_days`/`backend` carry `None` (reserved — no v1 default).
+/// `actor` is the bottom of the actor chain (PRD §4 D57 clause (5)): the trimmed `$USER` when set
+/// (`actor_source` [`ConfigSource::OsUser`]), else the literal `"unblock"` ([`ConfigSource::Default`]);
+/// `deletions_retention_days`/`backend` carry `None` (reserved — no v1 default).
 #[derive(Debug, Clone)]
 pub(crate) struct Defaults {
-    /// The resolved actor (filled by the FORK-4 chain before merging).
+    /// The actor chain's bottom: `$USER` > `"unblock"`.
     pub actor: String,
+    /// Which tier supplied [`Defaults::actor`] — `OsUser` or `Default`.
+    pub actor_source: ConfigSource,
     /// Default output format ([`OutputFormat::Json`]).
     pub output_format: OutputFormat,
     /// Default JSONL-export toggle (`false`).
@@ -127,11 +216,11 @@ pub(crate) struct Defaults {
 }
 
 impl Default for Defaults {
-    /// The locked v1 defaults, with `actor` = the literal `"unblock"` (overwritten by the resolved
-    /// FORK-4 actor in [`WorkspaceConfig::resolve`]).
+    /// The locked v1 defaults, with `actor` = the literal `"unblock"`.
     fn default() -> Self {
         Self {
             actor: crate::actor::DEFAULT_ACTOR.to_string(),
+            actor_source: ConfigSource::Default,
             output_format: OutputFormat::default(),
             jsonl_export: false,
             search_cap: DEFAULT_SEARCH_CAP,
@@ -145,10 +234,25 @@ impl Default for Defaults {
     }
 }
 
+impl Defaults {
+    /// The defaults with the actor chain's bottom resolved from `os_user` (`$USER`, trimmed; a blank
+    /// value falls through to the literal `"unblock"`).
+    pub(crate) fn with_os_user(os_user: Option<&str>) -> Self {
+        match os_user.and_then(crate::actor::trimmed_non_empty) {
+            Some(actor) => Self {
+                actor,
+                actor_source: ConfigSource::OsUser,
+                ..Self::default()
+            },
+            None => Self::default(),
+        }
+    }
+}
+
 /// The supported storage backend in v1 (MF-3) — any other `backend` value is rejected.
 pub(crate) const SUPPORTED_BACKEND: &str = "libsql";
 
-/// The merged, validated config value (startup + runtime keys) — the T1.3 producer that fills
+/// The merged, validated config value (startup + runtime keys) — the producer that fills
 /// [`ResolvedConfig`] and feeds [`crate::ConfigPaths`].
 ///
 /// Built by [`WorkspaceConfig::resolve`] (the precedence engine) and validated by
@@ -156,24 +260,24 @@ pub(crate) const SUPPORTED_BACKEND: &str = "libsql";
 /// **resolved-but-not-projected** (reserved — v1.1 / v1.3), not silently dropped (MF-3/MF-5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceConfig {
-    /// The resolved actor (FORK-4; bounded via [`unblock_model::validate_actor`]).
+    /// The resolved actor (D10 as amended by D57; bounded via [`unblock_model::validate_actor`]).
     pub(crate) actor: String,
     /// The resolved output format.
     pub(crate) output_format: OutputFormat,
     /// The resolved JSONL-export toggle (FR-7).
     pub(crate) jsonl_export: bool,
-    /// The resolved search cap (FR-4).
+    /// The resolved search cap (FR-4), bounded to `1..=i64::MAX`.
     pub(crate) search_cap: usize,
+    /// The layer that supplied each runtime value (D57).
+    pub(crate) sources: RuntimeSources,
     /// The resolved db filename inside `.unblock/` (startup key).
     pub(crate) db_filename: String,
     /// The resolved JSONL filename inside `.unblock/` (startup key).
     pub(crate) jsonl_filename: String,
-    /// The resolved, `normalize_prefix`-normalized issue-id prefix (startup key, D21/T1.8). Projected
-    /// to [`ResolvedConfig::id_prefix`].
+    /// The resolved, `normalize_prefix`-normalized issue-id prefix (startup key, D21/T1.8).
     pub(crate) id_prefix: String,
     /// The resolved `.write.lock` acquire timeout in ms (startup key, D31/T3.4.1). Clamped UP to
-    /// [`MIN_WRITE_LOCK_TIMEOUT_MS`] by [`WorkspaceConfig::resolve`]. Projected to
-    /// [`ResolvedConfig::write_lock_timeout_ms`] and threaded DOWN to `open_local`.
+    /// [`MIN_WRITE_LOCK_TIMEOUT_MS`] by the merge.
     pub(crate) write_lock_timeout_ms: u64,
     /// The resolved tombstone retention window (reserved for v1.1; NOT projected).
     pub(crate) deletions_retention_days: Option<u64>,
@@ -181,70 +285,140 @@ pub struct WorkspaceConfig {
     pub(crate) backend: Option<String>,
 }
 
+/// Fold all six layers (PRD §4 D57 clause (1)) highest-first, then normalize the startup values
+/// (D21 prefix normalization, D31 write-lock floor). Validates NOTHING — the callers validate the
+/// half they own.
+fn merge_six(
+    cli: &CliOverrides,
+    env: &EnvOverrides,
+    project: &ProjectConfig,
+    user: &ProjectConfig,
+    db: &DbLayer,
+    os_user: Option<&str>,
+) -> WorkspaceConfig {
+    let defaults = Defaults::with_os_user(os_user);
+    let mut merged = merge_layers(&[
+        ConfigLayer::Cli(cli),
+        ConfigLayer::Env(env),
+        ConfigLayer::Project(project),
+        ConfigLayer::User(user),
+        ConfigLayer::Db(db),
+        ConfigLayer::Defaults(&defaults),
+    ]);
+    // D21: normalize the resolved id_prefix via the single-home model normalizer. `normalize_prefix`
+    // is total — it strips unsupported chars/trailing separators and falls back to "ub" if nothing
+    // usable remains — so the engine allocator always receives a valid, non-empty prefix.
+    merged.id_prefix = normalize_prefix(&merged.id_prefix);
+    // D31/T3.4.1: clamp the resolved write-lock timeout UP to a documented floor. A user value of
+    // 0 (or any sub-floor value) would make every normal mutation fail-fast on the slightest
+    // contention — a footgun. `0` is reserved for migrate's internal `Duration::ZERO` fail-fast
+    // (an explicit L2 code path, MF2), never a user-facing acquire timeout.
+    merged.write_lock_timeout_ms = merged.write_lock_timeout_ms.max(MIN_WRITE_LOCK_TIMEOUT_MS);
+    merged
+}
+
+/// Resolve the RUNTIME keys over the six layers (PRD §4 D57 clause (1)) — the ONE runtime
+/// resolution, shared by the storage-bearing open (all six layers), the resolve-only open (`rows`
+/// empty: five layers, the DB layer invisible) and [`crate::ConfigReloader::reload_runtime`].
+///
+/// `rows` are decoded TOLERANTLY (clause (2a)): their faults are RETURNED in
+/// [`RuntimeConfig::db_faults`], never raised. Startup keys are ignored.
+///
+/// # Errors
+///
+/// [`ConfigError::InvalidValue`] when the resolved actor violates `validate_actor` or the resolved
+/// `search_cap` is outside `1..=i64::MAX` (both possible only from a CLI/env/project/user value — a
+/// DB row that fails either is a fault, never a contribution).
+pub(crate) fn resolve_runtime(
+    cli: &CliOverrides,
+    env: &EnvOverrides,
+    project: &ProjectConfig,
+    user: &ProjectConfig,
+    rows: &[(String, String)],
+    os_user: Option<&str>,
+) -> Result<RuntimeConfig, ConfigError> {
+    let (db, db_faults) = db_layer(rows);
+    let merged = merge_six(cli, env, project, user, &db, os_user);
+    merged.validate_runtime()?;
+    Ok(merged.into_runtime(db_faults))
+}
+
+/// Resolve the STARTUP keys (and the merged value that feeds [`crate::ConfigPaths`]) — phase (1) of
+/// the two-phase open (PRD §4 D57 clause (6)). Startup keys resolve over CLI > env > project >
+/// defaults only: the user layer is refused any startup key at load and the DB layer carries none.
+///
+/// # Errors
+///
+/// [`ConfigError::InvalidValue`] for an unsupported `backend` (MF-3).
+pub(crate) fn resolve_startup(
+    cli: &CliOverrides,
+    env: &EnvOverrides,
+    project: &ProjectConfig,
+) -> Result<WorkspaceConfig, ConfigError> {
+    let merged = merge_six(
+        cli,
+        env,
+        project,
+        &ProjectConfig::default(),
+        &DbLayer::default(),
+        None,
+    );
+    merged.validate_startup()?;
+    Ok(merged)
+}
+
 impl WorkspaceConfig {
-    /// Resolve the layered config (FR-13): **CLI > env `UNBLOCK_*` > project `config.toml` >
-    /// defaults**, with the FORK-4 actor chain and full validation (Seam A + backend + paths-feed).
+    /// Resolve the v1 layered config: **CLI > env `UNBLOCK_*` > project `config.toml` > defaults**,
+    /// with the actor chain (`--actor` > `UNBLOCK_ACTOR` > project `actor` > `$USER` > `"unblock"`)
+    /// and full validation (Seam A + `search_cap` bound + backend). The user and DB layers are EMPTY
+    /// here: this is the public precedence-engine seam the FR-13 integration suite drives with
+    /// injected layers; the six-layer runtime resolution is [`crate::ConfigReloader::reload_runtime`].
     ///
-    /// The merge folds highest-precedence-first (`merge_layers`); the actor is resolved separately
-    /// via the global FORK-4 chain and carried in the `Defaults` layer. The result is validated
-    /// before it is returned, so [`WorkspaceConfig::into_resolved`] can stay infallible (MF-5).
+    /// `env_source` supplies the `$USER` tier; pass the same source the `env` layer was parsed from.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::InvalidValue`] if the resolved actor violates the bounds
-    /// ([`unblock_model::validate_actor`] — Seam A) or `backend` is an unsupported value (MF-3).
-    ///
-    /// `env_source` is the [`EnvSource`] used for the FORK-4 `$USER` lookup; pass the same source
-    /// the `env` layer was parsed from. The facades in [`crate::context`] are the production
-    /// entrypoints; this is also the public precedence-engine seam the FR-13 integration suite drives
-    /// with injected layers (spine §2).
+    /// ([`unblock_model::validate_actor`] — Seam A), `search_cap` is outside `1..=i64::MAX`, or
+    /// `backend` is an unsupported value (MF-3).
     pub fn resolve(
         cli: &CliOverrides,
         env: &EnvOverrides,
         project: &ProjectConfig,
         env_source: &dyn EnvSource,
     ) -> Result<Self, ConfigError> {
-        // FORK-4 actor: --actor > UNBLOCK_ACTOR > config.toml [actor] > $USER > "unblock".
-        let resolved_actor =
-            resolve_actor_layered(cli.actor.as_deref(), project.actor.as_deref(), env_source)?;
-
-        let defaults = Defaults {
-            actor: resolved_actor,
-            ..Defaults::default()
-        };
-
-        let mut merged = merge_layers(&[
-            ConfigLayer::Cli(cli),
-            ConfigLayer::Env(env),
-            ConfigLayer::Project(project),
-            ConfigLayer::Defaults(&defaults),
-        ]);
-
-        // D21: normalize the resolved id_prefix via the single-home model normalizer. `normalize_prefix`
-        // is total — it strips unsupported chars/trailing separators and falls back to "ub" if nothing
-        // usable remains — so the engine allocator always receives a valid, non-empty prefix.
-        merged.id_prefix = normalize_prefix(&merged.id_prefix);
-
-        // D31/T3.4.1: clamp the resolved write-lock timeout UP to a documented floor. A user value of
-        // 0 (or any sub-floor value) would make every normal mutation fail-fast on the slightest
-        // contention — a footgun. `0` is reserved for migrate's internal `Duration::ZERO` fail-fast
-        // (an explicit L2 code path, MF2), never a user-facing acquire timeout. `.max` is total, so it
-        // never introduces a new error path (the projection stays infallible, MF-5).
-        merged.write_lock_timeout_ms = merged.write_lock_timeout_ms.max(MIN_WRITE_LOCK_TIMEOUT_MS);
-
+        let os_user = env_source.get("USER");
+        let merged = merge_six(
+            cli,
+            env,
+            project,
+            &ProjectConfig::default(),
+            &DbLayer::default(),
+            os_user.as_deref(),
+        );
         merged.validate()?;
         Ok(merged)
     }
 
-    /// Validate the resolved config (Seam A actor bound + supported backend).
+    /// Validate the resolved config: the runtime half (Seam A actor bound, `search_cap` bound) and
+    /// the startup half (supported backend).
     ///
     /// # Errors
     ///
     /// - [`ConfigError::InvalidValue`] (`key = "actor"`) if the actor violates
     ///   [`unblock_model::validate_actor`] (over-length / NUL / control char — Seam A).
+    /// - [`ConfigError::InvalidValue`] (`key = "search_cap"`) if the cap is outside `1..=i64::MAX`
+    ///   (D57 clause (4) — a disclosed tightening: a project `search_cap = 0` used to silently empty
+    ///   every default search).
     /// - [`ConfigError::InvalidValue`] (`key = "backend"`) if `backend` is set to anything other
     ///   than `"libsql"` (MF-3).
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_runtime()?;
+        self.validate_startup()
+    }
+
+    /// The runtime half of [`WorkspaceConfig::validate`].
+    fn validate_runtime(&self) -> Result<(), ConfigError> {
         // Seam A: bound the resolved actor via the single-home model validator.
         if let Err(field_err) = validate_actor(&self.actor) {
             return Err(ConfigError::InvalidValue {
@@ -253,6 +427,19 @@ impl WorkspaceConfig {
                 reason: field_err.reason,
             });
         }
+        // D57 clause (4): the search cap is bounded on EVERY layer.
+        if !(1..=MAX_SEARCH_CAP).contains(&self.search_cap) {
+            return Err(ConfigError::InvalidValue {
+                key: "search_cap".to_string(),
+                value: self.search_cap.to_string(),
+                reason: format!("expected a decimal integer from 1 to {MAX_SEARCH_CAP}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// The startup half of [`WorkspaceConfig::validate`].
+    fn validate_startup(&self) -> Result<(), ConfigError> {
         // MF-3: only "libsql" is accepted in v1.
         if let Some(backend) = &self.backend
             && backend != SUPPORTED_BACKEND
@@ -268,26 +455,41 @@ impl WorkspaceConfig {
         Ok(())
     }
 
-    /// Project the merged config into the engine-facing [`ResolvedConfig`] (INFALLIBLE, MF-5).
-    ///
-    /// All validation runs in [`WorkspaceConfig::validate`] (called by [`WorkspaceConfig::resolve`])
-    /// **before** this projection, so it adds no new error path. `deletions_retention_days` and
-    /// `backend` are **deliberately resolved-but-not-projected** (reserved — v1.1 / v1.3), not
-    /// silently dropped.
+    /// Project the merged config into the engine-facing [`ResolvedConfig`] (INFALLIBLE, MF-5), with
+    /// no DB faults. `deletions_retention_days` and `backend` are **deliberately
+    /// resolved-but-not-projected** (reserved — v1.1 / v1.3), not silently dropped.
     #[must_use]
     pub fn into_resolved(self) -> ResolvedConfig {
+        let startup = self.startup();
         ResolvedConfig {
-            output_format: self.output_format,
-            jsonl_export: self.jsonl_export,
-            search_cap: self.search_cap,
-            db_filename: self.db_filename,
-            jsonl_filename: self.jsonl_filename,
-            id_prefix: self.id_prefix,
+            startup,
+            runtime: self.into_runtime(Vec::new()),
+        }
+    }
+
+    /// The STARTUP half of this merged value.
+    pub(crate) fn startup(&self) -> StartupConfig {
+        StartupConfig {
+            db_filename: self.db_filename.clone(),
+            jsonl_filename: self.jsonl_filename.clone(),
+            id_prefix: self.id_prefix.clone(),
             write_lock_timeout_ms: self.write_lock_timeout_ms,
         }
     }
 
-    /// The resolved actor (top-level context field; spine §4.1).
+    /// The RUNTIME half of this merged value, carrying `db_faults`.
+    pub(crate) fn into_runtime(self, db_faults: Vec<DbConfigFault>) -> RuntimeConfig {
+        RuntimeConfig {
+            actor: self.actor,
+            output_format: self.output_format,
+            jsonl_export: self.jsonl_export,
+            search_cap: self.search_cap,
+            sources: self.sources,
+            db_faults,
+        }
+    }
+
+    /// The resolved actor.
     #[must_use]
     pub fn actor(&self) -> &str {
         &self.actor
@@ -311,6 +513,12 @@ impl WorkspaceConfig {
         self.search_cap
     }
 
+    /// The layer that supplied each runtime value (D57).
+    #[must_use]
+    pub fn sources(&self) -> RuntimeSources {
+        self.sources
+    }
+
     /// The resolved db filename inside `.unblock/` (startup key; consumed by `ConfigPaths::resolve`).
     #[must_use]
     pub fn db_filename(&self) -> &str {
@@ -325,14 +533,14 @@ impl WorkspaceConfig {
     }
 
     /// The resolved, normalized issue-id prefix (startup key, D21/T1.8; projected to
-    /// `ResolvedConfig.id_prefix` and read by the engine allocator at mint time).
+    /// `ResolvedConfig.startup.id_prefix` and read by the engine allocator at mint time).
     #[must_use]
     pub fn id_prefix(&self) -> &str {
         &self.id_prefix
     }
 
     /// The resolved `.write.lock` acquire timeout in ms (startup key, D31/T3.4.1; projected to
-    /// `ResolvedConfig.write_lock_timeout_ms` and threaded into `open_local` by `open_with_storage`).
+    /// `ResolvedConfig.startup.write_lock_timeout_ms` and threaded into `open_local`).
     #[must_use]
     pub fn write_lock_timeout_ms(&self) -> u64 {
         self.write_lock_timeout_ms
@@ -393,14 +601,17 @@ mod tests {
     #[test]
     fn defaults_match_the_t1_3a_pins() {
         let cfg = ResolvedConfig::default();
-        assert_eq!(cfg.output_format, OutputFormat::Json);
-        assert!(!cfg.jsonl_export);
-        assert_eq!(cfg.search_cap, DEFAULT_SEARCH_CAP);
-        assert_eq!(cfg.search_cap, 50);
-        assert_eq!(cfg.db_filename, DB_FILENAME);
-        assert_eq!(cfg.db_filename, "unblock.db");
-        assert_eq!(cfg.jsonl_filename, JSONL_FILENAME);
-        assert_eq!(cfg.jsonl_filename, "issues.jsonl");
+        assert_eq!(cfg.runtime.output_format, OutputFormat::Json);
+        assert!(!cfg.runtime.jsonl_export);
+        assert_eq!(cfg.runtime.search_cap, DEFAULT_SEARCH_CAP);
+        assert_eq!(cfg.runtime.search_cap, 50);
+        assert_eq!(cfg.runtime.actor, "unblock");
+        assert_eq!(cfg.runtime.sources, super::RuntimeSources::default());
+        assert!(cfg.runtime.db_faults.is_empty());
+        assert_eq!(cfg.startup.db_filename, DB_FILENAME);
+        assert_eq!(cfg.startup.db_filename, "unblock.db");
+        assert_eq!(cfg.startup.jsonl_filename, JSONL_FILENAME);
+        assert_eq!(cfg.startup.jsonl_filename, "issues.jsonl");
     }
 
     #[test]
@@ -507,7 +718,7 @@ mod tests {
         assert_eq!(wc.backend.as_deref(), Some("libsql"));
         let resolved = wc.into_resolved();
         // ResolvedConfig has no backend field (reserved-not-projected, MF-3/MF-5).
-        assert_eq!(resolved.db_filename, "unblock.db");
+        assert_eq!(resolved.startup.db_filename, "unblock.db");
 
         let bad = ProjectConfig {
             backend: Some("sqlite".to_string()),
@@ -532,7 +743,7 @@ mod tests {
         assert_eq!(wc.deletions_retention_days, Some(42));
         let resolved = wc.into_resolved();
         // The reserved knobs are not on ResolvedConfig; the projected ones round-trip.
-        assert_eq!(resolved.search_cap, 123);
+        assert_eq!(resolved.runtime.search_cap, 123);
     }
 
     #[test]
@@ -551,7 +762,7 @@ mod tests {
             );
             // The clamp round-trips through the infallible projection.
             assert_eq!(
-                wc.into_resolved().write_lock_timeout_ms,
+                wc.into_resolved().startup.write_lock_timeout_ms,
                 MIN_WRITE_LOCK_TIMEOUT_MS
             );
         }
@@ -585,9 +796,9 @@ mod tests {
         let wc =
             resolve(&CliOverrides::default(), &ProjectConfig::default(), &[]).expect("resolve");
         assert_eq!(wc.id_prefix, "ub");
-        assert_eq!(wc.into_resolved().id_prefix, "ub");
+        assert_eq!(wc.into_resolved().startup.id_prefix, "ub");
         // The default ResolvedConfig also carries "ub" (T1.3a default).
-        assert_eq!(ResolvedConfig::default().id_prefix, "ub");
+        assert_eq!(ResolvedConfig::default().startup.id_prefix, "ub");
     }
 
     #[test]
@@ -600,7 +811,7 @@ mod tests {
         };
         let wc = resolve(&CliOverrides::default(), &project, &[]).expect("resolve");
         assert_eq!(wc.id_prefix, "myproj");
-        assert_eq!(wc.into_resolved().id_prefix, "myproj");
+        assert_eq!(wc.into_resolved().startup.id_prefix, "myproj");
 
         // A prefix that normalizes to nothing falls back to the "ub" default (normalize_prefix is total).
         let empty = ProjectConfig {

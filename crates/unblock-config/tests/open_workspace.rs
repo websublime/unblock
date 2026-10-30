@@ -5,10 +5,40 @@
 use std::fs;
 
 use chrono::{TimeZone, Utc};
+use std::path::Path;
+
 use unblock_config::{
-    CliOverrides, ConfigError, open_with_storage, open_with_storage_with_cli, open_workspace,
-    open_workspace_with_cli,
+    CliOverrides, ConfigError, EnvSource, ResolvedContext, WorkspaceContext,
+    open_with_storage_with_env, open_workspace_with_env,
 };
+
+// D57 / NFR-16: every cell opens through the `#[doc(hidden)]` `_with_env` entries over an EMPTY
+// environment, so no developer's or runner's own user file (`$HOME`/`XDG_CONFIG_HOME`) or
+// `UNBLOCK_*` can change a cell's actor, format or snapshot. The helpers below keep the production
+// facades' names and argument shapes (`start` is the walk-up seed; the `_with_cli` forms walk up
+// from the CWD unless `cli.dir`/`cli.db` is explicit).
+struct NoEnv;
+impl EnvSource for NoEnv {
+    fn get(&self, _key: &str) -> Option<String> {
+        None
+    }
+}
+
+async fn open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError> {
+    open_workspace_with_env(Some(start), &CliOverrides::default(), &NoEnv).await
+}
+
+async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError> {
+    open_with_storage_with_env(Some(start), &CliOverrides::default(), &NoEnv).await
+}
+
+async fn open_workspace_with_cli(cli: &CliOverrides) -> Result<ResolvedContext, ConfigError> {
+    open_workspace_with_env(None, cli, &NoEnv).await
+}
+
+async fn open_with_storage_with_cli(cli: &CliOverrides) -> Result<WorkspaceContext, ConfigError> {
+    open_with_storage_with_env(None, cli, &NoEnv).await
+}
 use unblock_error::{CodedError, ErrorCode};
 use unblock_model::Issue;
 
@@ -58,7 +88,7 @@ async fn open_workspace_resolves_paths_without_creating_the_db() {
         "open_workspace must not create the db file"
     );
     // actor always resolves (UNBLOCK_ACTOR / $USER / "unblock").
-    assert!(!ctx.actor.is_empty());
+    assert!(!ctx.config.runtime.actor.is_empty());
 }
 
 #[tokio::test]
@@ -80,7 +110,7 @@ async fn open_with_storage_opens_migrates_and_yields_a_usable_storage() {
     let issue = sample_issue("ub-abc123", "Resolve the workspace");
     let id = ctx
         .storage
-        .create_issue(&issue, &ctx.actor)
+        .create_issue(&issue, &ctx.config.runtime.actor)
         .await
         .expect("create");
     assert_eq!(id, "ub-abc123");
@@ -217,7 +247,7 @@ async fn open_with_storage_reopen_is_idempotent_and_preserves_data() {
         let issue = sample_issue("ub-reopen1", "Survive a reopen");
         let id = ctx
             .storage
-            .create_issue(&issue, &ctx.actor)
+            .create_issue(&issue, &ctx.config.runtime.actor)
             .await
             .expect("create on first open");
         assert_eq!(id, "ub-reopen1");
@@ -281,7 +311,11 @@ async fn open_with_storage_with_cli_threads_actor_override() {
     let ctx = open_with_storage_with_cli(&cli)
         .await
         .expect("open via cli");
-    assert_eq!(ctx.actor, "alice-cli");
+    assert_eq!(ctx.config.runtime.actor, "alice-cli");
+    assert_eq!(
+        ctx.config.runtime.sources.actor,
+        unblock_model::ConfigSource::Cli
+    );
     assert!(ctx.paths.db_path.exists(), "open_local must create the db");
 }
 
@@ -303,4 +337,51 @@ async fn open_with_storage_with_cli_rejects_over_long_actor() {
             assert_eq!(err.code().exit_code(), 7);
         }
     }
+}
+
+/// **D57 criterion (n), the resolve-only half (the facade `unblock agents` uses)**: over a workspace
+/// whose `config` table holds `actor` and `output_format` rows, the STORAGE-BEARING open resolves
+/// both from the DB layer, while the RESOLVE-ONLY open resolves them over FIVE layers — the DB
+/// layer invisible, its rows contributing nothing and no fault recorded.
+#[tokio::test]
+async fn the_resolve_only_open_never_reads_the_db_layer() {
+    use unblock_config::OutputFormat;
+    use unblock_model::ConfigSource;
+
+    let workspace = fresh_workspace();
+    {
+        let ctx = open_with_storage(workspace.path()).await.expect("open");
+        ctx.storage.set_config("actor", "db-actor").await.unwrap();
+        ctx.storage
+            .set_config("output_format", "csv")
+            .await
+            .unwrap();
+        ctx.storage.set_config("db_filename", "x.db").await.unwrap();
+    }
+
+    let with_db = open_with_storage(workspace.path()).await.expect("open");
+    let runtime = &with_db.config.runtime;
+    assert_eq!(
+        (runtime.actor.as_str(), runtime.sources.actor),
+        ("db-actor", ConfigSource::Db)
+    );
+    assert_eq!(
+        (runtime.output_format, runtime.sources.output_format),
+        (OutputFormat::Csv, ConfigSource::Db)
+    );
+    assert_eq!(runtime.db_faults.len(), 1, "the startup-key row is a fault");
+    drop(with_db);
+
+    let resolved = open_workspace(workspace.path()).await.expect("resolve");
+    let runtime = &resolved.config.runtime;
+    assert_eq!(
+        (runtime.actor.as_str(), runtime.sources.actor),
+        ("unblock", ConfigSource::Default),
+        "no DB actor, and (empty env) no $USER either"
+    );
+    assert_eq!(
+        (runtime.output_format, runtime.sources.output_format),
+        (OutputFormat::Json, ConfigSource::Default)
+    );
+    assert!(runtime.db_faults.is_empty(), "no row is read, so no fault");
 }

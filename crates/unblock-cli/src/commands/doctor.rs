@@ -27,7 +27,7 @@ use crate::output;
 /// - [`CliError::Render`]/[`CliError::Io`] if rendering / writing the report fails.
 pub async fn run(_args: &DoctorArgs, overrides: &CliOverrides) -> Result<Option<u8>, CliError> {
     let ctx = open_with_storage_with_cli(overrides).await?;
-    let fmt = ctx.config.output_format;
+    let fmt = ctx.config.runtime.output_format;
 
     let session = Session::open(
         ctx,
