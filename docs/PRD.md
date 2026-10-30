@@ -298,7 +298,7 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
 | `unblock-render` | L6 | Output/format (json/robot/plain/csv/markdown; **TOON feature-gated, v1.1**) behind a trait. Reduced under D7. | model, error |
 | `unblock-mcp` | L7 | **Primary** rmcp stdio server (tools/resources/prompts) over the engine. Feature-isolated. | engine, render, policy, model, error |
 | `unblock-cli` | L7 | Reduced binary: lifecycle/ops (mcp/migrate/doctor/version) + thin routing; owns cooperative-shutdown signal install (FR-17, OQ-4). | engine, render, policy, mcp, error |
-| `unblock-fuzz` | — | Unpublished member; `cargo-fuzz` targets over model/sync/storage. | model, sync, storage, error |
+| `unblock-fuzz` | — | Unpublished member; `cargo-fuzz` targets over model/sync/storage, and **[D57]** (v1.1) over config — the `config_toml` target parses its bytes as both TOML layers through `unblock-config` (a consequence of D57, no new D-id). | model, sync, storage, error, config (**[D57]** v1.1) |
 
 > CF-11 fix: `unblock-storage` no longer depends on `unblock-policy`; the engine (L5) composes storage + policy. Storage MAY mirror a policy ordering as SQL without importing the crate (the `ready` sort key, D18 addendum); the engine-side parity test, not a storage→policy edge, pins the two together.
 > Any shared contract type policy/storage both need lives in `unblock-model`.
