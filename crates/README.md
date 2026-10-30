@@ -40,7 +40,7 @@ storage + policy). `unblock-fuzz` is an unpublished member (fuzz harness over in
 | `unblock-render` | L6 | json/robot/plain/csv/markdown (TOON v1.1); stdout/stderr discipline |
 | `unblock-mcp` | L7 | **Primary** surface: rmcp stdio server, 8-tool taxonomy + resources + prompts |
 | `unblock-cli` | L7 | The `unblock` binary: mcp/migrate/doctor/version/init/agents/update |
-| `unblock-fuzz` | — | Unpublished; `cargo-fuzz` targets over model/sync/storage ingestion |
+| `unblock-fuzz` | — | Unpublished; `cargo-fuzz` targets over model/sync/storage ingestion and (D57, v1.1) config TOML |
 
 `xtask` (repo root) is workspace tooling: `cargo xtask check-layering` enforces the matrix above.
 
