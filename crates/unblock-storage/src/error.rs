@@ -18,7 +18,121 @@ use serde_json::{Map, Value};
 use snafu::Snafu;
 use unblock_error::{CodedError, ErrorCode, sanitize_message};
 
-use crate::libsql::BASELINE_SCHEMA_VERSION;
+use crate::libsql::{BASELINE_SCHEMA_VERSION, COMMENTS_STEP_VERSION, CONFIG_STEP_VERSION};
+
+/// One piece of schema the migration SENTINEL found missing (D57 clause (9)) — the structured
+/// carrier of the lying-stamp dispatch on [`StorageError::Migration`]'s `gaps`.
+///
+/// Each gap names the piece and, through [`SchemaGap::step_version`], the forward step that adds it:
+/// the `comments` columns are schema version 2's (D46), the `config` table and its columns version
+/// 3's (D57).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaGap {
+    /// A `comments` column step 2 adds is absent.
+    CommentsColumn(&'static str),
+    /// The `config` table step 3 creates is absent.
+    ConfigTable,
+    /// The `config` table exists but lacks a column step 3 creates.
+    ConfigColumn(&'static str),
+}
+
+impl SchemaGap {
+    /// The schema version whose forward step adds this piece.
+    #[must_use]
+    pub const fn step_version(self) -> i32 {
+        match self {
+            Self::CommentsColumn(_) => COMMENTS_STEP_VERSION,
+            Self::ConfigTable | Self::ConfigColumn(_) => CONFIG_STEP_VERSION,
+        }
+    }
+
+    /// The stamp the lying-stamp recovery resets to for this gap: the version BELOW the step that
+    /// adds it, so replaying the ladder re-runs that step (D57 clause (9)).
+    #[must_use]
+    pub const fn reset_stamp(self) -> i32 {
+        self.step_version() - 1
+    }
+
+    /// The gap's stable `context()` spelling: `comments.<column>`, `config`, `config.<column>`.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::CommentsColumn(name) => format!("comments.{name}"),
+            Self::ConfigTable => "config".to_string(),
+            Self::ConfigColumn(name) => format!("config.{name}"),
+        }
+    }
+}
+
+/// Render the sentinel's `reason` from its gaps, naming each gap by the STEP that adds it — version
+/// 2 for the `comments` columns, version 3 for the `config` table and columns (D57 clause (9)),
+/// never [`crate::CURRENT_SCHEMA_VERSION`] for all of them.
+#[must_use]
+pub(crate) fn describe_gaps(gaps: &[SchemaGap]) -> String {
+    let comments: Vec<&str> = gaps
+        .iter()
+        .filter_map(|g| match g {
+            SchemaGap::CommentsColumn(name) => Some(*name),
+            _ => None,
+        })
+        .collect();
+    let config_columns: Vec<&str> = gaps
+        .iter()
+        .filter_map(|g| match g {
+            SchemaGap::ConfigColumn(name) => Some(*name),
+            _ => None,
+        })
+        .collect();
+    let mut parts = Vec::new();
+    if !comments.is_empty() {
+        parts.push(format!(
+            "the `comments` table is missing the column(s) {} that schema version \
+             {COMMENTS_STEP_VERSION} adds",
+            comments.join(", ")
+        ));
+    }
+    if gaps.contains(&SchemaGap::ConfigTable) {
+        parts.push(format!(
+            "the `config` table that schema version {CONFIG_STEP_VERSION} creates is absent"
+        ));
+    }
+    if !config_columns.is_empty() {
+        parts.push(format!(
+            "the `config` table is missing the column(s) {} that schema version \
+             {CONFIG_STEP_VERSION} creates",
+            config_columns.join(", ")
+        ));
+    }
+    parts.join("; ")
+}
+
+/// The lying-stamp recovery for `gaps` (D57 clause (9)): one branch per gap kind, each of which
+/// terminates — `comments` columns missing → reset the stamp to the BASELINE (`1`); `config` table
+/// ABSENT → reset to `2`; `config` table PRESENT but missing a column → `DROP TABLE config` (its rows
+/// are unreadable to every binary and are LOST), then reset to `2`. When several hold they combine in
+/// that order with the LOWEST stamp, then `unblock migrate`.
+fn lying_stamp_recovery(gaps: &[SchemaGap]) -> String {
+    let drop_config = gaps.iter().any(|g| matches!(g, SchemaGap::ConfigColumn(_)));
+    let reset_to = gaps
+        .iter()
+        .map(|g| g.reset_stamp())
+        .min()
+        .unwrap_or(BASELINE_SCHEMA_VERSION);
+    let mut steps = Vec::new();
+    if drop_config {
+        steps.push(
+            "drop the incomplete table with one `DROP TABLE config` write (its rows cannot be \
+             read by any `unblock` build and are LOST)"
+                .to_string(),
+        );
+    }
+    steps.push(format!(
+        "reset the stamp with one `PRAGMA user_version = {reset_to}` write against this database \
+         file"
+    ));
+    steps.push("run `unblock migrate` in this workspace".to_string());
+    steps.join(", then ")
+}
 
 /// The backend-agnostic error returned by every [`crate::Storage`] method (spine §2.1/§3.1).
 ///
@@ -178,6 +292,10 @@ pub enum StorageError {
         to: i32,
         /// Why the migration failed.
         reason: String,
+        /// The schema pieces the lying-stamp SENTINEL found missing (D57 clause (9)): EMPTY for a
+        /// genuine step failure, NON-EMPTY exactly when the sentinel raised this error. The hint
+        /// dispatches on it, never on `from == to`.
+        gaps: Vec<SchemaGap>,
     },
 
     /// `PRAGMA integrity_check` reported one or more problems.
@@ -234,22 +352,25 @@ impl CodedError for StorageError {
     /// tools a stale `comments` table breaks.
     ///
     /// **`Migration` SERVES TWO STATES AND THE TEXT BRANCHES ON THEM (Miguel's ruling, 2026-08-03,
-    /// after the Verify gate).** The variant is shared, and its two version fields are what tell the
-    /// states apart: on a GENUINE step failure `from != to` (the ladder ran, or tried to, between two
-    /// different versions), and `unblock migrate` IS the remedy — that arm is unchanged. On the
-    /// LYING-STAMP path (`src/libsql/migrations.rs`'s sentinel) `from == to == CURRENT`, and advising
-    /// `unblock migrate` there would advise a command that CANNOT repair the state: `run_migrations`
-    /// skips the whole ladder at that stamp, so a re-run re-emits this identical error forever. That
-    /// is the class the [`crate::Storage::migrate`] contract forbids by name, so the lying-stamp text
-    /// says instead (i) WHAT IS ACTUALLY WRONG — the stamp claims this build's version while the
-    /// columns that version adds are absent, so the STAMP is the false thing, not the ladder;
-    /// (ii) THE ONE RECOVERY THAT WORKS — reset the stamp to [`BASELINE_SCHEMA_VERSION`] with a single
-    /// `PRAGMA user_version` write, then run `unblock migrate`; and (iii) WHY THAT IS SAFE — step 2
-    /// INSPECTS the table before acting and adds only the columns actually absent, leaving every
-    /// existing row untouched. **There is deliberately no in-product rescue verb for this state**:
-    /// the export path is broken by the same stale shape (`sync export` reads `comments`), so an
-    /// honest, executable instruction is the entire remedy the user gets — which is exactly why it
-    /// may not be replaced by a command that returns this error again.
+    /// after the Verify gate; the DISPATCH TEST moved by D57 clause (9)).** On a GENUINE step failure
+    /// `gaps` is EMPTY and `unblock migrate` IS the remedy — that arm is unchanged. On the
+    /// LYING-STAMP path (`src/libsql/migrations.rs`'s sentinel) `gaps` is NON-EMPTY, and advising
+    /// `unblock migrate` there would advise a command that CANNOT repair the state: the ladder has
+    /// already run up to the stamp the database now carries, so a re-run re-emits this identical
+    /// error forever. Until D57 the dispatch read `from == to`, a faithful proxy for "the sentinel
+    /// fired" only while no step followed the lied-about stamp; once step 3 exists, a stamp-2
+    /// database lying about `comments` runs step 3 FIRST and reaches the sentinel with `from = 2`,
+    /// `to = 3`, so the proxy would hand it the stale-direction text. The dispatch is therefore
+    /// `!gaps.is_empty()`, never `from == to`. The lying-stamp text says (i) WHAT IS ACTUALLY WRONG —
+    /// the STAMP claims a shape the tables do not have, naming each missing piece by the step that
+    /// adds it; (ii) THE RECOVERY THAT WORKS, branched per gap ([`SchemaGap::reset_stamp`]) and
+    /// combined with the LOWEST stamp, then `unblock migrate`; and (iii) WHY THAT IS SAFE — step 2
+    /// INSPECTS the table before acting and adds only the columns actually absent, and step 3 creates
+    /// its table only if absent, leaving every existing row untouched. **There is deliberately no
+    /// in-product rescue verb for this state**: the export path is broken by the same stale shape
+    /// (`sync export` reads `comments`), so an honest, executable instruction is the entire remedy the
+    /// user gets — which is exactly why it may not be replaced by a command that returns this error
+    /// again.
     ///
     /// Every other variant keeps the trait default (`None`), so no other code's published
     /// `hint_shape` moves. **It only reaches a user because `unblock-config` FORWARDS it** on
@@ -257,25 +378,31 @@ impl CodedError for StorageError {
     /// would otherwise drop it.
     fn hint(&self) -> Option<String> {
         match self {
-            Self::Migration { from, to, reason } => Some(if from == to {
-                // THE LYING STAMP. `unblock migrate` is skipped wholesale at this stamp, so naming it
-                // alone would name a command that re-emits this same error forever.
-                format!(
-                    "the workspace database is STAMPED at schema version {from} — the version this \
-                     build expects — but the columns that version adds are absent ({reason}). The \
-                     STAMP is what is wrong, not the migration ladder, so running `unblock migrate` \
-                     on its own CANNOT repair it: every forward step is skipped at this stamp and \
-                     this same error is returned again. To recover: reset the stamp to the baseline \
-                     version with one `PRAGMA user_version = {BASELINE_SCHEMA_VERSION}` write \
-                     against this database file, then run `unblock migrate` in this workspace. That \
-                     is safe — the step INSPECTS the table before it acts and adds only the columns \
-                     actually missing, leaving every existing row untouched."
-                )
-            } else {
+            Self::Migration {
+                from,
+                to,
+                reason,
+                gaps,
+            } => Some(if gaps.is_empty() {
                 format!(
                     "the workspace database is at schema version {from}, but this build expects \
                      {to} ({reason}). Run `unblock migrate` in this workspace to bring it forward; \
                      the repair is additive and keeps every existing row."
+                )
+            } else {
+                // THE LYING STAMP. The ladder already ran up to `to`, so `unblock migrate` alone is
+                // skipped wholesale at this stamp and would re-emit this same error forever.
+                let recovery = lying_stamp_recovery(gaps);
+                format!(
+                    "the workspace database is STAMPED at schema version {to} — the version this \
+                     build expects — but its tables lack what the forward steps add ({reason}). \
+                     The STAMP is what is wrong, not the migration ladder, so running `unblock \
+                     migrate` on its own CANNOT repair it: every forward step is skipped at this \
+                     stamp and this same error is returned again. To recover: {recovery}. That is \
+                     safe — step {COMMENTS_STEP_VERSION} INSPECTS the `comments` table before it \
+                     acts and adds only the columns actually missing, and step \
+                     {CONFIG_STEP_VERSION} creates the `config` table only if it is absent, so \
+                     replaying them leaves every existing row untouched."
                 )
             }),
             Self::SchemaMismatch { found, expected } => Some(format!(
@@ -351,10 +478,21 @@ impl CodedError for StorageError {
                 map.insert("found".to_string(), Value::from(*found));
                 map.insert("expected".to_string(), Value::from(*expected));
             }
-            Self::Migration { from, to, reason } => {
+            Self::Migration {
+                from,
+                to,
+                reason,
+                gaps,
+            } => {
                 map.insert("from".to_string(), Value::from(*from));
                 map.insert("to".to_string(), Value::from(*to));
                 map.insert("reason".to_string(), Value::String(reason.clone()));
+                // D57 clause (9): the sentinel's gaps, by their stable `context()` spelling. Absent
+                // on a genuine step failure (empty `gaps`), so its context is unchanged.
+                if !gaps.is_empty() {
+                    let array = gaps.iter().map(|g| Value::String(g.label())).collect();
+                    map.insert("gaps".to_string(), Value::Array(array));
+                }
             }
             Self::IntegrityFailed { messages } => {
                 let array = messages.iter().map(|m| Value::String(m.clone())).collect();
@@ -456,7 +594,7 @@ pub(crate) fn is_busy_locked(error: &libsql::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendOpaque, StorageError};
+    use super::{BackendOpaque, SchemaGap, StorageError};
     use unblock_error::{CodedError, ErrorCode, StructuredError};
 
     /// Golden `StorageError` -> `ErrorCode` table (mirrors the `unblock-error` golden). Every
@@ -541,6 +679,7 @@ mod tests {
                     from: 1,
                     to: 2,
                     reason: "bad step".into(),
+                    gaps: Vec::new(),
                 },
                 ErrorCode::SchemaMismatch,
             ),
@@ -597,6 +736,7 @@ mod tests {
                 from: 1,
                 to: 2,
                 reason: "x".into(),
+                gaps: Vec::new(),
             },
             StorageError::IntegrityFailed {
                 messages: vec!["x".into()],
@@ -657,44 +797,46 @@ mod tests {
 
     /// **D46 — the stale-schema hint is composed HERE, and it is the one that must reach the user.**
     ///
-    /// `Migration` serves TWO states and the text BRANCHES on its own version fields (Miguel's
-    /// ruling, 2026-08-03): a GENUINE step failure (`from != to`) is told to run `unblock migrate`,
-    /// while the LYING-STAMP state (`from == to`, the sentinel's own error) is told the truth — the
-    /// STAMP is wrong, `unblock migrate` alone is skipped at that stamp and cannot repair it, so the
-    /// recovery is to reset `PRAGMA user_version` to the baseline FIRST and migrate after.
-    /// `SchemaMismatch` (the newer-than-build direction) carries the OPPOSITE instruction and never
-    /// names the migrate command; every text DIFFERS; and the hint survives the bridge into
-    /// `StructuredError`.
+    /// `Migration` serves TWO states and the text BRANCHES on its `gaps` (Miguel's ruling,
+    /// 2026-08-03; the dispatch test moved from `from == to` to `!gaps.is_empty()` by D57 clause
+    /// (9)): a GENUINE step failure (empty `gaps`) is told to run `unblock migrate`, while the
+    /// LYING-STAMP state (non-empty `gaps`, the sentinel's own error) is told the truth — the STAMP
+    /// is wrong, `unblock migrate` alone is skipped at that stamp and cannot repair it, so the
+    /// recovery is to reset `PRAGMA user_version` FIRST and migrate after. `SchemaMismatch` (the
+    /// newer-than-build direction) carries the OPPOSITE instruction and never names the migrate
+    /// command; every text DIFFERS; and the hint survives the bridge into `StructuredError`.
     ///
-    /// MUTANTS KILLED: deleting the `Migration` arm (the hint is `None` — a published
-    /// `ContextualText` shape with nothing behind it, this decision's own failure mode); **collapsing
-    /// the two `Migration` states back onto ONE text — i.e. restoring the shipped
-    /// "at schema version {from}, but this build expects {to} … Run `unblock migrate`" on the
-    /// lying-stamp path, which advises a command the product CANNOT perform in that state (the ladder
-    /// is skipped at that stamp, so the advised command re-emits this identical error): the
-    /// lying-stamp assertions below fire, because that text names neither `PRAGMA user_version` nor
-    /// the baseline stamp to reset to**; swapping the branch condition (the genuine-failure
-    /// assertions fire on a text telling a mid-ladder failure to hand-edit its stamp); collapsing the
-    /// two DIRECTIONS onto one constant text (the `assert_ne` fires, and the `SchemaMismatch` text
-    /// would then tell an out-of-date reader to run `unblock migrate`, which cannot help); dropping
-    /// `reason` from the rendering (the missing-column assertion fires); advising "export and
-    /// re-import", which a stale `comments` table itself breaks.
+    /// The stale fixture is the D46 seed AFTER step 3 exists: stamped 2, `comments` columns absent,
+    /// so it reaches the sentinel with `from = 2`, `to = 3` — and the genuine step failure below
+    /// carries the SAME `from`/`to`, so only `gaps` can tell them apart.
+    ///
+    /// MUTANTS KILLED: deleting the `Migration` arm; **restoring the `from == to` dispatch** (the
+    /// stale fixture has `from != to`, so it would get the stale-direction text and the lying-stamp
+    /// assertions fire); swapping the branch condition (the genuine-failure assertions fire on a
+    /// text telling a mid-ladder failure to hand-edit its stamp); collapsing the two DIRECTIONS onto
+    /// one constant text (the `assert_ne` fires); dropping `reason` from the rendering (the
+    /// missing-column assertion fires); advising "export and re-import", which a stale `comments`
+    /// table itself breaks.
     #[test]
+    #[allow(clippy::too_many_lines)] // one variant's two states and the opposite direction, side by side.
     fn schema_hints_are_composed_and_carry_opposite_remedies() {
+        let gaps = vec![
+            SchemaGap::CommentsColumn("updated_at"),
+            SchemaGap::CommentsColumn("redacted_at"),
+        ];
         let stale = StorageError::Migration {
             from: 2,
-            to: 2,
-            reason: "the `comments` table is missing the column(s) updated_at, redacted_at that \
-                     schema version 2 adds"
-                .to_string(),
+            to: 3,
+            reason: super::describe_gaps(&gaps),
+            gaps,
         };
         let stale_hint = stale
             .hint()
             .expect("the stale-schema failure carries a hint");
         assert!(
             stale_hint.contains("PRAGMA user_version = 1"),
-            "the lying-stamp recovery is a stamp RESET to the baseline, and it must be executable \
-             as written: {stale_hint}"
+            "the lying-stamp recovery for a `comments` gap is a stamp RESET to the baseline, and it \
+             must be executable as written: {stale_hint}"
         );
         assert!(
             stale_hint.contains("unblock migrate"),
@@ -712,21 +854,28 @@ mod tests {
         );
         assert!(
             !stale_hint.contains("but this build expects"),
-            "the retired text claimed a version DELTA where both numbers are the same, and advised \
-             a command that cannot repair this state: {stale_hint}"
+            "the stale-direction text advises a command that cannot repair this state: \
+             {stale_hint}"
         );
         assert!(
-            stale_hint.contains("updated_at") && stale_hint.contains("redacted_at"),
-            "the hint must name the columns actually missing: {stale_hint}"
+            stale_hint.contains("updated_at")
+                && stale_hint.contains("redacted_at")
+                && stale_hint.contains("schema version 2 adds"),
+            "the hint must name the columns actually missing and the step that adds them: \
+             {stale_hint}"
+        );
+        assert!(
+            !stale_hint.contains("DROP TABLE"),
+            "a `comments` gap alone never drops the config table: {stale_hint}"
         );
 
-        // The OTHER state of the SAME variant: a genuine mid-ladder step failure, where the two
-        // versions differ and `unblock migrate` IS the remedy. Its advice must NOT have been
-        // rewritten wholesale into the stamp-reset instruction.
+        // The OTHER state of the SAME variant, with the SAME versions: a genuine mid-ladder step
+        // failure (empty `gaps`), where `unblock migrate` IS the remedy.
         let step_failure = StorageError::Migration {
-            from: 1,
-            to: 2,
-            reason: "the forward steps ended stamped at user_version 1, not 2".to_string(),
+            from: 2,
+            to: 3,
+            reason: "the forward steps ended stamped at user_version 2, not 3".to_string(),
+            gaps: Vec::new(),
         };
         let step_hint = step_failure
             .hint()
@@ -738,7 +887,7 @@ mod tests {
         );
         assert_ne!(
             stale_hint, step_hint,
-            "one variant, two states — the text branches on `from == to`"
+            "one variant, two states — the text branches on `gaps`, not on `from == to`"
         );
 
         let newer = StorageError::SchemaMismatch {
@@ -789,6 +938,87 @@ mod tests {
         ] {
             assert_eq!(quiet.hint(), None, "{quiet:?} must carry no hint");
         }
+    }
+
+    /// **D57 clause (9) — the lying-stamp hint BRANCHES ON THE GAPS, and every branch terminates.**
+    /// `comments` columns → reset to `1`; `config` table ABSENT → reset to `2`; `config` table
+    /// PRESENT missing a column → `DROP TABLE config` (rows LOST, disclosed), then reset to `2`;
+    /// several → combined in that order with the LOWEST stamp. Each gap's reason names the step that
+    /// adds it, and `context()` surfaces the gaps by label.
+    ///
+    /// MUTANTS KILLED: one reset stamp for every gap (the config-only branches would reset to `1`,
+    /// or the comments branch to `2`); a missing-column branch that skips the `DROP` (step 3's `IF
+    /// NOT EXISTS` would then keep the broken table and loop); taking the HIGHEST stamp when gaps
+    /// combine (the `comments` step would never re-run).
+    #[test]
+    fn lying_stamp_hint_branches_per_gap() {
+        fn hint_for(gaps: Vec<SchemaGap>) -> (String, StructuredError) {
+            let err = StorageError::Migration {
+                from: 3,
+                to: 3,
+                reason: super::describe_gaps(&gaps),
+                gaps,
+            };
+            (err.hint().expect("hint"), (&err).into())
+        }
+
+        // …and equal versions with EMPTY gaps still get the stale-direction text: the dispatch is
+        // the gaps, never the versions.
+        let equal_versions = StorageError::Migration {
+            from: 3,
+            to: 3,
+            reason: "r".to_string(),
+            gaps: Vec::new(),
+        };
+        assert!(
+            equal_versions
+                .hint()
+                .expect("hint")
+                .contains("Run `unblock migrate`"),
+            "empty gaps → the stale-direction text, whatever from/to say"
+        );
+        let (absent, structured) = hint_for(vec![SchemaGap::ConfigTable]);
+        assert!(absent.contains("PRAGMA user_version = 2"), "{absent}");
+        assert!(!absent.contains("DROP TABLE"), "{absent}");
+        assert!(
+            absent.contains("`config` table that schema version 3 creates is absent"),
+            "{absent}"
+        );
+        assert_eq!(structured.context["gaps"], serde_json::json!(["config"]));
+
+        let (column, structured) = hint_for(vec![SchemaGap::ConfigColumn("value")]);
+        assert!(column.contains("DROP TABLE config"), "{column}");
+        assert!(
+            column.contains("LOST"),
+            "the row loss is disclosed: {column}"
+        );
+        assert!(column.contains("PRAGMA user_version = 2"), "{column}");
+        let drop_at = column.find("DROP TABLE config").expect("drop");
+        let reset_at = column.find("PRAGMA user_version").expect("reset");
+        assert!(drop_at < reset_at, "drop first, then reset: {column}");
+        assert_eq!(
+            structured.context["gaps"],
+            serde_json::json!(["config.value"])
+        );
+
+        let (combined, structured) = hint_for(vec![
+            SchemaGap::CommentsColumn("redacted_at"),
+            SchemaGap::ConfigColumn("key"),
+        ]);
+        assert!(
+            combined.contains("PRAGMA user_version = 1"),
+            "the LOWEST stamp wins: {combined}"
+        );
+        assert!(!combined.contains("PRAGMA user_version = 2"), "{combined}");
+        assert!(combined.contains("DROP TABLE config"), "{combined}");
+        assert!(
+            combined.contains("schema version 2 adds") && combined.contains("schema version 3"),
+            "each gap names the step that adds it: {combined}"
+        );
+        assert_eq!(
+            structured.context["gaps"],
+            serde_json::json!(["comments.redacted_at", "config.key"])
+        );
     }
 
     /// `CycleDetected{path}` surfaces as `context["cycle_path"]`.

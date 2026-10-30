@@ -50,6 +50,11 @@ pub(crate) use schema::CURRENT_SCHEMA_VERSION;
 // and a hint that hard-coded that number would be a second, un-pinned copy of it.
 pub(crate) use schema::BASELINE_SCHEMA_VERSION;
 
+// D57: the versions whose steps add each lying-stamp gap (`comments` columns: 2, the `config` table:
+// 3). Crate-internal, for the same reason as the baseline above: `src/error.rs` names them in the
+// per-gap reason and recovery, and a hard-coded copy would be an un-pinned second home.
+pub(crate) use migrations::{COMMENTS_STEP_VERSION, CONFIG_STEP_VERSION};
+
 // The `StorageTestkit` impl for `LibsqlStorage` lives **in-module** (gated) so it can reach the
 // `pub(super)` connection accessors (`read`/`write`) and `ids::next_child_number` without widening
 // any visibility at the crate root (resolved-decision #1). It is compiled for the crate's own tests
@@ -819,6 +824,22 @@ impl Storage for LibsqlStorage {
         let conn = self.write().await;
         crud::close_issues(&conn, self.hook(), ids, reason, actor).await
     }
+
+    // --- config table (FR-13 full, D57; spine §3.2.1 "Config table (D57)") ---
+
+    async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+        crud::read_config(self.read()).await
+    }
+
+    async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        let conn = self.write().await;
+        crud::set_config(&conn, self.hook(), key, value).await
+    }
+
+    async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+        let conn = self.write().await;
+        crud::unset_config(&conn, self.hook(), key).await
+    }
 }
 
 #[cfg(test)]
@@ -1166,11 +1187,11 @@ mod tests {
         );
     }
 
-    /// `migrate` stamps `user_version = 2` on a fresh DB (D46 — the fresh arm creates the BASELINE
+    /// `migrate` stamps `user_version = 3` on a fresh DB (D46 — the fresh arm creates the BASELINE
     /// and then FALLS THROUGH the ladder, so a brand-new database ends at the CURRENT version having
-    /// genuinely applied step 2).
+    /// genuinely applied steps 2 and 3; D57 added step 3, the `config` table).
     #[tokio::test]
-    async fn migrate_stamps_user_version_two() {
+    async fn migrate_stamps_user_version_three() {
         let storage = LibsqlStorage::open_in_memory().await.expect("open");
         storage.migrate().await.expect("migrate");
         let conn = storage.read();
@@ -1178,7 +1199,7 @@ mod tests {
         let row = rows.next().await.expect("row").expect("present");
         assert_eq!(
             row.get_value(0).expect("val").as_integer().copied(),
-            Some(2)
+            Some(3)
         );
     }
 
@@ -1198,7 +1219,7 @@ mod tests {
             result,
             Err(StorageError::SchemaMismatch {
                 found: 99,
-                expected: 2
+                expected: 3
             })
         ));
     }
@@ -1271,6 +1292,96 @@ mod tests {
             storage.instrument().mutation_count() - before,
             1,
             "a missing label's empty transaction still commits"
+        );
+    }
+
+    // --- config table (FR-13 full, D57) — libsql-side cells -------------------------------------
+
+    /// D57 criterion (m) "in one transaction each": every `set_config` (insert and overwrite) and
+    /// every `unset_config` (hit and miss) commits exactly ONE transaction (the store's
+    /// committed-mutation counter); `read_config` commits none.
+    #[tokio::test]
+    async fn config_writes_commit_exactly_one_transaction_each() {
+        let storage = LibsqlStorage::open_in_memory().await.expect("open");
+        storage.migrate().await.expect("migrate");
+        let one_commit = |before: u64, what: &str| {
+            assert_eq!(
+                storage.instrument().mutation_count() - before,
+                1,
+                "{what} is ONE committed transaction"
+            );
+        };
+
+        let before = storage.instrument().mutation_count();
+        storage.set_config("actor", "alice").await.unwrap();
+        one_commit(before, "the inserting set_config");
+        let before = storage.instrument().mutation_count();
+        storage.set_config("actor", "bob").await.unwrap();
+        one_commit(before, "the overwriting set_config");
+        let before = storage.instrument().mutation_count();
+        assert!(storage.unset_config("actor").await.unwrap());
+        one_commit(before, "the deleting unset_config");
+        let before = storage.instrument().mutation_count();
+        assert!(!storage.unset_config("actor").await.unwrap());
+        one_commit(before, "the no-row unset_config");
+        let before = storage.instrument().mutation_count();
+        storage.read_config().await.unwrap();
+        assert_eq!(
+            storage.instrument().mutation_count(),
+            before,
+            "read_config is a pure read"
+        );
+    }
+
+    /// D57 clause (2a), "never a silent skip": a hand-written row whose key or value is NOT `TEXT`
+    /// is returned by `read_config` in its marked `<storage class>:<HEX>` spelling (ordered by that
+    /// spelling, so it sorts first), and `unset_config` of that spelling deletes it.
+    #[tokio::test]
+    async fn read_config_surfaces_non_text_cells_and_unset_removes_them() {
+        let storage = LibsqlStorage::open_in_memory().await.expect("open");
+        storage.migrate().await.expect("migrate");
+        storage.set_config("actor", "alice").await.unwrap();
+        {
+            let conn = storage.write().await;
+            conn.execute(
+                "INSERT INTO config (key, value) VALUES ('search_cap', x'00FF'), (x'6B', 5)",
+                (),
+            )
+            .await
+            .expect("plant non-TEXT cells");
+        }
+        let marker = crate::NON_TEXT_CELL_MARKER;
+        let blob_key = format!("{marker}blob:6B");
+        // A TEXT key that literally spells the BLOB row's marked key: injectivity spells it
+        // `\u{1}text:<HEX>`, so the two can never be confused or deleted together.
+        storage.set_config(&blob_key, "impostor").await.unwrap();
+        let text_key = format!("{marker}text:01626C6F623A3642");
+        assert_eq!(
+            storage.read_config().await.unwrap(),
+            vec![
+                // TEXT affinity converts the INTEGER 5 to the TEXT "5"; only a BLOB (or a NULL in
+                // a hand-built table) keeps another storage class.
+                (blob_key.clone(), "5".to_string()),
+                (text_key.clone(), "impostor".to_string()),
+                ("actor".to_string(), "alice".to_string()),
+                ("search_cap".to_string(), format!("{marker}blob:00FF")),
+            ],
+            "no row is dropped; a non-TEXT or marker-led cell is marked and spelled <class>:<HEX>"
+        );
+        assert!(
+            storage.unset_config(&blob_key).await.unwrap(),
+            "the marked spelling addresses the BLOB-keyed row"
+        );
+        assert_eq!(
+            storage.read_config().await.unwrap().len(),
+            3,
+            "…and ONLY that row: the marker-led TEXT key survives"
+        );
+        assert!(storage.unset_config(&text_key).await.unwrap());
+        assert!(storage.unset_config("search_cap").await.unwrap());
+        assert_eq!(
+            storage.read_config().await.unwrap(),
+            vec![("actor".to_string(), "alice".to_string())]
         );
     }
 

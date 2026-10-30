@@ -85,10 +85,13 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 # P3    is the third `const` assertion, added by the 2026-08-03 Verify-gate ruling on the sentinel's
 #       subject: it binds `witness_newest_step`'s column set to the ladder's NEWEST step, which is what
 #       makes the `Storage::migrate` contract's "the NEWEST step's own columns" TRUE AS FACT rather
-#       than as prose that a step 3 would quietly falsify.
+#       than as prose that a step 3 would quietly falsify. RE-POINTED by D57's implementation commit:
+#       step 3 took the "extend the sentinel" branch, so the assertion now names the version-3 `Sql`
+#       step (`newest.version == CONFIG_STEP_VERSION` and its kind's discriminant equal to `Sql`'s).
 # P4/P5 are the two version constants. Their VALUES are pinned, not merely their names: a revert to
 #       `= 1`, or the deletion of the baseline constant that stops the literal `1` carrying two
-#       unrelated meanings, is exactly the regression this decision exists to prevent.
+#       unrelated meanings, is exactly the regression this decision exists to prevent. P4 is
+#       RE-POINTED by D57's implementation commit at `= 3` (schema step 3, the `config` table).
 # P6/P7 are the CONSUMPTION half of clause (10)'s pre-open stamp — a DURABLE-IDENTIFIER landing, spelled
 #       the same in both files. The negative form ("nobody re-sourced `schema_from` from
 #       `MigrateOutcome`") is the unwritable kind; the two-file co-occurrence is what proves the value
@@ -105,8 +108,8 @@ RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 REQUIRE="
 P1@crates/unblock-storage/src/libsql/schema.rs@SCHEMA_CONTENT_DIGEST == BLESSED_SCHEMA_CONTENT_DIGEST@the CONTENT-PIN const assertion still exists: a DDL edit that ships without a version bump or a forward step is a red BUILD. Nothing else in the tree can notice its deletion
 P2@crates/unblock-storage/src/libsql/migrations.rs@expected - 1 == CURRENT_SCHEMA_VERSION@the LADDER-CONTIGUITY const assertion still exists: bumping the version without a step, or adding a step without bumping, is a red BUILD
-P3@crates/unblock-storage/src/libsql/migrations.rs@newest\.kind\.discriminant\(\) == MigrationKind::CommentsColumnsReconcile@the SENTINEL-SUBJECT const assertion still exists: the ladder's newest step IS the one the sentinel witnesses, so the migrate contract's promise cannot silently fall behind the ladder (Verify gate, 2026-08-03)
-P4@crates/unblock-storage/src/libsql/schema.rs@CURRENT_SCHEMA_VERSION: i32 = 2@the version constant carries the D46 BUMP, by value — a revert to 1 fails this row rather than merely a test
+P3@crates/unblock-storage/src/libsql/migrations.rs@newest\.kind\.discriminant\(\) == MigrationKind::Sql\(\"\"\)\.discriminant\(\)@the SENTINEL-SUBJECT const assertion still exists: the ladder's newest step IS the one the sentinel witnesses, so the migrate contract's promise cannot silently fall behind the ladder (Verify gate, 2026-08-03; re-pointed by D57 at the version-3 Sql step the extended sentinel witnesses)
+P4@crates/unblock-storage/src/libsql/schema.rs@CURRENT_SCHEMA_VERSION: i32 = 3@the version constant carries the schema BUMP, by value — D46's 1 -> 2, re-pointed by D57 at its 2 -> 3 (schema step 3): a revert fails this row rather than merely a test
 P5@crates/unblock-storage/src/libsql/schema.rs@BASELINE_SCHEMA_VERSION: i32 = 1@the NEW baseline constant exists, by value: it is what stops the literal 1 carrying two unrelated meanings under the frozen-baseline discipline
 P6@crates/unblock-config/src/context.rs@schema_version_before_migrate@clause (10)'s pre-open stamp is CAPTURED at the one shared open body (L4), between open_local and the facade's own migrate()
 P7@crates/unblock-cli/src/commands/migrate.rs@schema_version_before_migrate@clause (10)'s pre-open stamp is CONSUMED by the command that reports it (L7) — the half that proves it is not captured and dropped

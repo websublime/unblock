@@ -575,6 +575,18 @@ pub mod parked {
             }
             self.inner.close_issues(ids, reason, actor).await
         }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.inner.unset_config(key).await
+        }
     }
 }
 
@@ -869,6 +881,18 @@ pub mod collide {
             actor: &str,
         ) -> Result<Vec<String>, StorageError> {
             self.inner.close_issues(ids, reason, actor).await
+        }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.inner.unset_config(key).await
         }
     }
 }
@@ -1207,6 +1231,18 @@ pub mod race {
             actor: &str,
         ) -> Result<Vec<String>, StorageError> {
             self.inner.close_issues(ids, reason, actor).await
+        }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.inner.unset_config(key).await
         }
     }
 }

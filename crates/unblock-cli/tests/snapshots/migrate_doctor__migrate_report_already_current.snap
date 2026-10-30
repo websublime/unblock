@@ -9,11 +9,11 @@ expression: migrate_report_json(&ws)
       "label": "database"
     },
     {
-      "detail": "2",
+      "detail": "3",
       "label": "schema_from"
     },
     {
-      "detail": "2",
+      "detail": "3",
       "label": "schema_to"
     },
     {

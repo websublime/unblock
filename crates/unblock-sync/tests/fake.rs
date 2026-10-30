@@ -321,4 +321,16 @@ impl Storage for FakeStorage {
     ) -> Result<Vec<String>, StorageError> {
         unimplemented!("FakeStorage::close_issues")
     }
+
+    async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+        unimplemented!("FakeStorage::read_config")
+    }
+
+    async fn set_config(&self, _key: &str, _value: &str) -> Result<(), StorageError> {
+        unimplemented!("FakeStorage::set_config")
+    }
+
+    async fn unset_config(&self, _key: &str) -> Result<bool, StorageError> {
+        unimplemented!("FakeStorage::unset_config")
+    }
 }
