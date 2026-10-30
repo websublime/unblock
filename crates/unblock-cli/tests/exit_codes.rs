@@ -259,3 +259,67 @@ fn full_exit_code_table_is_dual_pinned_with_unblock_error() {
         assert_eq!(exit, expected, "{code:?} must map to exit {expected}");
     }
 }
+
+/// **D57 criterion (n) — `unblock version` honours a user `output_format`** (PRD §4 D57 clause (6)):
+/// with no `--output` and no `UNBLOCK_OUTPUT_FORMAT`, the user file's `csv` renders the report, while
+/// `--output` still wins over it.
+#[test]
+fn config_version_honours_a_user_output_format() {
+    let home = common::user_config_home("output_format = \"csv\"\n");
+    let out = output_locked(
+        unblock().env("XDG_CONFIG_HOME", home.path()).arg("version"),
+        "run version under a csv user file",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let labels: Vec<String> = common::csv_report(&out.stdout)
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect();
+    assert_eq!(
+        labels.first().map(String::as_str),
+        Some("version"),
+        "{labels:?}"
+    );
+
+    let out = output_locked(
+        unblock()
+            .env("XDG_CONFIG_HOME", home.path())
+            .args(["version", "--output", "json"]),
+        "run version -o json under a csv user file",
+    );
+    let value: Value = serde_json::from_slice(&out.stdout).expect("--output beats the user file");
+    assert_eq!(value["kind"], "version");
+}
+
+/// **D57 criterion (n) — the failure is reported EXACTLY once.** With a malformed user file,
+/// `unblock version` still succeeds and prints exactly ONE stderr line, its `OwnReport` warning (the
+/// `ErrorPrePass` is silent), while a workspace command prints NO such warning and fails once, with
+/// exit 7 and one structured `CONFIG_PARSE_ERROR` document.
+#[test]
+fn config_a_malformed_user_file_warns_once_in_version_and_fails_a_workspace_command_once() {
+    let home = common::user_config_home("output_format = [unclosed\n");
+    let out = output_locked(
+        unblock().env("XDG_CONFIG_HOME", home.path()).arg("version"),
+        "run version under a malformed user file",
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "version never fails: {stderr}");
+    let value: Value = serde_json::from_slice(&out.stdout).expect("the JSON default report");
+    assert_eq!(value["kind"], "version");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines.len(), 1, "exactly one stderr line: {stderr}");
+    assert!(lines[0].starts_with("warning: "), "{stderr}");
+    assert!(!stderr.contains("error["), "{stderr}");
+
+    let ws = Workspace::init();
+    let out = output_locked(
+        ws.cmd().env("XDG_CONFIG_HOME", home.path()).arg("migrate"),
+        "run migrate under a malformed user file",
+    );
+    assert_json_error(&out, 7, "CONFIG_PARSE_ERROR");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("warning"),
+        "the error pre-pass never warns about the user file: {stderr}"
+    );
+}

@@ -770,7 +770,7 @@ fn doctor_reports_the_observed_and_expected_schema_versions_and_still_exits_0() 
 /// Create one real issue through the engine (the same `Session` the CLI opens), so the only
 /// fabricated thing in the workspace is the edge planted next.
 fn seed_issue(ws: &Workspace, id: &str) {
-    use unblock_config::{CliOverrides, open_with_storage_with_cli};
+    use unblock_config::{CliOverrides, open_with_storage_with_env};
     use unblock_engine::{Session, SessionConfig};
     use unblock_model::{Issue, Status};
 
@@ -780,7 +780,7 @@ fn seed_issue(ws: &Workspace, id: &str) {
         .expect("build a current-thread runtime");
     rt.block_on(async {
         let overrides = CliOverrides::new().with_dir(ws.unblock_dir());
-        let ctx = open_with_storage_with_cli(&overrides)
+        let ctx = open_with_storage_with_env(None, &overrides, &common::MapEnv::empty())
             .await
             .expect("open the workspace via the config facade");
         let session = Session::open(ctx, SessionConfig::default())
@@ -799,14 +799,15 @@ fn seed_issue(ws: &Workspace, id: &str) {
     });
 }
 
-/// Open a `Session` over `ws` through the SAME config facade the CLI dispatches through. The caller
-/// drops it before spawning any CLI child, so no connection outlives the call.
+/// Open a `Session` over `ws` through the SAME config facade body the CLI dispatches through (its
+/// `open_with_storage_with_env` test entry over an EMPTY environment, D57/NFR-16). The caller drops
+/// it before spawning any CLI child, so no connection outlives the call.
 async fn open_session(ws: &Workspace) -> unblock_engine::Session {
-    use unblock_config::{CliOverrides, open_with_storage_with_cli};
+    use unblock_config::{CliOverrides, open_with_storage_with_env};
     use unblock_engine::{Session, SessionConfig};
 
     let overrides = CliOverrides::new().with_dir(ws.unblock_dir());
-    let ctx = open_with_storage_with_cli(&overrides)
+    let ctx = open_with_storage_with_env(None, &overrides, &common::MapEnv::empty())
         .await
         .expect("open the workspace via the config facade");
     Session::open(ctx, SessionConfig::default())
@@ -858,4 +859,62 @@ fn plant_dangling_edge(ws: &Workspace, source: &str, target: &str, dep_type: &st
         .await
         .expect("plant the dangling edge");
     });
+}
+
+/// **D57 criterion (d), the CLI half — "`unblock migrate` and `unblock doctor` exit 7 with that
+/// hint".** Over a workspace whose `config` table holds a blocking row (a startup key, and an
+/// undecodable layer-key value), both commands exit 7 with a `CONFIG_ERROR` document whose
+/// `context.keys` names the row and whose hint names its exact recovery call; after the repair
+/// (the row removed) both exit 0 again.
+#[test]
+fn config_migrate_and_doctor_exit_7_with_the_hint_over_a_blocking_row() {
+    for (key, value, recovery) in [
+        (
+            "db_filename",
+            "x.db",
+            r#"issue {"action":"config","op":"unset","key":"db_filename"}"#,
+        ),
+        (
+            "output_format",
+            "xml",
+            r#"issue {"action":"config","op":"get","key":"output_format"}"#,
+        ),
+    ] {
+        let ws = Workspace::init();
+        common::plant_config_row(&ws.db_path(), key, value);
+        for command in ["migrate", "doctor"] {
+            let out = output_locked(
+                ws.cmd().args([command, "--output", "json"]),
+                "run a gated lifecycle command",
+            );
+            assert_eq!(
+                out.status.code(),
+                Some(7),
+                "{command} over a blocking `{key}` row; stderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let error: Value = serde_json::from_slice(&out.stdout).expect("a JSON error document");
+            assert_eq!(error["code"], "CONFIG_ERROR", "{command}: {error}");
+            assert_eq!(
+                error["context"]["keys"],
+                serde_json::json!([key]),
+                "{command}: {error}"
+            );
+            let hint = error["hint"].as_str().unwrap_or_default();
+            assert!(
+                hint.contains(recovery),
+                "{command}: names `{recovery}`: {hint}"
+            );
+        }
+        common::runtime().block_on(async {
+            let conn = common::raw_connection(&ws.db_path()).await;
+            conn.execute("DELETE FROM config", ())
+                .await
+                .expect("repair: remove the row");
+        });
+        for command in ["migrate", "doctor"] {
+            let out = output_locked(ws.cmd().arg(command), "run the command after the repair");
+            assert_eq!(out.status.code(), Some(0), "{command} after the repair");
+        }
+    }
 }
