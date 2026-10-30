@@ -141,3 +141,60 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// **D57 criterion (a) — the six-layer fold is TOTAL**: over random stacks of CLI, env,
+    /// project file, user file, DB row and `$USER` values for `output_format` and `actor`, and of
+    /// project, user and DB values for `search_cap` (the only layers that carry it), the resolution
+    /// never fails and returns the HIGHEST layer that set each key, with its `source`.
+    #[test]
+    fn six_layer_fold_is_total(
+        fmt in proptest::array::uniform5(proptest::option::of(any_output_format())),
+        actor in proptest::array::uniform6(proptest::option::of(any_valid_actor())),
+        cap in proptest::array::uniform3(proptest::option::of(1usize..=1_000_000)),
+    ) {
+        use unblock_model::ConfigSource as S;
+        let dir = tempfile::tempdir().unwrap();
+        let toml = |f: Option<OutputFormat>, a: &Option<String>, c: Option<usize>| {
+            let format_line = f.map_or(String::new(), |f| {
+                format!("output_format = \"{}\"\n", output_format_wire(f))
+            });
+            let actor_line = a.as_ref().map_or(String::new(), |a| format!("actor = \"{a}\"\n"));
+            let cap_line = c.map_or(String::new(), |c| format!("search_cap = {c}\n"));
+            format_line + &actor_line + &cap_line
+        };
+        let project = dir.path().join("p.toml");
+        std::fs::write(&project, toml(fmt[2], &actor[2], cap[0])).unwrap();
+        let user = dir.path().join("u.toml");
+        std::fs::write(&user, toml(fmt[3], &actor[3], cap[1])).unwrap();
+        let cli = CliOverrides { output_format: fmt[0], actor: actor[0].clone(), ..CliOverrides::default() };
+        let env = EnvOverrides { output_format: fmt[1], actor: actor[1].clone(), ..EnvOverrides::default() };
+        let mut rows = Vec::new();
+        if let Some(a) = &actor[4] { rows.push(("actor".to_string(), a.clone())); }
+        if let Some(f) = fmt[4] { rows.push(("output_format".to_string(), output_format_wire(f).to_string())); }
+        if let Some(c) = cap[2] { rows.push(("search_cap".to_string(), c.to_string())); }
+        rows.sort();
+        let runtime = unblock_config::ConfigReloader::new(cli, env, actor[5].clone(), Some(project), Some(user))
+            .reload_runtime(&rows)
+            .expect("the fold is total");
+
+        let fmt_sources = [S::Cli, S::Env, S::Project, S::User, S::Db];
+        let want_fmt = fmt.iter().zip(fmt_sources).find_map(|(f, s)| f.map(|f| (f, s)))
+            .unwrap_or((OutputFormat::Json, S::Default));
+        prop_assert_eq!((runtime.output_format, runtime.sources.output_format), want_fmt);
+
+        let actor_sources = [S::Cli, S::Env, S::Project, S::User, S::Db, S::OsUser];
+        let want_actor = actor.iter().zip(actor_sources).find_map(|(a, s)| a.clone().map(|a| (a, s)))
+            .unwrap_or(("unblock".to_string(), S::Default));
+        prop_assert_eq!((runtime.actor, runtime.sources.actor), want_actor);
+
+        let default_cap = unblock_config::ConfigReloader::default().reload_runtime(&[]).unwrap().search_cap;
+        let cap_sources = [S::Project, S::User, S::Db];
+        let want_cap = cap.iter().zip(cap_sources).find_map(|(c, s)| c.map(|c| (c, s)))
+            .unwrap_or((default_cap, S::Default));
+        prop_assert_eq!((runtime.search_cap, runtime.sources.search_cap), want_cap);
+        prop_assert!(runtime.db_faults.is_empty());
+    }
+}
