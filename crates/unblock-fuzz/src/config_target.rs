@@ -12,8 +12,11 @@
 //!   the project parse DIFFERENTIALLY: the same parse/credential refusal with the same code; when the
 //!   project parse accepts a file carrying any startup key (either `jsonl_filename` spelling) the
 //!   user load refuses it with `StartupKeyInRuntimeLayer { layer: User }` — never a panic and never a
-//!   silent accept; a `jsonl_export` is refused as `InvalidValue` naming it; and otherwise the user
-//!   load accepts the file and parses it to the identical `ProjectConfig`.
+//!   silent accept; a `jsonl_export` is refused as `InvalidValue` naming it; a layer value outside
+//!   its per-key bounds (a blank or out-of-policy `actor`, a `search_cap` outside `1..=i64::MAX`) is
+//!   refused as `InvalidValue` naming the key, so `unblock init`'s pre-check refuses every file the
+//!   open would; and otherwise the user load accepts the file and parses it to the identical
+//!   `ProjectConfig`.
 
 // The core asserts its invariants (a breach = the bug libFuzzer reports); a `# Panics` section would
 // be noise.
@@ -24,7 +27,8 @@ use std::path::Path;
 
 use unblock_config::{
     CliOverrides, ConfigError, EnvSource, KeyClass, OutputFormat, ProjectConfig, ResolvedContext,
-    classify, load_user_config, open_workspace_with_env,
+    canonicalize_runtime_value, classify, classify_runtime_key, load_user_config,
+    open_workspace_with_env,
 };
 use unblock_error::{CodedError, ErrorCode};
 use unblock_model::ConfigSource;
@@ -214,14 +218,44 @@ fn check_user_layer(env: &MapEnv, project: &Result<ProjectConfig, ConfigError>) 
                     }
                     other => panic!("a user-file jsonl_export must be InvalidValue: {other:?}"),
                 }
+            } else if let Some(key) = out_of_bound_layer_key(parsed) {
+                match &user {
+                    Err(err @ ConfigError::InvalidValue { key: refused, .. }) if refused == key => {
+                        assert_config_file_error(err);
+                    }
+                    other => panic!(
+                        "a user-file `{key}` out of its layer bounds must be InvalidValue: {other:?}"
+                    ),
+                }
             } else {
                 let accepted = user.as_ref().unwrap_or_else(|err| {
-                    panic!("the user loader refused a file with no startup key: {err}")
+                    panic!("the user loader refused an in-bounds file with no startup key: {err}")
                 });
                 assert_eq!(accepted, parsed, "both layers parse the same grammar");
             }
         }
     }
+}
+
+/// The first LAYER key whose user-file value is out of the per-key bounds the user loader applies
+/// (PRD §4 D57 clause (6)) — judged independently through the public `canonicalize_runtime_value`,
+/// the same parser a `config set` value passes: `actor` first, then `search_cap`.
+fn out_of_bound_layer_key(config: &ProjectConfig) -> Option<&'static str> {
+    let bad = |key: &str, raw: String| {
+        let rk = classify_runtime_key(key).expect("a layer key");
+        canonicalize_runtime_value(rk, &raw).is_err()
+    };
+    if let Some(actor) = &config.actor
+        && bad("actor", actor.clone())
+    {
+        return Some("actor");
+    }
+    if let Some(cap) = config.search_cap
+        && bad("search_cap", cap.to_string())
+    {
+        return Some("search_cap");
+    }
+    None
 }
 
 /// The first startup key a parsed file carries — a typed startup field, or a captured extra key
