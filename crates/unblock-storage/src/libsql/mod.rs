@@ -1295,6 +1295,85 @@ mod tests {
         );
     }
 
+    // --- config table (FR-13 full, D57) — libsql-side cells -------------------------------------
+
+    /// D57 criterion (m) "in one transaction each": every `set_config` (insert and overwrite) and
+    /// every `unset_config` (hit and miss) commits exactly ONE transaction (the store's
+    /// committed-mutation counter); `read_config` commits none.
+    #[tokio::test]
+    async fn config_writes_commit_exactly_one_transaction_each() {
+        let storage = LibsqlStorage::open_in_memory().await.expect("open");
+        storage.migrate().await.expect("migrate");
+        let one_commit = |before: u64, what: &str| {
+            assert_eq!(
+                storage.instrument().mutation_count() - before,
+                1,
+                "{what} is ONE committed transaction"
+            );
+        };
+
+        let before = storage.instrument().mutation_count();
+        storage.set_config("actor", "alice").await.unwrap();
+        one_commit(before, "the inserting set_config");
+        let before = storage.instrument().mutation_count();
+        storage.set_config("actor", "bob").await.unwrap();
+        one_commit(before, "the overwriting set_config");
+        let before = storage.instrument().mutation_count();
+        assert!(storage.unset_config("actor").await.unwrap());
+        one_commit(before, "the deleting unset_config");
+        let before = storage.instrument().mutation_count();
+        assert!(!storage.unset_config("actor").await.unwrap());
+        one_commit(before, "the no-row unset_config");
+        let before = storage.instrument().mutation_count();
+        storage.read_config().await.unwrap();
+        assert_eq!(
+            storage.instrument().mutation_count(),
+            before,
+            "read_config is a pure read"
+        );
+    }
+
+    /// D57 clause (2a), "never a silent skip": a hand-written row whose key or value is NOT `TEXT`
+    /// is returned by `read_config` in its marked `<storage class>:<HEX>` spelling (ordered by that
+    /// spelling, so it sorts first), and `unset_config` of that spelling deletes it.
+    #[tokio::test]
+    async fn read_config_surfaces_non_text_cells_and_unset_removes_them() {
+        let storage = LibsqlStorage::open_in_memory().await.expect("open");
+        storage.migrate().await.expect("migrate");
+        storage.set_config("actor", "alice").await.unwrap();
+        {
+            let conn = storage.write().await;
+            conn.execute(
+                "INSERT INTO config (key, value) VALUES ('search_cap', x'00FF'), (x'6B', 5)",
+                (),
+            )
+            .await
+            .expect("plant non-TEXT cells");
+        }
+        let marker = crate::NON_TEXT_CELL_MARKER;
+        let blob_key = format!("{marker}blob:6B");
+        assert_eq!(
+            storage.read_config().await.unwrap(),
+            vec![
+                // TEXT affinity converts the INTEGER 5 to the TEXT "5"; only a BLOB (or a NULL in
+                // a hand-built table) keeps another storage class.
+                (blob_key.clone(), "5".to_string()),
+                ("actor".to_string(), "alice".to_string()),
+                ("search_cap".to_string(), format!("{marker}blob:00FF")),
+            ],
+            "no row is dropped; a non-TEXT cell is marked and spelled <class>:<HEX>"
+        );
+        assert!(
+            storage.unset_config(&blob_key).await.unwrap(),
+            "the marked spelling addresses the BLOB-keyed row"
+        );
+        assert!(storage.unset_config("search_cap").await.unwrap());
+        assert_eq!(
+            storage.read_config().await.unwrap(),
+            vec![("actor".to_string(), "alice".to_string())]
+        );
+    }
+
     /// D56 clause (5) SCALE (NFR-2): the rename's merge `DELETE` and rename `UPDATE` drive from
     /// `idx_labels_label` and probe primary keys only — `EXPLAIN QUERY PLAN` (bundled `SQLite`) never
     /// reports a `SCAN` of `issues` or `labels`, so their cost is proportional to the rows carrying

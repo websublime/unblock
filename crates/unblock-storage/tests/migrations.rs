@@ -682,6 +682,7 @@ async fn a_lying_stamp_three_is_refused_naming_the_missing_column() {
             SchemaGap::CommentsColumn("redacted_at"),
         ]
     );
+    assert_eq!(err.code(), unblock_error::ErrorCode::SchemaMismatch);
     assert_lying_stamp_hint(&err.hint().expect("hint"), 1, false);
 
     follow_hint(&db, 1, false).await;
@@ -723,6 +724,7 @@ async fn a_stamp_three_database_missing_the_config_table_is_refused() {
         reason.contains("`config` table that schema version 3 creates is absent"),
         "{reason}"
     );
+    assert_eq!(err.code(), unblock_error::ErrorCode::SchemaMismatch);
     assert_lying_stamp_hint(&err.hint().expect("hint"), 2, false);
 
     follow_hint(&db, 2, false).await;
@@ -755,6 +757,7 @@ async fn a_stamp_three_database_whose_config_table_lacks_a_column_is_refused() {
     };
     assert_eq!(gaps, &vec![SchemaGap::ConfigColumn("value")]);
     assert!(reason.contains("value"), "{reason}");
+    assert_eq!(err.code(), unblock_error::ErrorCode::SchemaMismatch);
     assert_lying_stamp_hint(&err.hint().expect("hint"), 2, true);
 
     follow_hint(&db, 2, true).await;
@@ -808,6 +811,56 @@ async fn a_seven_column_database_stamped_two_reaches_three_preserving_rows() {
     let conn = raw(&db).await;
     assert_eq!(columns(&conn, "comments").await.len(), 7);
     assert_eq!(columns(&conn, "config").await, vec!["key", "value"]);
+}
+
+/// **D57 criterion (l) — a GENUINE step failure keeps the stale-direction text.** A stamp-2
+/// seven-column database (the GA shape) that holds an INDEX named `config` makes step 3's `CREATE
+/// TABLE IF NOT EXISTS config` fail for real ("there is already an index named config" — `IF NOT
+/// EXISTS` only covers a table). The error is `SchemaMismatch` with EMPTY `gaps`, so `hint()` takes
+/// the stale-direction branch ("run `unblock migrate`"), never the lying-stamp text.
+///
+/// MUTANT KILLED: dispatching the hint on anything but `gaps.is_empty()` (e.g. `from != to`, which
+/// holds here too, or "always the lying-stamp text").
+#[tokio::test]
+async fn a_genuine_step_failure_has_empty_gaps_and_the_stale_direction_hint() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = tmp.path().join("unblock.db");
+    seed_historical(&db, 1).await;
+    {
+        let conn = raw(&db).await;
+        for column in STEP_TWO_COLUMNS {
+            conn.query(
+                &format!("ALTER TABLE comments ADD COLUMN {column} DATETIME"),
+                (),
+            )
+            .await
+            .expect("the seven-column shape stamp 2 always has");
+        }
+        conn.query("PRAGMA user_version = 2", ())
+            .await
+            .expect("stamp 2");
+        conn.execute("CREATE INDEX config ON issues (id)", ())
+            .await
+            .expect("an index squatting on the step-3 table name");
+    }
+
+    let err = migrate_err(&db).await;
+    let StorageError::Migration { from, to, gaps, .. } = &err else {
+        panic!("expected StorageError::Migration, got {err:?}");
+    };
+    assert_eq!((*from, *to), (2, 3));
+    assert!(
+        gaps.is_empty(),
+        "a step failure is not a lying stamp: {gaps:?}"
+    );
+    assert_eq!(err.code(), unblock_error::ErrorCode::SchemaMismatch);
+    let hint = err.hint().expect("hint");
+    assert!(
+        hint.contains("but this build expects") && hint.contains("Run `unblock migrate`"),
+        "the stale-direction text: {hint}"
+    );
+    assert!(!hint.contains("STAMP is what is wrong"), "{hint}");
+    assert!(!hint.contains("PRAGMA user_version"), "{hint}");
 }
 
 /// Step 3's DDL as the production ladder applies it — a FIXTURE copy, for seeding the stamp-3 twin.
