@@ -13,7 +13,7 @@
 //!   project parse accepts a file carrying any startup key (either `jsonl_filename` spelling) the
 //!   user load refuses it with `StartupKeyInRuntimeLayer { layer: User }` — never a panic and never a
 //!   silent accept; a `jsonl_export` is refused as `InvalidValue` naming it; a layer value outside
-//!   its per-key bounds (a blank or out-of-policy `actor`, a `search_cap` outside `1..=i64::MAX`) is
+//!   its per-key bounds (a non-blank out-of-policy `actor`, a `search_cap` outside `1..=i64::MAX`) is
 //!   refused as `InvalidValue` naming the key, so `unblock init`'s pre-check refuses every file the
 //!   open would; and otherwise the user load accepts the file and parses it to the identical
 //!   `ProjectConfig`.
@@ -239,13 +239,15 @@ fn check_user_layer(env: &MapEnv, project: &Result<ProjectConfig, ConfigError>) 
 
 /// The first LAYER key whose user-file value is out of the per-key bounds the user loader applies
 /// (PRD §4 D57 clause (6)) — judged independently through the public `canonicalize_runtime_value`,
-/// the same parser a `config set` value passes: `actor` first, then `search_cap`.
+/// the same parser a `config set` value passes: `actor` first (a BLANK actor is unset, as at every
+/// actor tier, so never out of bounds), then `search_cap`.
 fn out_of_bound_layer_key(config: &ProjectConfig) -> Option<&'static str> {
     let bad = |key: &str, raw: String| {
         let rk = classify_runtime_key(key).expect("a layer key");
         canonicalize_runtime_value(rk, &raw).is_err()
     };
     if let Some(actor) = &config.actor
+        && !actor.trim().is_empty()
         && bad("actor", actor.clone())
     {
         return Some("actor");
