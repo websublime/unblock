@@ -435,6 +435,18 @@ jobs:
       # including `d55`'s two. Positive-only by design, save one negative row. Specified in
       # ci-cd-and-distribution.md §2.1 (the D56 sub-check).
       - run: scripts/checks/d56-organization-claims.sh
+      # D57 (`ub-lp9.2`) required landings: FR-13 full — six config layers, the user and DB layers
+      # limited to the three layer keys with a typed startup-key refusal, the `issue` config action as
+      # the DB layer's writer, live reload and schema step 3. Every behaviour is a cell; this step
+      # asserts the positive: the model types and the one blocking predicate, the Storage config
+      # methods, schema step 3 with the sentinel's union and subject assertion, the config, engine,
+      # mcp, cli, error and fuzz production lines, every contract_config_ and config_ cell with the
+      # six-layer golden, the tracker id, the PRD row and its notes, the spine, the crate plans, both
+      # roadmaps, README, the task, the re-pointed and retargeted sibling rows, this gate's own wiring,
+      # the live contract id, and the live D-range at every prose site and every SIBLING script's knob
+      # — including `d56`'s two. Positive-only by design, save one negative row (no manifest names
+      # `directories`). Specified in ci-cd-and-distribution.md §2.1 (the D57 sub-check).
+      - run: scripts/checks/d57-config-layers-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
