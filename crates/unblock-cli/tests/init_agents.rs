@@ -271,9 +271,10 @@ fn config_init_refuses_a_bad_user_file_with_nothing_written() {
 }
 
 /// **D57 clause (6), "ANY user file the open would refuse fails `init` with NOTHING written"** —
-/// the layer-VALUE half: a user `search_cap = 0`, a blank actor and an over-long actor are refused
-/// by `init`'s `load_user_config` pre-check with exit 7, `CONFIG_ERROR` naming the key, and an
-/// EMPTY root (no `.unblock/`, no `config.toml`, no `unblock.db`, no `AGENTS.md`).
+/// the layer-VALUE half: a user `search_cap = 0` and an over-long actor are refused by `init`'s
+/// `load_user_config` pre-check with exit 7, `CONFIG_ERROR` naming the key, and an EMPTY root (no
+/// `.unblock/`, no `config.toml`, no `unblock.db`, no `AGENTS.md`). (A blank user actor is UNSET,
+/// as at every actor tier, so it is not a refusal.)
 ///
 /// MUTANT KILLED: dropping the user-file bound check (the open would then refuse the file after
 /// `init` had created `.unblock/`, `config.toml` and `unblock.db`).
@@ -282,7 +283,6 @@ fn config_init_refuses_an_out_of_bound_user_value_with_nothing_written() {
     let long_actor = format!("actor = \"{}\"\n", "a".repeat(201));
     for (contents, key) in [
         ("search_cap = 0\n", "search_cap"),
-        ("actor = \"   \"\n", "actor"),
         (long_actor.as_str(), "actor"),
     ] {
         let error = init_with_user_file(contents, "CONFIG_ERROR");

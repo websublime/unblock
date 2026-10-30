@@ -392,7 +392,7 @@ fn config_fault_line(runtime: &unblock_config::RuntimeConfig) -> Option<String> 
         .db_faults
         .iter()
         .filter(|f| f.fault.kind.is_blocking())
-        .map(|f| format!("`{}`", f.key.escape_default()))
+        .map(|f| format!("`{}`", unblock_error::clip(&f.key).escape_default()))
         .collect();
     let line = format!(
         "unblock: the workspace is fail-closed: the database config table holds a blocking row for \
@@ -500,30 +500,46 @@ mod tests {
 
     /// Spine §2.4 / NFR-14: a HOSTILE row — its value carrying ESC/OSC, a newline that forges an
     /// `error[` line and a megabyte of text, decoded the way the open decodes it — still yields ONE
-    /// printable line with no raw control character, no `error[` and no echo of the value.
+    /// printable line with no raw control character, no `error[` and no echo of the value. A BLOB
+    /// key (the marked spelling) is NAMED with its copy-pasteable JSON-escaped `unset` call, and an
+    /// over-long hand-written key is clipped and pointed to `config list` instead of echoed whole.
     #[test]
     fn config_fault_line_never_echoes_a_hostile_row_value() {
         let value = format!(
             "x\n error[FORGED]: pwned \u{1b}]52;c;aGk=\u{7}{}",
             "A".repeat(1 << 20)
         );
+        let marker = unblock_storage::NON_TEXT_CELL_MARKER;
+        let long_key = format!("{marker}blob:{}", "AB".repeat(1 << 16));
         let rows = vec![
+            (format!("{marker}blob:6B"), "1".to_string()),
+            (long_key, "1".to_string()),
             ("search_cap".to_string(), value),
-            (
-                format!("{}blob:6B", unblock_storage::NON_TEXT_CELL_MARKER),
-                "1".to_string(),
-            ),
         ];
         let runtime = RuntimeConfig {
             db_faults: unblock_config::decode_db_rows(&rows),
             ..RuntimeConfig::default()
         };
-        let line = config_fault_line(&runtime).expect("both rows block");
+        let line = config_fault_line(&runtime).expect("every row blocks");
         assert_eq!(line.lines().count(), 1, "{line:?}");
         assert!(!line.chars().any(char::is_control), "{line:?}");
         assert!(!line.contains("error["), "{line:?}");
-        assert!(!line.contains("FORGED") && line.len() < 4096, "{line:?}");
+        assert!(
+            !line.contains("FORGED") && line.len() < 8192,
+            "{}",
+            line.len()
+        );
         assert!(line.contains("`search_cap`"), "{line}");
+        // Reverting the marker decode turns the BLOB key into a non-blocking unknown key, which
+        // the line would then not name.
+        assert!(
+            line.contains(r#"issue {"action":"config","op":"unset","key":"\u0001blob:6B"}"#),
+            "the BLOB key's copy-pasteable repair: {line}"
+        );
+        assert!(
+            line.contains(r#"issue {"action":"config","op":"list"}"#),
+            "the over-long key points to config list: {line}"
+        );
     }
 
     /// The emitter actually WRITES the line to its sink (D39 visibility is only real if the bytes hit

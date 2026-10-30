@@ -232,8 +232,9 @@ fn pick_cli_format_to(
 }
 
 /// The ONE stderr line the [`FormatPass::OwnReport`] pass prints for a user file that fails to load.
-/// The error's message is folded onto that line (a TOML parse error spans several), and it never
-/// carries `error[`, because the command it accompanies succeeds.
+/// The error's message is sanitised and its whitespace folded, so the warning is always exactly one
+/// line whatever the path or message holds, and it never carries `error[`, because the command it
+/// accompanies succeeds.
 fn user_file_warning(err: &unblock_config::ConfigError) -> String {
     // NFR-14: through the ONE sanitising chokepoint before the fold, so no control byte from the
     // file's path or the parser's message reaches the terminal.
