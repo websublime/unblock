@@ -1,10 +1,11 @@
-//! Tool **#1 `issue`** — the 10-action issue lifecycle (spine §5.1/§5.2).
+//! Tool **#1 `issue`** — the 11-action issue lifecycle (spine §5.1/§5.2).
 //!
 //! Actions: `create` / `create_bulk` / `show` / `update` / `close` / `reopen` / `delete` / `restore`
-//! / `relabel` / `close_eligible`, mapped to `Session::{create_issue, create_bulk, get, update,
-//! close_with_suggestions, update, delete, restore, rename_label, close_eligible}`. `create_bulk`
-//! (D22) is the 8th ACTION — a discriminator arm on this ONE tool, so it does NOT grow the tool count
-//! (spine §5.1/§6.6); D56 appends `relabel` and `close_eligible` (FR-6) on the same rule.
+//! / `relabel` / `close_eligible` / `config`, mapped to `Session::{create_issue, create_bulk, get,
+//! update, close_with_suggestions, update, delete, restore, rename_label, close_eligible,
+//! config_*}`. `create_bulk` (D22) is the 8th ACTION — a discriminator arm on this ONE tool, so it
+//! does NOT grow the tool count (spine §5.1/§6.6); D56 appends `relabel` and `close_eligible`
+//! (FR-6) and D57 appends `config` (FR-13 full) on the same rule.
 //!
 //! - `create` maps [`IssueInput::Create`] → the engine-owned [`unblock_engine::NewIssue`] and calls
 //!   the **MINTING** `Session::create_issue` (D21 — the engine mints the id under the write permit).
@@ -18,6 +19,11 @@
 //!   `close_eligible` (D56) → `Session::close_eligible(dry_run)` → `IssueOutput::CloseEligible`,
 //!   whose list key is `epic_ids`, never `close`'s `closed`. Both flatten the discarded
 //!   `Attribution` (D52).
+//! - `config` (D57) → `Session::config_{get,list,set,unset}` by `op` → `IssueOutput::Config`
+//!   (`{"config":[ConfigEntry…]}`). The per-op field rule (`key` required for get/set/unset and
+//!   forbidden for list; `value` required for set and forbidden otherwise) is an ADAPTER rule,
+//!   checked before the engine is called — `VALIDATION_FAILED` with one field error, zero writes by
+//!   construction. The key/value VALUES are validated in the engine (`CONFIG_ERROR`).
 
 use chrono::{DateTime, Utc};
 // D42 SEAM: this is the CRATE-LOCAL `Parameters` (`crate::tools::args`), NOT rmcp's. It defers
@@ -30,15 +36,17 @@ use rmcp::schemars::JsonSchema;
 use rmcp::tool;
 use serde::{Deserialize, Serialize};
 use unblock_engine::{DeleteMode, DeletePlan, IssuePatch, NewIssue};
-use unblock_error::{ErrorCode, StructuredError, clip};
+use unblock_error::{ErrorCode, FieldError, ModelError, StructuredError, clip};
 use unblock_model::{IssueType, Priority, Status};
 
 use crate::server::UnblockServer;
 use crate::tools::dto::{Attribution, DepInput};
-use crate::tools::output::{DeleteModeOutput, DeletePlanOutput, IdOnly, IssueList, IssueOutput};
+use crate::tools::output::{
+    ConfigList, DeleteModeOutput, DeletePlanOutput, IdOnly, IssueList, IssueOutput,
+};
 use crate::tools::{engine_err_json, err_json, ok_json};
 
-/// The `issue` tool input (spine §5.2 — EXACT shape; 10 actions).
+/// The `issue` tool input (spine §5.2 — EXACT shape; 11 actions).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 // §5.2a (CD-1): inject the root `"type": "object"` so the published inputSchema is MCP-conformant. A
@@ -171,6 +179,88 @@ pub(crate) enum IssueInput {
         #[serde(flatten)]
         attribution: Attribution,
     },
+    /// Get, set, unset or list the runtime configuration the database `config` table holds — the
+    /// layer keys `actor`, `output_format` and `search_cap` (D57).
+    //
+    // D57 — APPENDED LAST (declaration order is hash-visible). `op` is a plain field, not a nested
+    // tag (serde cannot combine `flatten` with `deny_unknown_fields`, D42), so the per-op field rule
+    // is an adapter rule; the `///` docs of `key` and `value` state it, so the published schema and
+    // the `AGENTS.md` digest carry it.
+    Config {
+        /// The configuration operation.
+        op: ConfigOp,
+        /// The configuration key. Required for get, set and unset; omit for list.
+        #[serde(default)]
+        key: Option<String>,
+        /// The value to store. Required for set; omit otherwise.
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(flatten)]
+        attribution: Attribution,
+    },
+}
+
+/// The `config` action's operation (D57).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConfigOp {
+    /// Read one key: its database row, the value this session resolved and the layer that supplied it.
+    Get,
+    /// Store a layer key's value in the database and reload the session's runtime configuration.
+    Set,
+    /// Remove a key's database row and reload the session's runtime configuration.
+    Unset,
+    /// List the layer keys plus every other key a database row holds.
+    List,
+}
+
+impl ConfigOp {
+    /// The op's wire spelling.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Set => "set",
+            Self::Unset => "unset",
+            Self::List => "list",
+        }
+    }
+}
+
+/// The D57 per-op field rule — an ADAPTER rule (spine §5.2), checked before the engine is called, so
+/// a violation persists nothing BY CONSTRUCTION (the D44 adapter-rejection shape): `key` is REQUIRED
+/// for get/set/unset and FORBIDDEN for list; `value` is REQUIRED for set and FORBIDDEN otherwise.
+///
+/// # Errors
+///
+/// `VALIDATION_FAILED` carrying ONE field error on `key` or `value`, with a hint stating the rule.
+fn config_fields(
+    op: ConfigOp,
+    key: Option<String>,
+    value: Option<String>,
+) -> Result<(Option<String>, Option<String>), StructuredError> {
+    let key_wanted = op != ConfigOp::List;
+    let value_wanted = op == ConfigOp::Set;
+    let violation = match (key.is_some(), value.is_some()) {
+        (false, _) if key_wanted => Some(("key", "is required")),
+        (true, _) if !key_wanted => Some(("key", "must be omitted")),
+        (_, false) if value_wanted => Some(("value", "is required")),
+        (_, true) if !value_wanted => Some(("value", "must be omitted")),
+        _ => None,
+    };
+    match violation {
+        None => Ok((key, value)),
+        Some((field, rule)) => {
+            let op = op.name();
+            let err = ModelError::ValidationFailed {
+                fields: vec![FieldError::new(field, format!("{rule} for op `{op}`"))],
+            };
+            Err(StructuredError::from(&err).with_hint(
+                "the `config` action's fields depend on `op`: `key` is required for get, set and \
+                 unset and omitted for list; `value` is required for set and omitted otherwise. \
+                 NOTHING was written by this call.",
+            ))
+        }
+    }
 }
 
 /// The `create` action payload (boxed in [`IssueInput::Create`]).
@@ -370,10 +460,10 @@ fn create_dep_source_rejected(index: usize, source: &str) -> StructuredError {
 
 #[rmcp::tool_router(router = issue_router, vis = "pub(crate)")]
 impl UnblockServer {
-    /// Create, inspect, or mutate issues (the 10-action issue lifecycle, FR-1a/1b/1c, FR-6).
+    /// Create, inspect, or mutate issues (the 11-action issue lifecycle, FR-1a/1b/1c, FR-6, FR-13).
     #[tool(
         name = "issue",
-        description = "Create, show, update, close, reopen, delete, restore, relabel, or close_eligible issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
+        description = "Create, show, update, close, reopen, delete, restore, relabel, or close_eligible issues, or get, set, unset and list runtime configuration with config. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them."
     )]
     pub(crate) async fn issue(&self, Parameters(raw, _): Parameters<IssueInput>) -> CallToolResult {
         // D42 PROLOGUE: the ONLY deserialization of tool arguments. The NFR-18 quota already
@@ -533,6 +623,43 @@ impl UnblockServer {
                 Ok(outcome) => ok_json(&IssueOutput::CloseEligible(outcome)),
                 Err(err) => engine_err_json(&err),
             },
+            IssueInput::Config {
+                op,
+                key,
+                value,
+                attribution: _,
+            } => self.config_action(op, key, value).await,
+        }
+    }
+}
+
+impl UnblockServer {
+    /// The `config` action (D57): the per-op field rule at the adapter (zero writes on a violation),
+    /// then the matching `Session::config_*` call, CD-2 object-wrapped as `{"config":[…]}`.
+    async fn config_action(
+        &self,
+        op: ConfigOp,
+        key: Option<String>,
+        value: Option<String>,
+    ) -> CallToolResult {
+        let (key, value) = match config_fields(op, key, value) {
+            Ok(fields) => fields,
+            Err(structured) => return err_json(&structured),
+        };
+        let key = key.unwrap_or_default();
+        let result = match op {
+            ConfigOp::Get => self.session.config_get(&key).await.map(|e| vec![e]),
+            ConfigOp::List => self.session.config_list().await,
+            ConfigOp::Set => self
+                .session
+                .config_set(&key, value.as_deref().unwrap_or_default())
+                .await
+                .map(|e| vec![e]),
+            ConfigOp::Unset => self.session.config_unset(&key).await.map(|e| vec![e]),
+        };
+        match result {
+            Ok(config) => ok_json(&IssueOutput::Config(ConfigList { config })),
+            Err(err) => engine_err_json(&err),
         }
     }
 }
