@@ -29,10 +29,9 @@ async fn session_with_rows(rows: &[(&str, &str)]) -> (Arc<Session>, Arc<Recordin
     for (key, value) in rows {
         inner.set_config(key, value).await.expect("seed row");
     }
-    let owned: Vec<(String, String)> = rows
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-        .collect();
+    // The faults the open would record: decoded from the rows AS STORAGE READS THEM BACK (a
+    // marker-led key reads back in its marked spelling).
+    let owned = inner.read_config().await.expect("read rows back");
     let inner: Arc<dyn Storage> = Arc::new(inner);
     let spy = RecordingStorage::new(inner);
     let spy_dyn: Arc<dyn Storage> = spy.clone();
@@ -42,6 +41,60 @@ async fn session_with_rows(rows: &[(&str, &str)]) -> (Arc<Session>, Arc<Recordin
         .await
         .expect("open session");
     (Arc::new(session), spy)
+}
+
+/// D57 (2a) end to end over the wire — the REPAIR-BY-MARKER path: a hand-written row whose key
+/// storage reads back in its MARKED spelling (`\u0001text:<HEX>`) gates every tool call with a hint
+/// naming that exact JSON-escaped key; `config list` reports it with its `invalid_value` fault; the
+/// hinted `config unset` (the marker in the JSON key as `\u0001`) deletes the row; and the very next
+/// call on the SAME session succeeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_a_marked_key_is_repaired_by_its_hinted_unset() {
+    let (session, spy) = session_with_rows(&[("\u{1}k", "1")]).await;
+    let (client, server, _cancel) = connect(session).await;
+    let marked = "\u{1}text:016B";
+    let hint_call = r#"issue {"action":"config","op":"unset","key":"\u0001text:016B"}"#;
+
+    let (is_error, payload) = call_tool(&client, "query", json!({"kind":"ready"})).await;
+    assert!(is_error, "{payload}");
+    assert_eq!(payload["context"]["keys"], json!([marked]), "{payload}");
+    assert!(
+        payload["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(hint_call),
+        "{payload}"
+    );
+
+    let (is_error, payload) =
+        call_tool(&client, "issue", json!({"action":"config","op":"list"})).await;
+    assert!(!is_error, "{payload}");
+    let row = payload["config"]
+        .as_array()
+        .expect("list")
+        .iter()
+        .find(|e| e["key"] == json!(marked))
+        .cloned()
+        .expect("the marked row is listed");
+    assert_eq!(row["fault"]["kind"], json!("invalid_value"), "{row}");
+
+    let (is_error, payload) = call_tool(
+        &client,
+        "issue",
+        serde_json::from_str(r#"{"action":"config","op":"unset","key":"\u0001text:016B"}"#)
+            .expect("the hint's call parses"),
+    )
+    .await;
+    assert!(!is_error, "the hinted repair runs: {payload}");
+    assert!(
+        spy.read_config().await.expect("read").is_empty(),
+        "the row is deleted"
+    );
+    let (is_error, payload) = call_tool(&client, "query", json!({"kind":"ready"})).await;
+    assert!(!is_error, "the very next call succeeds: {payload}");
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
 }
 
 /// D57 (j) over the wire: `list` on an empty table is the three layer keys in key order, each
