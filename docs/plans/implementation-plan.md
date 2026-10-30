@@ -610,12 +610,112 @@
   `scripts/checks/*.sh`, on EVERY commit of the branch, the spec commit included. Both gates >=3 agents; Claude
   opens the PR, a human merges.)*
 
+- **T4.2 — FR-13 full: the user and DB config layers, the enforced startup/runtime partition, live reload of the
+  runtime keys, and the `issue` tool's `config` action. Implements D57 (v1.1, one additive contract bump
+  `unblock.mcp.v1.11` → `unblock.mcp.v1.12`, one schema step `2` → `3`).** The design is normative in the **D57 PRD §4
+  row**, FR-13's `[D57]` note and AC, the D10 and D46 `[D57]` notes, spine §1.10 (`ConfigEntry`/`ConfigSource`/the fault types), spine §2.1
+  (`ConfigError` `[D57]`), spine §3.2 (the config-table methods and clause (v)'s `[D57]` note), spine §3.2.1 "Config
+  table (D57", the EventType-per-mutation table's config row, spine §4's `[D57]` `ResolvedConfig` note and "Layered
+  configuration — FR-13 full (D57" block, spine §4.1's `[D57]` Session note and runtime-configuration block, spine §5.1
+  row 1, spine §5.2's `Config` arm, spine §5.3's `Config(ConfigList)` arm, the spine §5.4 D57 ledger entry and
+  spine §6.6, the config, storage, engine, mcp, model, cli, fuzz and
+  health crate plans, and ci-cd §2.1's D57 paragraph — **read those before implementing; this bullet is a checklist of
+  touched sites and never the spec.** Tracked as `ub-lp9.2`; `jsonl_export` stays out of the user/DB layers and the `config` action (its FR-7
+  auto-export consumer is `ub-p1h`); `ub-lp9.44`, `ub-lp9.40` and the REMOTE-mode meaning of a
+  DB row (v1.3 lock) are OUT of scope. ONE PR. **DAG:** depends on T1.3 (the v1 resolver), T3.1 (the cli no-workspace
+  format path), D46's ladder (`ub-lp9.13`) and T4.1 (its `acquire()` promotion and the `unblock.mcp.v1.11` baseline the
+  bump starts from); blocks nothing inside v1.1 (FR-19's `policy_path()` shares this crate but is independent). The
+  SPEC commit first (D57, the `.unblock/issues.jsonl` re-export carrying `ub-p1h` — the tracker id D57's error text
+  cites — as D53 did for `ub-zja`, the D-range bump `D1..D56` → `D1..D57`, ci-cd §2.1(a) and its D57 paragraph with the D53,
+  D54, D55 and D56 newest-pointer sentences retargeted, `docs/PROCESS.md` §3's list entry and NEWEST pointer with
+  `d53` `Q53`, `d54` `Q67`/`Q72`, `d55` `Q78`/`Q80`/`Q81`/`Q82` and `d56` `Q101`/`Q103`–`Q109` retargeted and `d56`
+  `Q102`'s requirement reworded, this task), then the IMPLEMENTATION commit (code, doc comments, the schema step with
+  `BLESSED_SCHEMA_CONTENT_DIGEST` re-blessed, the `d46-schema-migration-claims.sh` `P3`/`P4` rows and their
+  ci-cd §2.1 D46 description re-pointed at the step-3 sentinel assertion and `= 3`, the `d56-organization-claims.sh`
+  `Q26`/`Q27` rows re-pointed at `restore, relabel, or close_eligible issues[.,]` (the `issue` description now continues
+  past `issues`), each re-pointed row's reason naming D57, the contract bump with `CONTRACT_HASH`
+  re-pinned and the `capabilities`/`schema_bundle` goldens re-blessed, `tests/public_api.rs`, the `crates/unblock-mcp/tests/organization.rs` live-id assert, `unblock agents` RE-RUN
+  so the root `AGENTS.md` carries `unblock.mcp.v1.12` and the `config` action, the `init_agents` snapshot and the
+  `agents.rs` asserts, README's contract id and tool table, the unblock-mcp plan's `CONTRACT_VERSION` row, and every
+  claims script's `CONTRACT_RE` knob), then the TEST commit (the new cells and goldens), then a `ci(d57)` commit that
+  mints `scripts/checks/d57-config-layers-claims.sh` executable and wires it, then the tracker commit (Track step:
+  the run-report, the `.unblock/issues.jsonl` re-export and the `ub-lp9.2` comment thread). Every commit of the branch
+  passes the workspace suite in CI (locally only targeted tests, `docs/PROCESS.md` §4). Scope: (0) `unblock-error` — `ErrorCode::hint_shape`'s `ContextualText` arm gains `Self::ConfigError`
+  (`src/code.rs`, its doc comment's "remaining 30 of 36" → 29), the `hint_shape_counts_are_the_honest_map` tally in
+  `tests/exit_code_table.rs` (`ContextualText` 2 → 3, `None` 30 → 29), the re-blessed
+  `exit_code_table__golden_exit_code_table.snap`, and the unblock-error plan's `[D57]` note; (1) `unblock-model` —
+  `ConfigEntry`, `ConfigSource`, `ConfigFault`, `ConfigFaultKind`, `DbConfigFault` in `src/results.rs` with `JsonSchema`
+  snapshots; (2) `unblock-storage` — schema step 3
+  (`MigrationKind::Sql` running `CREATE TABLE IF NOT EXISTS config`, `#[expect(dead_code)]` removed,
+  `CURRENT_SCHEMA_VERSION = 3`, the sentinel extended to the UNION of `COMMENTS_STEP_COLUMNS` and
+  `CONFIG_STEP_COLUMNS`, `StorageError::Migration` gaining `gaps: Vec<SchemaGap>` (every construction site; empty on step
+  failures) with `hint()` dispatching the lying-stamp text on `!gaps.is_empty()` instead of `from == to` and branching
+  per gap, the sentinel-subject const assertion re-bound, `a_lying_stamp_is_refused_naming_the_missing_column` KEPT on
+  its stamp-2 seed (now reaching the sentinel with `from = 2`, `to = 3`) plus a stamp-3 twin and one follow-the-hint
+  cell per gap branch, the per-step reason strings (version 2 for `comments`, 3 for `config`) and
+  the `schema_version_is_two` test renamed for 3), `read_config`/`set_config`/`unset_config` on the trait, in libsql and
+  in ALL TWELVE `impl Storage` blocks (`RecordingStorage`'s two mutations call `record()`), the `contract_config_…`
+  cells registered in `run_storage_contract_suite`, and the NFR-19 seed-stamp-2 (seven-column `comments`)
+  migration cell in `tests/migrations.rs`; (3) `unblock-config` — `user_config.rs`, `db_layer.rs`, `reload.rs` (`ConfigReloader`,
+  `classify_runtime_key`, `canonicalize_runtime_value`), the six-arm `ConfigLayer` (staying `pub(crate)`), `StartupConfig`/
+  `RuntimeConfig`/`RuntimeSources` with `ResolvedConfig { startup, runtime }` and the contexts' `actor` moved, the
+  two-phase storage-bearing open (`read_config` failures as `DbOpenFailed`) with the TOLERANT DB decode and
+  `RuntimeConfig.db_faults`, `ConfigReloader` (`Clone`) with `new` + `Default`, the `#[doc(hidden)]` `open_with_storage_with_env`/
+  `open_workspace_with_env(start, cli, env)` test entries (with the walk-up `start`), the public pure `decode_db_rows`, the public `load_user_config` (the single home of every user-file refusal — parse,
+  credential, startup key, `jsonl_export`)/`user_output_format`
+  entries and the `ProcessEnv` re-export, the seven-tier trimmed actor chain, the `search_cap` bound `1..=i64::MAX` on
+  every layer, the absolute-`HOME` rule, `classify`'s `jsonl_export_filename` alias, the three-key LAYER set (`jsonl_export` refused in the user file and the
+  `config` action, a fault in a DB row), the three `ConfigError` variants
+  (`FaultyDbConfig` with its hint) with the error golden, the internal `&dyn EnvSource` open seam, `tests/precedence.rs` grown to six layers WITH the golden `insta`
+  resolution it lacked; (4) `unblock-engine` — `src/session/config.rs`, the `runtime` snapshot field, `runtime()`,
+  `actor()` owned, `SessionConfig.jsonl_export` deleted (with its `mod.rs` unit test and `tests/lifecycle.rs` use), `EngineError::Config`, every mutation reading the snapshot
+  once after `acquire()` (`add_dep` stamping `created_by`, `add_comment` validating after `acquire()`), the
+  fail-closed gate on every fallible data/diagnostic method (exempt: `open`, the four `config_*`, `shutdown`), the
+  always-swap `config_set`/`config_unset` (the no-write `unset` of a faulted key included), the poison-tolerant lock,
+  the spawned commit+swap tail owning the `MutationGuard` (`Send + 'static` asserted; `JoinError` panic re-raised,
+  cancellation → `ShutdownInProgress`), `get`/`list` deriving `fault` from the rows they read via `decode_db_rows`, `unset` reading the rows before it
+  classifies the key, `read.rs`'s search cap from the snapshot; (5) `unblock-mcp` — the `Config` input arm and
+  `ConfigOp`, the `Config(ConfigList)` output arm, both description twins, the adapter's per-op field rule and its `///` field
+  docs, `tools/dep.rs` no longer stamping `created_by`, the duplicate-key corpus's `op` escalation cell, and the `CONTRACT_VERSION`/`CONTRACT_HASH` move; (6) `unblock-cli` — `pick_cli_format`'s
+  `EnvSource` and `FormatPass { ErrorPrePass, OwnReport }` parameters and user tier (the `lib.rs` pre-pass always silent,
+  `version`'s own pass the only warning), `init`'s
+  `load_user_config` pre-check before any write and its post-open `is_blocking()` fault check before any `--agents`
+  write, the `mcp` command's fault startup line, the test harness's empty
+  `XDG_CONFIG_HOME`/`HOME` with `the_harness_scrubs_every_discovery_and_format_env` extended to both and the
+  `init_agents.rs` `sh` spawn setting them, the in-process facade callers (`tests/cli_engine_parity.rs`,
+  `migrate_doctor.rs`, `shutdown_failure_injection.rs`, `tests/common/mod.rs`) moved to `open_with_storage_with_env`, `dispatch.rs`'s `jsonl_export`/`actor` reads, the `migrate` literals and snapshots for 3; (7)
+  `unblock-fuzz` — the `config_toml` target the fuzz plan claimed and the tree lacks, over both TOML layers; (8)
+  `unblock-sync` — its two `FakeStorage`s and `StorageInjector` forward the three methods (tests only). **Every
+  `WorkspaceContext` struct literal moves `actor` into `config.runtime` and gains a `reloader` that reproduces its
+  snapshot — `ConfigReloader::new(CliOverrides::default(), EnvOverrides::default(), Some(<that actor>), None, None)` — the actor at the
+  `$USER` tier with `sources.actor = OsUser`, so a `config_set` in the harness keeps it while a DB `actor` row still
+  overrides it — where the actor is not the default, `ConfigReloader::default()` otherwise:** `crates/unblock-engine/tests/common/mod.rs:56`, `tests/id_minting.rs:395`, `tests/scale.rs:58`,
+  `tests/lifecycle.rs:361`, `tests/bin/engine_write_lock_race.rs:280`, `benches/engine.rs:91` and the `src/lib.rs:59`
+  doctest; `crates/unblock-mcp/tests/common/mod.rs:39`, `:76`, `:823`, `:1135` and `src/server.rs:682`;
+  `crates/unblock-cli/src/dispatch.rs:72` (line numbers at `533453a`). The other compiler-guided moves: `ctx.actor` reads in
+  `crates/unblock-config/tests/open_workspace.rs`, `ctx.config.output_format` in the cli `doctor.rs`, `init.rs` and
+  `migrate.rs` (→ `config.runtime.output_format`), `Session::actor()` callers in `interchange.rs` (owned `String`), and
+  `read.rs`'s `self.config.search_cap` (→ the runtime snapshot). *(AC: PRD §4
+  D57 clause (12) (a) ORDER, (b) STARTUP ORDER, (c) USER STARTUP REFUSAL, (d) DB FAULT GATE, (d2) GATE EXEMPTIONS, (d3) CROSS-PROCESS REPAIR, (d4) INIT, (e) NON-LAYER `jsonl_export`, (e2) UNKNOWN KEYS,
+  (f) USER PATH, (g) ACTOR CHAIN, (h) SET AND RELOAD, (i) VALIDATION BEFORE COMMIT, (j) SHADOW AND SHAPES, (k) LOCKING AND CANCELLATION, (l)
+  SCHEMA, (m) STORAGE CONTRACT, (n) FACADES and (o) CONTRACT, each by at least one named cell; plus (p) GATE — the
+  script is executable, wired, carries the live range and the live contract knob, pins every older sibling's knobs
+  with `d56`'s two included and none of its own, names every row ci-cd §2.1's D57 paragraph lists, and every row
+  asserting a NEW landing FAILS on the PRE-FIX TREE, `main` at `533453a`, the tree before this decision's spec commit;
+  exactly THREE rows pass there by design, because they pin what already holds: the P row (`ub-lp9.2` is already
+  exported), the negative `directories` row (no manifest names that crate today) and the `COMMENTS_STEP_COLUMNS`-read
+  row (the sentinel already witnesses step 2; the row pins that the union KEEPS it); (q) PROBE — `cargo fmt --check`,
+  clippy pedantic, `cargo test --workspace` (CI), `cargo insta test --check`, `cargo xtask doc-lint`,
+  `cargo xtask check-layering`, `cargo xtask no-network`, `cargo xtask knowledge-lint`, `cargo deny check` (no new
+  crate — no `directories`) and every `scripts/checks/*.sh`, on EVERY commit of the branch, the spec commit included.
+  Both gates >=3 agents; Claude opens the PR, a human merges.)*
+
 ## 6. MCP surface — concrete v1 taxonomy (closes PRD §12.2)
 
 Consolidated to keep the client tool list small (target **≤ 8 tools**); read-heavy state is exposed as resources.
 
 **Tools**
-1. `issue` — `action`: create | create_bulk | show | update | close | reopen | delete | restore (+ quick-create via `create` returning id only; `restore` is SINGLE-ID scalar per D20 → `Session::restore(id)`, FR-1c; `create_bulk` per D22). **v1.1 (D56) appends** `relabel` | `close_eligible`. [FR-1a/1b/1c, FR-6]
+1. `issue` — `action`: create | create_bulk | show | update | close | reopen | delete | restore (+ quick-create via `create` returning id only; `restore` is SINGLE-ID scalar per D20 → `Session::restore(id)`, FR-1c; `create_bulk` per D22). **v1.1 (D56) appends** `relabel` | `close_eligible`; **v1.1 (D57) appends** `config` (`op`: get | set | unset | list — the FR-13 DB-layer writer). [FR-1a/1b/1c, FR-6, FR-13]
 2. `claim` — atomic assignee + in_progress. [FR-2]
 3. `defer` — `action`: defer | undefer. [FR-3]
 4. `query` — `kind`: list | ready | blocked | search | count | stale (+ filters). **v1.1 (D56) appends** `labels` | `epics`. [FR-4, FR-6]
@@ -630,7 +730,7 @@ Consolidated to keep the client tool list small (target **≤ 8 tools**); read-h
 **Prompts**
 - `triage`, `plan_next_work`, `close_with_suggestions`. [FR-20]
 
-*(**[D56]** v1.1 adds NO tool: the budget is full at 8 (spine §6.6), so scheduler, coordination, gates and saved-queries extend existing tools by discriminator, and the FR-6 remainder is the four D56 arms above. Comments shipped in v1 as tool 8, D37.)*
+*(**[D56]** v1.1 adds NO tool: the budget is full at 8 (spine §6.6), so scheduler, coordination, gates and saved-queries extend existing tools by discriminator, and the FR-6 remainder is the four D56 arms above. **[D57]** The FR-13 DB-layer writer is the one `issue` `config` arm above. Comments shipped in v1 as tool 8, D37.)*
 
 ## 7. Cross-cutting (all milestones)
 
@@ -657,4 +757,4 @@ M2 → {T3.1 cli, T3.2 shutdown, T3.3 health-lite, T3.4 reliability, T3.5 perf} 
 
 ## 9. Definition of done (v1)
 
-All M0–M3 exit gates green; every v1-tier FR meets its AC (PRD §5); NFR ship-gates (NFR-1/2/3/4/5/6/9/10/11/12/13/14/15/16/17/18) pass; the dogfood gate met (unblock manages its own issues, imported from `bd` via FR-26). v1.1 backlog: FR-6 (remainder — T4.1, D56), FR-13(full), FR-16(full), FR-18, FR-19, FR-21, FR-22, FR-23, TOON. (FR-25 self-update moved to v1 via dist/axoupdater, D17.)
+All M0–M3 exit gates green; every v1-tier FR meets its AC (PRD §5); NFR ship-gates (NFR-1/2/3/4/5/6/9/10/11/12/13/14/15/16/17/18) pass; the dogfood gate met (unblock manages its own issues, imported from `bd` via FR-26). v1.1 backlog: FR-6 (remainder — T4.1, D56), FR-13(full — T4.2, D57), FR-16(full), FR-18, FR-19, FR-21, FR-22, FR-23, TOON. (FR-25 self-update moved to v1 via dist/axoupdater, D17.)
