@@ -11,6 +11,9 @@
 //! parent whose last open child is an eligible epic reads ineligible there, exactly as
 //! `stats.epics_eligible` counts it), while `close_eligible` closes the CASCADE
 //! ([`crate::epic::cascade_close_set`]) and its dry run is the cascade preview.
+//!
+//! D57 clause (2a): every method applies the fail-closed gate first — the two mutations on the
+//! post-acquire snapshot whose actor they then write with (spine §4.1 actor discipline).
 
 use unblock_error::{FieldError, ModelError};
 use unblock_model::{
@@ -34,6 +37,7 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure as the transparent `EngineError` source.
     pub async fn list_all_labels(&self) -> Result<Vec<LabelCount>> {
+        self.gated_runtime()?;
         Ok(self.storage.list_all_labels().await?)
     }
 
@@ -63,10 +67,12 @@ impl Session {
         }
 
         let affected_issues = if old == new {
+            // No permit and no transaction — but still a call on the workspace, so it is gated.
+            self.gated_runtime()?;
             0
         } else {
-            let _guard = self.acquire().await?;
-            self.storage.rename_label(old, new, &self.actor).await?
+            let (_guard, runtime) = self.acquire_mutation().await?;
+            self.storage.rename_label(old, new, &runtime.actor).await?
         };
         Ok(LabelRename {
             old_name: old.to_string(),
@@ -97,6 +103,7 @@ impl Session {
         id: Option<&str>,
         eligible_only: bool,
     ) -> Result<Vec<EpicStatus>> {
+        self.gated_runtime()?;
         let epics = match id {
             None => {
                 // `include_deferred` without `include_closed`: closed + tombstone excluded, every
@@ -179,7 +186,7 @@ impl Session {
     /// # Errors
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source.
     pub async fn close_eligible(&self, dry_run: bool) -> Result<CloseEligibleOutcome> {
-        let _guard = self.acquire().await?;
+        let (_guard, runtime) = self.acquire_mutation().await?;
         let candidates = self.epic_statuses(None, false).await?;
         let cascade = epic::cascade_close_set(&candidates);
 
@@ -187,7 +194,7 @@ impl Session {
             cascade
         } else {
             self.storage
-                .close_issues(&cascade, CLOSE_ELIGIBLE_REASON, &self.actor)
+                .close_issues(&cascade, CLOSE_ELIGIBLE_REASON, &runtime.actor)
                 .await?
         };
         Ok(CloseEligibleOutcome {

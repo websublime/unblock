@@ -45,7 +45,8 @@ impl Session {
     ///   `new.slug` — the `<prefix>-<slug>-<hash>` form (falling back to hash-only on an empty slug or
     ///   an exhausted prefix budget).
     ///
-    /// `created_at` and `creator` feed the hash seed; the prefix is config-derived
+    /// `created_at` and `creator` (the caller's post-acquire snapshot actor, D57) feed the hash
+    /// seed; the prefix is config-derived
     /// (`self.config.id_prefix`, already `normalize_prefix`-normalized by config).
     ///
     /// # Errors
@@ -175,7 +176,7 @@ impl Session {
         issue_count: usize,
         minted: &HashSet<String>,
     ) -> Result<String> {
-        let normalized = normalize_slug_for_prefix(slug, &self.config.startup.id_prefix);
+        let normalized = normalize_slug_for_prefix(slug, &self.config.id_prefix);
         if normalized.is_empty() {
             // Budget-exhausted drop trigger #1: the prefix alone leaves no room for any slug.
             return self.allocate_hash_id(new, issue_count, minted).await;
@@ -184,8 +185,8 @@ impl Session {
         let mut length = optimal_hash_length(issue_count);
         loop {
             for nonce in 0..10 {
-                let hash = compute_id_hash(&self.seed(new, nonce), length);
-                let id = format!("{}-{normalized}-{hash}", self.config.startup.id_prefix);
+                let hash = compute_id_hash(&Self::seed(new, nonce), length);
+                let id = format!("{}-{normalized}-{hash}", self.config.id_prefix);
                 if !self.exists(&id, minted).await? {
                     return Ok(id);
                 }
@@ -209,8 +210,8 @@ impl Session {
     ) -> Result<String> {
         let mut nonce = 0u32;
         loop {
-            let hash = compute_id_hash(&self.seed(new, nonce), FALLBACK_HASH_LENGTH);
-            let id = format!("{}-{hash}", self.config.startup.id_prefix);
+            let hash = compute_id_hash(&Self::seed(new, nonce), FALLBACK_HASH_LENGTH);
+            let id = format!("{}-{hash}", self.config.id_prefix);
             if !self.exists(&id, minted).await? {
                 return Ok(id);
             }
@@ -219,7 +220,7 @@ impl Session {
 
             // Past 1000 collisions, append the nonce to force uniqueness.
             if nonce > DESPERATE_NONCE {
-                let desperate = format!("{}-{hash}{nonce}", self.config.startup.id_prefix);
+                let desperate = format!("{}-{hash}{nonce}", self.config.id_prefix);
                 if !self.exists(&desperate, minted).await? {
                     return Ok(desperate);
                 }
@@ -227,23 +228,23 @@ impl Session {
 
             // Hard stop at 2000 (a broken existence probe must not spin forever).
             if nonce > HARD_STOP_NONCE {
-                return Ok(format!("{}-{hash}{nonce}", self.config.startup.id_prefix));
+                return Ok(format!("{}-{hash}{nonce}", self.config.id_prefix));
             }
         }
     }
 
     /// Build a `<prefix>-<hash>` candidate at `(nonce, length)`.
     fn hash_candidate(&self, new: &NewIssueSeed<'_>, nonce: u32, length: usize) -> String {
-        let hash = compute_id_hash(&self.seed(new, nonce), length);
-        format!("{}-{hash}", self.config.startup.id_prefix)
+        let hash = compute_id_hash(&Self::seed(new, nonce), length);
+        format!("{}-{hash}", self.config.id_prefix)
     }
 
     /// The length-prefixed seed for `new` at `nonce`, carrying the resolved actor as `creator` (D21).
-    fn seed(&self, new: &NewIssueSeed<'_>, nonce: u32) -> String {
+    fn seed(new: &NewIssueSeed<'_>, nonce: u32) -> String {
         generate_id_seed(
             new.title,
             new.description,
-            Some(&self.actor),
+            Some(new.creator),
             new.created_at,
             nonce,
         )
@@ -272,6 +273,9 @@ pub(crate) struct NewIssueSeed<'a> {
     pub parent: Option<&'a str>,
     /// `Some(slug)` mints `<prefix>-<slug>-<hash>` (subject to the budget); `None` mints hash-only.
     pub slug: Option<&'a str>,
+    /// The creating actor — the mutation's post-acquire runtime snapshot actor (D57 actor
+    /// discipline), hashed into the seed (D21).
+    pub creator: &'a str,
     /// The creation timestamp (hashed into the seed).
     pub created_at: DateTime<Utc>,
 }

@@ -9,8 +9,17 @@
 //!
 //! `close_with_suggestions` closes the issue then computes the **newly-unblocked** set via the
 //! `unblock_policy` free functions over caller-built `ReadyContext`s (OQ-1; no policy handle).
+//!
+//! **D57 actor discipline (spine §4.1).** Every mutation goes through [`Session::acquire_mutation`],
+//! which takes the runtime snapshot ONCE, AFTER the permit and the `.write.lock`, applies the clause
+//! (2a) fail-closed gate to it, and hands it back; the mutation uses THAT snapshot's actor for every
+//! validation, row and event it writes. Because `config_set`/`config_unset` hold the same guard, a
+//! reload never lands inside a mutation, so one mutation never mixes two actors.
+
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use unblock_config::RuntimeConfig;
 use unblock_model::{
     Comment, CommentValidator, Dependency, DependencyType, Issue, IssueType, IssueValidator,
     Priority, Status,
@@ -128,6 +137,19 @@ impl Session {
         Ok(MutationGuard::new(lock, permit))
     }
 
+    /// [`acquire`](Session::acquire), then take the runtime snapshot ONCE and apply the D57 clause
+    /// (2a) fail-closed gate to it (spine §4.1 actor discipline). Every mutation calls this and uses
+    /// the returned snapshot's actor throughout; the guard is dropped (released) on a gate refusal.
+    ///
+    /// # Errors
+    /// As [`acquire`](Session::acquire), plus [`EngineError::Config`] (`FaultyDbConfig`) while a
+    /// blocking DB config fault exists.
+    pub(super) async fn acquire_mutation(&self) -> Result<(MutationGuard, Arc<RuntimeConfig>)> {
+        let guard = self.acquire().await?;
+        let runtime = self.gated_runtime()?;
+        Ok((guard, runtime))
+    }
+
     /// Create an issue, returning its allocated id (FR-1a).
     ///
     /// Runs `IssueValidator::validate` in the engine first (→ `ModelError`), then delegates to
@@ -140,8 +162,8 @@ impl Session {
     /// - The transparent storage source on any backend failure (id/external-ref collision, etc.).
     pub async fn create(&self, issue: &Issue) -> Result<String> {
         IssueValidator::validate(issue)?;
-        let _guard = self.acquire().await?;
-        Ok(self.storage.create_issue(issue, &self.actor).await?)
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        Ok(self.storage.create_issue(issue, &runtime.actor).await?)
     }
 
     /// Create an issue, **minting** its id under the write permit, and return the created `Issue`
@@ -191,7 +213,8 @@ impl Session {
     ///   `external_ref` collision, a self/duplicate/cycle edge rejection, a missing parent for the
     ///   child counter, etc.) — ZERO rows persist.
     pub async fn create_issue(&self, new: NewIssue) -> Result<Issue> {
-        let _guard = self.acquire().await?;
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        let actor = runtime.actor.as_str();
 
         let now = Utc::now();
 
@@ -201,6 +224,7 @@ impl Session {
             description: new.description.as_deref(),
             parent: new.parent.as_deref(),
             slug: new.slug.as_deref(),
+            creator: actor,
             created_at: now,
         };
         let id = self.allocate_id(&seed).await?;
@@ -217,7 +241,7 @@ impl Session {
                 depends_on_id: dep.depends_on_id,
                 dep_type: dep.dep_type,
                 created_at: now,
-                created_by: Some(self.actor.clone()),
+                created_by: Some(actor.to_string()),
                 metadata: dep.metadata,
                 thread_id: None,
             })
@@ -235,7 +259,7 @@ impl Session {
             issue_type: new.issue_type.unwrap_or_default(),
             estimated_minutes: new.estimated_minutes,
             created_at: now,
-            created_by: Some(self.actor.clone()),
+            created_by: Some(actor.to_string()),
             updated_at: now,
             due_at: new.due_at,
             defer_until: new.defer_until,
@@ -258,7 +282,7 @@ impl Session {
         //     IdCollision guard only fires for an out-of-band race — and when it does, the `?`
         //     PROPAGATES it (no catch-and-re-mint at the insert). A duplicate or gating-cycle edge is
         //     rejected by the create-specific guards inside that same tx, which rolls back whole.
-        self.storage.create_issue(&issue, &self.actor).await?;
+        self.storage.create_issue(&issue, actor).await?;
 
         // (6) Re-read the hydrated issue (labels/deps populated) and return it.
         self.storage
@@ -303,7 +327,8 @@ impl Session {
     pub async fn create_bulk(&self, records: Vec<NewIssue>) -> Result<Vec<Issue>> {
         use crate::session::bulk::{BatchMaps, topological_mint_order};
 
-        let _guard = self.acquire().await?;
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        let actor = runtime.actor.as_str();
         let now = Utc::now();
 
         // The intra-batch title/stand-in indices (case-insensitive) consulted by mint + resolution.
@@ -313,23 +338,23 @@ impl Session {
         let order = topological_mint_order(&records, &maps).map_err(validation_failed)?;
 
         // (2) Mint every id in topological order under the held permit.
-        let minted_id_of = self.mint_bulk_ids(&records, &maps, &order, now).await?;
+        let minted_id_of = self
+            .mint_bulk_ids(&records, &maps, &order, actor, now)
+            .await?;
 
         // (3) Probe committed storage once per distinct non-intra-batch dependency reference.
         let storage_resolve = self.probe_storage_dep_refs(&records, &maps).await?;
 
         // (4) Build + validate the N issues (in FILE order, so the returned Vec mirrors the input).
         let built =
-            self.build_bulk_issues(&records, &maps, &minted_id_of, &storage_resolve, now)?;
+            Self::build_bulk_issues(&records, &maps, &minted_id_of, &storage_resolve, actor, now)?;
 
         // (5) Insert the whole batch in the ONE atomic tx, in PARENT-BEFORE-CHILD topological order
         //     (a child's `parent.N` id bumps the `child_counters` FK → its parent row must exist
         //     first). `order` is the topological index sequence; `built` is file-indexed. The response
         //     is re-projected to FILE order below. Rollback-on-any-failure → ZERO writes.
         let insert_slice: Vec<Issue> = order.iter().map(|&idx| built[idx].clone()).collect();
-        self.storage
-            .create_issues(&insert_slice, &self.actor)
-            .await?;
+        self.storage.create_issues(&insert_slice, actor).await?;
 
         // Re-read the hydrated issues (labels/deps populated) in FILE order for the response.
         let ids: Vec<String> = built.iter().map(|i| i.id.clone()).collect();
@@ -349,11 +374,13 @@ impl Session {
     ///
     /// `minted` is the in-batch already-minted id set (intra-batch dedup); `child_counters` is the
     /// per-parent in-memory next-child counter; the returned map is `record index → minted id`.
+    /// `actor` is the caller's post-acquire snapshot actor (D57), hashed into every seed.
     async fn mint_bulk_ids(
         &self,
         records: &[NewIssue],
         maps: &crate::session::bulk::BatchMaps,
         order: &[usize],
+        actor: &str,
         now: DateTime<Utc>,
     ) -> Result<std::collections::HashMap<usize, String>> {
         use crate::session::bulk::resolve_parent_id;
@@ -390,6 +417,7 @@ impl Session {
                 description: record.description.as_deref(),
                 parent: resolved_parent.as_deref(),
                 slug: record.slug.as_deref(),
+                creator: actor,
                 created_at: now,
             };
             let id = self
@@ -404,12 +432,13 @@ impl Session {
     /// Build + validate the N candidate issues in FILE order ([`create_bulk`] step 4). Rejects the
     /// whole batch on any unresolved/ambiguous/self/marker dep ref or a built-issue validation failure.
     /// Pure (no `await`): the mint + storage probes already ran; this just resolves edges in memory.
+    /// `actor` is the caller's post-acquire snapshot actor (D57).
     fn build_bulk_issues(
-        &self,
         records: &[NewIssue],
         maps: &crate::session::bulk::BatchMaps,
         minted_id_of: &std::collections::HashMap<usize, String>,
         storage_resolve: &std::collections::HashMap<String, Option<String>>,
+        actor: &str,
         now: DateTime<Utc>,
     ) -> Result<Vec<Issue>> {
         use crate::session::bulk::resolve_dep_refs;
@@ -441,7 +470,7 @@ impl Session {
                     depends_on_id: dep.depends_on_id.clone(),
                     dep_type: dep.dep_type.clone(),
                     created_at: now,
-                    created_by: Some(self.actor.clone()),
+                    created_by: Some(actor.to_string()),
                     metadata: dep.metadata.clone(),
                     thread_id: None,
                 })
@@ -457,7 +486,7 @@ impl Session {
                         depends_on_id: edge.depends_on_id,
                         dep_type: edge.dep_type,
                         created_at: now,
-                        created_by: Some(self.actor.clone()),
+                        created_by: Some(actor.to_string()),
                         metadata: None,
                         thread_id: None,
                     });
@@ -473,7 +502,7 @@ impl Session {
                 issue_type: record.issue_type.clone().unwrap_or_default(),
                 estimated_minutes: record.estimated_minutes,
                 created_at: now,
-                created_by: Some(self.actor.clone()),
+                created_by: Some(actor.to_string()),
                 updated_at: now,
                 due_at: record.due_at,
                 defer_until: record.defer_until,
@@ -554,7 +583,7 @@ impl Session {
     /// - The transparent storage source `IssueNotFound` if the issue does not exist.
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source.
     pub async fn update(&self, id: &str, patch: &IssuePatch) -> Result<Issue> {
-        let _guard = self.acquire().await?;
+        let (_guard, runtime) = self.acquire_mutation().await?;
         // Load the current issue (under the permit, so the validate→update window is serialized).
         let Some(current) = self.storage.get_issue(id).await? else {
             return Err(EngineError::Storage {
@@ -565,7 +594,7 @@ impl Session {
         // storage trusts a validated row. A failure surfaces as the EngineError::Model aggregate.
         let candidate = apply_patch_for_validation(&current, patch);
         IssueValidator::validate(&candidate)?;
-        Ok(self.storage.update_issue(id, patch, &self.actor).await?)
+        Ok(self.storage.update_issue(id, patch, &runtime.actor).await?)
     }
 
     /// Execute (or, for `DeleteMode::DryRun`, plan) a delete (FR-1c).
@@ -575,8 +604,8 @@ impl Session {
     /// # Errors
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source.
     pub async fn delete(&self, plan: &DeletePlan) -> Result<DeletePlan> {
-        let _guard = self.acquire().await?;
-        Ok(self.storage.delete_issue(plan, &self.actor).await?)
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        Ok(self.storage.delete_issue(plan, &runtime.actor).await?)
     }
 
     /// Restore (un-tombstone) a SOFT-deleted issue (FR-1c "recoverable", D20).
@@ -595,8 +624,8 @@ impl Session {
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source (incl. `IssueNotFound` for
     ///   a missing or hard-deleted id).
     pub async fn restore(&self, id: &str) -> Result<Issue> {
-        let _guard = self.acquire().await?;
-        Ok(self.storage.restore_issue(id, &self.actor).await?)
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        Ok(self.storage.restore_issue(id, &runtime.actor).await?)
     }
 
     /// Atomically claim an issue for `assignee` (FR-2).
@@ -607,8 +636,11 @@ impl Session {
     /// # Errors
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source (incl. `AlreadyClaimed`).
     pub async fn claim(&self, id: &str, assignee: &str) -> Result<Issue> {
-        let _guard = self.acquire().await?;
-        Ok(self.storage.claim_issue(id, assignee, &self.actor).await?)
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        Ok(self
+            .storage
+            .claim_issue(id, assignee, &runtime.actor)
+            .await?)
     }
 
     /// Defer an issue until `until` (FR-3). Under the write permit.
@@ -616,8 +648,8 @@ impl Session {
     /// # Errors
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source.
     pub async fn defer(&self, id: &str, until: DateTime<Utc>) -> Result<Issue> {
-        let _guard = self.acquire().await?;
-        Ok(self.storage.defer_issue(id, until, &self.actor).await?)
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        Ok(self.storage.defer_issue(id, until, &runtime.actor).await?)
     }
 
     /// Undefer an issue (FR-3). Under the write permit.
@@ -625,18 +657,28 @@ impl Session {
     /// # Errors
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source.
     pub async fn undefer(&self, id: &str) -> Result<Issue> {
-        let _guard = self.acquire().await?;
-        Ok(self.storage.undefer_issue(id, &self.actor).await?)
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        Ok(self.storage.undefer_issue(id, &runtime.actor).await?)
     }
 
     /// Add a dependency edge (FR-5). Rejects cycles with a path (→ transparent source). Under the
     /// write permit.
     ///
+    /// D57 (spine §4.1): the edge's `created_by` is STAMPED here from the post-acquire runtime
+    /// snapshot's actor — the caller's value is overwritten — so the edge row and its
+    /// `DependencyAdded` event carry ONE actor even across a concurrent `config set actor`.
+    ///
     /// # Errors
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source (incl. `CycleDetected`).
     pub async fn add_dep(&self, dep: &Dependency) -> Result<()> {
-        let _guard = self.acquire().await?;
-        self.storage.add_dependency(dep, &self.actor).await?;
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        let stamped = Dependency {
+            created_by: Some(runtime.actor.clone()),
+            ..dep.clone()
+        };
+        self.storage
+            .add_dependency(&stamped, &runtime.actor)
+            .await?;
         Ok(())
     }
 
@@ -645,35 +687,38 @@ impl Session {
     /// # Errors
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source.
     pub async fn remove_dep(&self, issue_id: &str, on: &str, ty: &DependencyType) -> Result<()> {
-        let _guard = self.acquire().await?;
+        let (_guard, runtime) = self.acquire_mutation().await?;
         self.storage
-            .remove_dependency(issue_id, on, ty, &self.actor)
+            .remove_dependency(issue_id, on, ty, &runtime.actor)
             .await?;
         Ok(())
     }
 
     // --- comments (FR-6, D37) ---
     //
-    // Each mutation validates FIRST (the model owns the rule set — spine §1.9), then acquires the
-    // write permit (D14) + the D31 `.write.lock` for its whole transaction via `acquire()`.
+    // Each mutation acquires the write permit (D14) + the D31 `.write.lock` for its whole
+    // transaction via `acquire_mutation()`. The body-only validation of `update_comment` still runs
+    // FIRST (it reads no actor); `add_comment`'s validation carries the actor, so since D57 it runs
+    // AFTER the acquire, with the post-acquire snapshot's actor (spine §4.1).
 
     /// Add a comment to an issue (FR-6/D37). Under the write permit.
     ///
-    /// The author is `self.actor` (FORK-M1b — there is no per-comment author at the MCP surface).
-    /// Validation runs BEFORE the mutation via `CommentValidator::validate_comment`, the add-path
-    /// entry point: it carries `issue_id`, the resolved actor and the body, and returns ONE
-    /// multi-fault aggregate (spine §1.9).
+    /// The author is the session actor (FORK-M1b — there is no per-comment author at the MCP
+    /// surface), taken from the post-acquire runtime snapshot (D57). Validation runs BEFORE the
+    /// storage call via `CommentValidator::validate_comment`, the add-path entry point: it carries
+    /// `issue_id`, that actor and the body, and returns ONE multi-fault aggregate (spine §1.9).
     ///
     /// # Errors
     /// - [`EngineError::Model`] if validation fails (aggregate `ValidationFailed`).
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source (incl. `IssueNotFound`
     ///   when the target issue does not exist or is tombstoned — the FORK-3 guard).
     pub async fn add_comment(&self, issue_id: &str, body: &str) -> Result<Comment> {
-        CommentValidator::validate_comment(issue_id, &self.actor, body)?;
-        let _guard = self.acquire().await?;
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        let actor = runtime.actor.as_str();
+        CommentValidator::validate_comment(issue_id, actor, body)?;
         Ok(self
             .storage
-            .add_comment(issue_id, &self.actor, body, &self.actor)
+            .add_comment(issue_id, actor, body, actor)
             .await?)
     }
 
@@ -688,10 +733,10 @@ impl Session {
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source (incl. `CommentNotFound`).
     pub async fn update_comment(&self, comment_id: i64, body: &str) -> Result<Comment> {
         CommentValidator::validate_body(body)?;
-        let _guard = self.acquire().await?;
+        let (_guard, runtime) = self.acquire_mutation().await?;
         Ok(self
             .storage
-            .update_comment(comment_id, body, &self.actor)
+            .update_comment(comment_id, body, &runtime.actor)
             .await?)
     }
 
@@ -703,8 +748,11 @@ impl Session {
     /// # Errors
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source (incl. `CommentNotFound`).
     pub async fn delete_comment(&self, comment_id: i64) -> Result<Comment> {
-        let _guard = self.acquire().await?;
-        Ok(self.storage.delete_comment(comment_id, &self.actor).await?)
+        let (_guard, runtime) = self.acquire_mutation().await?;
+        Ok(self
+            .storage
+            .delete_comment(comment_id, &runtime.actor)
+            .await?)
     }
 
     /// Close an issue and report the issues it newly unblocked (FR-11).
@@ -732,7 +780,7 @@ impl Session {
         id: &str,
         reason: Option<String>,
     ) -> Result<CloseOutcome> {
-        let _guard = self.acquire().await?;
+        let (_guard, runtime) = self.acquire_mutation().await?;
 
         // Close: status -> Closed, persisting the reason (Some => set; None => leave unchanged).
         // Storage derives closed_at + the Closed/StatusChanged events transactionally.
@@ -741,7 +789,10 @@ impl Session {
             close_reason: reason.map(Some),
             ..IssuePatch::default()
         };
-        let closed = self.storage.update_issue(id, &patch, &self.actor).await?;
+        let closed = self
+            .storage
+            .update_issue(id, &patch, &runtime.actor)
+            .await?;
 
         // Compute newly-unblocked via the policy free fns over the live dependents (OQ-1).
         let newly_unblocked = self.newly_unblocked_after_close(id).await?;

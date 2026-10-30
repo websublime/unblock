@@ -22,6 +22,14 @@
 //! installs an OS handler). No libsql/backend type ever crosses this boundary (spine §6 rule 2); no
 //! git crate / network (NFR-6).
 //!
+//! # Runtime configuration (FR-13 full, PRD §4 D57)
+//!
+//! A [`Session`] holds its startup keys immutably and its runtime keys as a LIVE snapshot
+//! ([`Session::runtime`]) that only `config_set`/`config_unset` swap, after re-resolving them through
+//! the context's `ConfigReloader`. While the snapshot holds a BLOCKING DB config fault, every
+//! fallible method except `open`, the four `config_*` methods and `shutdown` fail-closes with
+//! `ConfigError::FaultyDbConfig` (→ [`EngineError::Config`], `CONFIG_ERROR`, the recovery hint).
+//!
 //! # SEAM-deferred methods (typed not-wired — never a faked success)
 //!
 //! `export_jsonl`/`import_jsonl`/`import_bd` (the `sync` seam) are WIRED to `unblock-sync` at

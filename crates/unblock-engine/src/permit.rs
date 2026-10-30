@@ -97,6 +97,14 @@ mod tests {
         Arc::new(Semaphore::new(WRITE_PERMITS))
     }
 
+    /// D57 clause (7): the `config_set`/`config_unset` commit+swap tail is a `tokio::spawn`ed task
+    /// that OWNS the mutation guard, so the guard must be `Send + 'static` (spine §4.1).
+    #[test]
+    fn mutation_guard_is_send_static() {
+        const fn assert_send_static<T: Send + 'static>() {}
+        assert_send_static::<super::MutationGuard>();
+    }
+
     #[tokio::test]
     async fn single_permit_serializes_second_acquire() {
         let sem = permit();

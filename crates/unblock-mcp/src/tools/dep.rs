@@ -31,18 +31,22 @@ fn default_true() -> bool {
     true
 }
 
-/// Build the model [`Dependency`] for the `add` arm from that arm's OWN fields, under the supplied
-/// actor + timestamp (D44 — this arm no longer routes through the create-arm `DepInput`).
+/// Build the model [`Dependency`] for the `add` arm from that arm's OWN fields, at the supplied
+/// timestamp (D44 — this arm no longer routes through the create-arm `DepInput`).
 ///
 /// This is a CROSS-ISSUE edge on an EXISTING source: `issue_id` is a real, required, client-known,
 /// pre-existing issue id, so it is the one place where an edge source legitimately comes from the
 /// wire. The create arm is the opposite case and rejects a supplied source outright.
+///
+/// `created_by` is left `None`: since D57 (clause (5)) `Session::add_dep` STAMPS it from its
+/// post-acquire runtime snapshot, overwriting the caller's value, so the edge row and its event carry
+/// ONE actor even across a concurrent `config set actor`. A pre-permit stamp here would read the
+/// actor before the guard — the race D57 closes.
 fn build_add_dependency(
     issue_id: String,
     depends_on_id: String,
     dep_type: DependencyType,
     metadata: Option<String>,
-    actor: &str,
     now: DateTime<Utc>,
 ) -> Dependency {
     Dependency {
@@ -50,7 +54,7 @@ fn build_add_dependency(
         depends_on_id,
         dep_type,
         created_at: now,
-        created_by: Some(actor.to_string()),
+        created_by: None,
         metadata,
         // `thread_id` is DELIBERATELY not on the wire: neither this arm nor `DepInput` has such a
         // field and v1 carries no threading surface. It is nevertheless BOUND at L2 (D42) so the
@@ -145,14 +149,13 @@ impl UnblockServer {
                 attribution: _,
             } => {
                 let now = Utc::now();
-                let actor = self.session.actor().to_string();
                 // D44: this arm builds the model `Dependency` DIRECTLY from its own fields and no
                 // longer routes through the create-arm `DepInput`. Here `issue_id` is a real,
                 // REQUIRED, pre-existing, client-KNOWN issue id — a cross-issue edge on an EXISTING
                 // source, not a create — which is why this arm keeps the field while the `issue`
-                // tool's create arm rejects it. The published `dep` schema does NOT move.
-                let dep =
-                    build_add_dependency(issue_id, depends_on_id, dep_type, metadata, &actor, now);
+                // tool's create arm rejects it. The published `dep` schema does NOT move. D57: the
+                // actor is NOT stamped here — `Session::add_dep` stamps it after its guard.
+                let dep = build_add_dependency(issue_id, depends_on_id, dep_type, metadata, now);
                 match self.session.add_dep(&dep).await {
                     Ok(()) => ok_json(&DepOutput::Added(DepAdded { added: true })),
                     Err(err) => engine_err_json(&err),
@@ -199,23 +202,23 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use unblock_model::DependencyType;
 
-    /// The `add` arm stamps the actor + timestamp onto an edge whose SOURCE comes from the wire.
-    /// Moved here with the D44 code move (it covered `DepInput::into_dependency`, which is deleted).
+    /// The `add` arm stamps the timestamp onto an edge whose SOURCE comes from the wire, and leaves
+    /// `created_by` to `Session::add_dep`, which stamps it after its guard (D57 clause (5)). Moved
+    /// here with the D44 code move (it covered `DepInput::into_dependency`, which is deleted).
     #[test]
-    fn dep_add_builds_dependency_with_actor_and_ts() {
+    fn dep_add_builds_dependency_with_ts_and_leaves_the_actor_to_the_engine() {
         let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let dep = build_add_dependency(
             "ub-a".to_string(),
             "ub-b".to_string(),
             DependencyType::Blocks,
             None,
-            "tester",
             now,
         );
         assert_eq!(dep.issue_id, "ub-a");
         assert_eq!(dep.depends_on_id, "ub-b");
         assert_eq!(dep.dep_type, DependencyType::Blocks);
-        assert_eq!(dep.created_by.as_deref(), Some("tester"));
+        assert_eq!(dep.created_by, None);
         assert_eq!(dep.created_at, now);
         assert!(dep.thread_id.is_none());
     }
