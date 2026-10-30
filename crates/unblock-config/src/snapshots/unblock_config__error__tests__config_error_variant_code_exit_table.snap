@@ -37,5 +37,20 @@ expression: table
     "InvalidValue",
     "CONFIG_ERROR",
     7
+  ],
+  [
+    "StartupKeyInRuntimeLayer",
+    "CONFIG_ERROR",
+    7
+  ],
+  [
+    "UnknownKey",
+    "CONFIG_ERROR",
+    7
+  ],
+  [
+    "FaultyDbConfig",
+    "CONFIG_ERROR",
+    7
   ]
 ]

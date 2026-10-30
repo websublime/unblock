@@ -61,8 +61,9 @@ impl Session {
         let WorkspaceContext {
             storage,
             workspace_dir,
-            actor,
             config,
+            // The live-reload seam (D57 clause (8)) is wired by the engine's `config` slice.
+            reloader: _,
             paths,
             // The D39 discovery-tier tag is surfaced by the CLI at startup, not consumed by the engine.
             source: _,
@@ -71,6 +72,7 @@ impl Session {
             // engine — the same additive shape `source` takes, so no layering edge moves.
             schema_version_before_migrate: _,
         } = ctx;
+        let actor = config.runtime.actor.clone();
 
         let session = Self {
             storage,
