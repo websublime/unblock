@@ -11,8 +11,8 @@
 //! the baseline, stamped there, and FALLS THROUGH the ladder like any database found on disk — so
 //! there is exactly ONE path to the current shape and every fresh install exercises every step. That
 //! is the point: this defect survived because the fresh path worked while the ladder path was never
-//! exercised once. A FRESH INITIALISATION THEREFORE APPLIES A STEP AND REPORTS A MIGRATION
-//! (`user_version = 0` ends at [`CURRENT_SCHEMA_VERSION`] having run step 2).
+//! exercised once. A FRESH INITIALISATION THEREFORE APPLIES THE STEPS AND REPORTS A MIGRATION
+//! (`user_version = 0` ends at [`CURRENT_SCHEMA_VERSION`] having run steps 2 and 3).
 //!
 //! The full normative contract — the invariant, the one-time exception, atomicity, when a step may
 //! run implicitly, the lying-stamp sentinel and its hint, and both ends of the version range — is on
@@ -20,7 +20,7 @@
 
 use libsql::{Connection, TransactionBehavior};
 
-use crate::error::{StorageError, map_libsql_err};
+use crate::error::{SchemaGap, StorageError, describe_gaps, map_libsql_err};
 
 use super::schema::{BASELINE_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION, SCHEMA_SQL};
 
@@ -33,6 +33,17 @@ use super::schema::{BASELINE_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION, SCHEMA_SQL}
 pub(crate) const COMMENTS_STEP_COLUMNS: &[(&str, &str)] =
     &[("updated_at", "DATETIME"), ("redacted_at", "DATETIME")];
 
+/// The schema version whose step adds [`COMMENTS_STEP_COLUMNS`] (step 2, D46) — named so the
+/// sentinel's per-gap reason names the STEP that adds each missing piece, never
+/// [`CURRENT_SCHEMA_VERSION`] for all of them (D57 clause (9)).
+pub(crate) const COMMENTS_STEP_VERSION: i32 = 2;
+
+/// The schema version whose step creates the `config` table (step 3, D57 clause (9)).
+pub(crate) const CONFIG_STEP_VERSION: i32 = 3;
+
+/// The `config` table's columns step 3 creates — the sentinel's step-3 half (D57 clause (9)).
+pub(crate) const CONFIG_STEP_COLUMNS: &[(&str, &str)] = &[("key", "TEXT"), ("value", "TEXT")];
+
 /// What a [`Migration`] step DOES — the step-KIND discriminant (D46).
 ///
 /// A step carries a KIND rather than a static SQL field because the one-time historical step must
@@ -42,15 +53,8 @@ pub(crate) const COMMENTS_STEP_COLUMNS: &[(&str, &str)] =
 pub(crate) enum MigrationKind {
     /// The ordinary kind: apply `sql` UNCONDITIONALLY. **Every step from 3 onward is this kind** —
     /// the version it advances FROM denotes exactly one physical shape (spine §3.2 clause (i)), so a
-    /// step must not inspect the database to decide what to do.
-    ///
-    /// Never constructed at v1.0.1 (the ladder's only step is the historical one below); it is the
-    /// shape every future step takes, and its SQL TEXT is what the content pin hashes.
-    #[expect(
-        dead_code,
-        reason = "the ordinary step kind; the v1.0.1 ladder carries only the one-time historical \
-                  step, and the pin hashes this variant's SQL text from the FIRST future step on"
-    )]
+    /// step must not inspect the database to decide what to do. Its SQL TEXT is what the content
+    /// pin hashes. First constructed by step 3 (D57 clause (9)).
     Sql(&'static str),
 
     /// **THE ONE-TIME SHAPE-SENSING EXCEPTION — step 2, and NO other step, ever (D46 clause (2)).**
@@ -91,14 +95,28 @@ pub(crate) struct Migration {
 
 /// The ordered forward steps, lowest first.
 ///
-/// **Exactly ONE step at v1.0.1 (D46):** step `2`, the one-time `comments`-columns reconcile. The
-/// covered range is `BASELINE_SCHEMA_VERSION + 1 ..= CURRENT_SCHEMA_VERSION` — asserted contiguous
-/// and non-empty by the `const` block below, so bumping the version without a step and adding a step
-/// without bumping are BOTH compile errors.
-pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
-    version: 2,
-    kind: MigrationKind::CommentsColumnsReconcile,
-}];
+/// **Two steps since D57 (v1.1):** step `2`, the one-time `comments`-columns reconcile (D46), and
+/// step `3`, the first ORDINARY step — the FR-13-full `config` table (D57 clause (9)), ADDITIVE and
+/// so implicit on open (spine §3.2 clause (iv)). The covered range is `BASELINE_SCHEMA_VERSION + 1
+/// ..= CURRENT_SCHEMA_VERSION` — asserted contiguous and non-empty by the `const` block below, so
+/// bumping the version without a step and adding a step without bumping are BOTH compile errors.
+///
+/// Step 3's `IF NOT EXISTS` is the STATEMENT's own idempotence — not a Rust-side probe choosing which
+/// DDL runs, so spine §3.2 clause (i) holds — and it is REQUIRED: the lying-stamp recovery resets
+/// the stamp and replays the ladder, and a plain `CREATE` would then fail `table config already
+/// exists` on a database that already has the table, a recovery that loops.
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: COMMENTS_STEP_VERSION,
+        kind: MigrationKind::CommentsColumnsReconcile,
+    },
+    Migration {
+        version: CONFIG_STEP_VERSION,
+        kind: MigrationKind::Sql(
+            "CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)",
+        ),
+    },
+];
 
 // D46 clause (6) — THE LADDER-CONTIGUITY ASSERTION. A `const` block, so it fires under
 // `cargo check`/`clippy`/`test` alike and no annotation can silence it.
@@ -129,28 +147,33 @@ const _: () = {
 };
 
 // THE SENTINEL'S SUBJECT, bound to the ladder rather than asserted in prose (Verify gate,
-// 2026-08-03). `witness_newest_step` probes `COMMENTS_STEP_COLUMNS`, while the `Storage::migrate`
-// contract (spine §3.2 clause (v)) promises the NEWEST step's OWN columns. Those two agree today
-// and would silently diverge the day a step 3 lands — the sentinel would go on witnessing step 2
-// while the contract claimed otherwise, which is a doc-vs-code lie of exactly the kind D46 exists
-// to end. The RESOLUTION RULED HERE IS "make the CODE match the promise", and this is the
-// mechanism: the promise holds as FACT for every tree that compiles, because a tree in which it
-// stops holding does not compile.
+// 2026-08-03). The `Storage::migrate` contract (spine §3.2 clause (v)) promises the sentinel
+// witnesses the NEWEST step's OWN postcondition; this assertion makes that a FACT for every tree
+// that compiles, because a tree in which it stops holding does not compile.
+//
+// [D57] STEP 3 TOOK THE "EXTEND THE SENTINEL" BRANCH (PRD §4 D57 clause (9)). `witness_newest_step`
+// witnesses the UNION of step 2's `COMMENTS_STEP_COLUMNS` and step 3's `CONFIG_STEP_COLUMNS`, so
+// the newest step it witnesses is the version-3 `Sql` step that creates `config` — and this
+// assertion now names THAT step: its version is `CONFIG_STEP_VERSION` and its kind is `Sql`. A step 4
+// must again EITHER extend the sentinel to witness its own postcondition OR amend the contract —
+// deliberately, here.
 //
 // The alternative — a per-step witness DESCRIPTOR (a table name + a column list on every step) — was
 // REJECTED: no non-column step (an index, a backfill) can populate it, so it degrades silently to a
 // no-op sentinel for that version, and it would add a per-step surface the clause (6) content pin
 // does NOT hash. A const assertion adds no surface, cannot degrade, and forces the choice at the
-// exact moment a step 3 is written.
+// exact moment a new step is written.
 const _: () = {
     let newest = &MIGRATIONS[MIGRATIONS.len() - 1];
     assert!(
-        newest.kind.discriminant() == MigrationKind::CommentsColumnsReconcile.discriminant(),
-        "D46 clause (v): `witness_newest_step` witnesses COMMENTS_STEP_COLUMNS, which IS the newest \
-         step's own column set only while the newest step is the one-time comments reconcile. A new \
-         newest step must EITHER extend the sentinel to witness its own postcondition OR amend the \
-         `Storage::migrate` contract that promises the newest step's columns — deliberately, here, \
-         not by discovering in the field that the sentinel witnesses a step two versions old."
+        newest.version == CONFIG_STEP_VERSION
+            && newest.kind.discriminant() == MigrationKind::Sql("").discriminant(),
+        "D46 clause (v) / D57 clause (9): `witness_newest_step` witnesses COMMENTS_STEP_COLUMNS and \
+         CONFIG_STEP_COLUMNS, whose newest half IS the newest step's own postcondition only while the \
+         newest step is the version-3 `config` Sql step. A new newest step must EITHER extend the \
+         sentinel to witness its own postcondition OR amend the `Storage::migrate` contract that \
+         promises the newest step's columns — deliberately, here, not by discovering in the field \
+         that the sentinel witnesses a step two versions old."
     );
 };
 
@@ -219,6 +242,7 @@ pub(crate) async fn run_migrations(conn: &Connection) -> Result<(), StorageError
                     "the forward steps ended stamped at user_version {stamped}, not \
                      {CURRENT_SCHEMA_VERSION}"
                 ),
+                gaps: Vec::new(),
             });
         }
     }
@@ -226,7 +250,8 @@ pub(crate) async fn run_migrations(conn: &Connection) -> Result<(), StorageError
     witness_newest_step(conn, found).await
 }
 
-/// **The lying-stamp SENTINEL (spine §3.2 clause (v)).** Witness the NEWEST step's own columns.
+/// **The lying-stamp SENTINEL (spine §3.2 clause (v)).** Witness the NEWEST step's own
+/// postcondition — and, since D57, step 2's as well.
 ///
 /// A bounded per-step POSTCONDITION: its result never decides which DDL to run (only step 2 ever
 /// decides anything from a probe), and it is NOT a conformance comparison of the live schema against
@@ -236,30 +261,50 @@ pub(crate) async fn run_migrations(conn: &Connection) -> Result<(), StorageError
 ///
 /// `found` is the stamp observed on entry, so the returned error names what the caller actually met.
 ///
-/// **The subject is [`COMMENTS_STEP_COLUMNS`], and that IS "the newest step's own columns" as a
-/// compile-enforced fact, not as a claim:** the `const` block beside [`MIGRATIONS`] refuses to build
-/// a ladder whose newest step is not the comments reconcile, so this function cannot silently fall
-/// behind the ladder (Verify gate, 2026-08-03 — "make the code match the promise").
+/// **The subject is the UNION of [`COMMENTS_STEP_COLUMNS`] (on `comments`) and
+/// [`CONFIG_STEP_COLUMNS`] (on `config`; an absent table reads as zero columns and is ONE
+/// [`SchemaGap::ConfigTable`] gap) — D57 clause (9)'s literal "EXTEND".** The `const` block beside
+/// [`MIGRATIONS`] refuses to build a ladder whose newest step is not the version-3 `config` step,
+/// so this function cannot silently fall behind the ladder, and keeping the `comments` half means a
+/// stamp that lies about the `comments` columns is still refused after step 3 lands.
+///
+/// EVERY SENTINEL FAILURE IS A LYING STAMP, whatever `found` is: the error carries NON-EMPTY `gaps`,
+/// which is what the hint dispatches on (a stamp-2 database lying about `comments` first runs step 3
+/// and arrives here with `from = 2`, `to = 3`).
 async fn witness_newest_step(conn: &Connection, found: i32) -> Result<(), StorageError> {
-    let present = comments_columns(conn).await?;
-    let missing: Vec<&str> = COMMENTS_STEP_COLUMNS
-        .iter()
-        .map(|(name, _)| *name)
-        .filter(|name| !present.iter().any(|have| have.as_str() == *name))
-        .collect();
+    let mut gaps = Vec::new();
 
-    if missing.is_empty() {
+    let comments = table_columns(conn, "comments").await?;
+    gaps.extend(
+        COMMENTS_STEP_COLUMNS
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| !comments.iter().any(|have| have.as_str() == *name))
+            .map(SchemaGap::CommentsColumn),
+    );
+
+    let config = table_columns(conn, "config").await?;
+    if config.is_empty() {
+        gaps.push(SchemaGap::ConfigTable);
+    } else {
+        gaps.extend(
+            CONFIG_STEP_COLUMNS
+                .iter()
+                .map(|(name, _)| *name)
+                .filter(|name| !config.iter().any(|have| have.as_str() == *name))
+                .map(SchemaGap::ConfigColumn),
+        );
+    }
+
+    if gaps.is_empty() {
         return Ok(());
     }
 
     Err(StorageError::Migration {
         from: found,
         to: CURRENT_SCHEMA_VERSION,
-        reason: format!(
-            "the `comments` table is missing the column(s) {} that schema version \
-             {CURRENT_SCHEMA_VERSION} adds",
-            missing.join(", ")
-        ),
+        reason: describe_gaps(&gaps),
+        gaps,
     })
 }
 
@@ -276,6 +321,7 @@ async fn bootstrap_baseline(conn: &Connection) -> Result<(), StorageError> {
             from: 0,
             to: BASELINE_SCHEMA_VERSION,
             reason: e.to_string(),
+            gaps: Vec::new(),
         })?;
     stamp_version(conn, BASELINE_SCHEMA_VERSION).await?;
     // Manual truncate checkpoint (wal_autocheckpoint is disabled — see `apply_pragmas`). A query is
@@ -295,6 +341,7 @@ async fn apply_step(conn: &Connection, step: &Migration) -> Result<(), StorageEr
         from: step.version - 1,
         to: step.version,
         reason,
+        gaps: Vec::new(),
     };
 
     let tx = conn
@@ -329,7 +376,7 @@ async fn apply_step(conn: &Connection, step: &Migration) -> Result<(), StorageEr
 /// absent, in [`COMMENTS_STEP_COLUMNS`] order. Both are **nullable with NO `DEFAULT`** — a default
 /// would make a migrated database disagree with a fresh one on inserts that omit the column.
 async fn reconcile_comments_columns(conn: &Connection) -> Result<(), StorageError> {
-    let present = comments_columns(conn).await?;
+    let present = table_columns(conn, "comments").await?;
     for &(name, sql_type) in COMMENTS_STEP_COLUMNS {
         if present.iter().any(|have| have.as_str() == name) {
             continue;
@@ -346,10 +393,12 @@ async fn reconcile_comments_columns(conn: &Connection) -> Result<(), StorageErro
     Ok(())
 }
 
-/// The current column names of `comments`, in ordinal order (`PRAGMA table_info`).
-async fn comments_columns(conn: &Connection) -> Result<Vec<String>, StorageError> {
+/// The current column names of `table`, in ordinal order (`PRAGMA table_info`). An ABSENT table
+/// reads as zero columns. `table` is always one of this crate's own constant names (`comments`,
+/// `config`), never user input — `PRAGMA` does not accept a bound table name.
+async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, StorageError> {
     let mut rows = conn
-        .query("PRAGMA table_info(comments)", ())
+        .query(&format!("PRAGMA table_info({table})"), ())
         .await
         .map_err(map_libsql_err)?;
     let mut columns = Vec::new();

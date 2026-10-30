@@ -3,10 +3,12 @@
 //! - migrate (D46 clause (10)): the command reports the stamp observed BEFORE its own open, so all
 //!   THREE cases are pinned here and get the SAME treatment. An `unblock init`-built workspace is
 //!   ALREADY-CURRENT (`init` opened through the same facade, which migrated), so it reports
-//!   `schema_from == schema_to == 2`, `applied == false` — `applied: false` means "the stamp did not
+//!   `schema_from == schema_to == 3`, `applied == false` — `applied: false` means "the stamp did not
 //!   move across THIS run's own open", NOT "nothing was wrong". A NEVER-MIGRATED workspace
-//!   (`.unblock/config.toml`, no `unblock.db`) reports `0` -> `2`, `applied: true`. A STALE workspace
-//!   (five-column `comments`, stamped `1`) reports `1` -> `2`, `applied: true`. Report shape pinned.
+//!   (`.unblock/config.toml`, no `unblock.db`) reports `0` -> `3`, `applied: true`. A STALE workspace
+//!   (five-column `comments`, stamped `1`) reports `1` -> `3`, `applied: true`. A stamp-2 workspace
+//!   (every GA, v1.0.1 and v1.0.2 database — no `config` table) reports `2` -> `3`, `applied: true`
+//!   (D57 clause (9)). Report shape pinned.
 //! - doctor (T3.3): the cli ROUTES through the wired `Session::doctor()` — a clean DB → `health:
 //!   healthy` + `integrity: ok` (no file-state anomalies), exit 0. A corrupted DB → exit 2 (db bucket)
 //!   — the corruption is surfaced as a `DATABASE_ERROR` structured error (the deterministic corruption
@@ -23,7 +25,7 @@ use common::{Workspace, csv_labels, csv_report, detail, json_report, output_lock
 use serde_json::Value;
 
 /// An `init`-built workspace is ALREADY CURRENT — `init` opened it through the same config facade,
-/// which migrated it — so the stamp observed BEFORE this run's own open is already `2` and nothing
+/// which migrated it — so the stamp observed BEFORE this run's own open is already `3` and nothing
 /// moves (D46 clause (10); the pre-ruling reason, "the facade outran `Session::migrate`", is retired
 /// and is now false).
 #[test]
@@ -37,12 +39,12 @@ fn migrate_on_an_already_current_workspace_reports_no_move_and_is_idempotent() {
     );
     assert_eq!(
         detail(&first, "schema_from"),
-        Some("2"),
+        Some("3"),
         "the stamp observed BEFORE this run's own open — already current"
     );
     assert_eq!(
         detail(&first, "schema_to"),
-        Some("2"),
+        Some("3"),
         "on-disk schema after"
     );
     assert_eq!(
@@ -58,8 +60,8 @@ fn migrate_on_an_already_current_workspace_reports_no_move_and_is_idempotent() {
 
     // Second migrate: idempotent — identical from/to/applied.
     let second = json_report(&ws, &["migrate", "--output", "json"]);
-    assert_eq!(detail(&second, "schema_from"), Some("2"));
-    assert_eq!(detail(&second, "schema_to"), Some("2"));
+    assert_eq!(detail(&second, "schema_from"), Some("3"));
+    assert_eq!(detail(&second, "schema_to"), Some("3"));
     assert_eq!(detail(&second, "applied"), Some("false"));
 }
 
@@ -90,7 +92,7 @@ fn migrate_report_json(ws: &Workspace) -> Value {
 
 /// The ALREADY-CURRENT report shape (D46 clause (3) item (a) — RENAMED from
 /// `…__migrate_report_fresh.snap`, because D46 gives "fresh" the OPPOSITE meaning: a never-migrated
-/// database now reports `0` -> `2` `applied: true`, pinned by the cell below).
+/// database now reports `0` -> `3` `applied: true`, pinned by the cell below).
 #[test]
 fn migrate_report_shape_on_an_already_current_workspace_is_snapshot_pinned() {
     let ws = Workspace::init();
@@ -132,8 +134,8 @@ fn migrate_csv_reports_the_delta_and_exits_0() {
 /// reports the pre-open stamp it captured.
 ///
 /// MUTANT KILLED: sourcing `schema_from` from `MigrateOutcome.from` again — which is exactly the
-/// pre-ruling code. `Session::migrate` runs AFTER the facade migrated, so it would observe `2` and
-/// this cell would read `2` -> `2` `applied: false`.
+/// pre-ruling code. `Session::migrate` runs AFTER the facade migrated, so it would observe `3` and
+/// this cell would read `3` -> `3` `applied: false`.
 #[test]
 fn migrate_on_a_never_migrated_workspace_reports_zero_to_current_applied() {
     let ws = Workspace::init();
@@ -145,7 +147,7 @@ fn migrate_on_a_never_migrated_workspace_reports_zero_to_current_applied() {
         Some("0"),
         "an unstamped, not-yet-created database reads 0 BEFORE the facade migrates; report: {report}"
     );
-    assert_eq!(detail(&report, "schema_to"), Some("2"));
+    assert_eq!(detail(&report, "schema_to"), Some("3"));
     assert_eq!(
         detail(&report, "applied"),
         Some("true"),
@@ -158,12 +160,12 @@ fn migrate_on_a_never_migrated_workspace_reports_zero_to_current_applied() {
 ///
 /// A workspace whose `comments` table is the five-column pre-D37 shape while its stamp says `1` —
 /// indistinguishable by `user_version` from a GA database, and unable to serve a single hydrated
-/// read. `unblock migrate` repairs it and reports `1` -> `2` `applied: true` (exit 0), the
+/// read. `unblock migrate` repairs it and reports `1` -> `3` `applied: true` (exit 0), the
 /// pre-existing comment row survives with both new columns NULL, and the same workspace then serves
 /// the hydrated read that failed before.
 ///
 /// MUTANT KILLED: emptying the ladder (`MIGRATIONS: &[]`) — the stale database stays five-column, the
-/// hydrated read keeps failing and `schema_to` never reaches `2`.
+/// hydrated read keeps failing and `schema_to` never reaches `3`.
 ///
 /// MUTANT KILLED: making step 2 unconditional (a version-keyed `ALTER` with no sensing) — this cell
 /// still passes, but every ALREADY-CURRENT cell above hard-errors `duplicate column name`, which is
@@ -193,7 +195,7 @@ fn migrate_on_a_stale_workspace_repairs_it_and_reports_the_real_delta() {
         Some("1"),
         "the pre-open stamp — the stale database's own lie; report: {report}"
     );
-    assert_eq!(detail(&report, "schema_to"), Some("2"));
+    assert_eq!(detail(&report, "schema_to"), Some("3"));
     assert_eq!(
         detail(&report, "applied"),
         Some("true"),
@@ -212,6 +214,35 @@ fn migrate_on_a_stale_workspace_repairs_it_and_reports_the_real_delta() {
         comments[0].updated_at.is_none() && comments[0].redacted_at.is_none(),
         "an ADD COLUMN leaves the existing row NULL — no recreate-and-copy, which would be data loss"
     );
+}
+
+/// **D57 clause (9), criterion (l) — a stamp-2 workspace reports `2` -> `3` `applied: true`.** Every
+/// GA, v1.0.1 and v1.0.2 database is stamped `2` with no `config` table; `unblock migrate` (whose
+/// facade runs step 3 implicitly on open) reports the real delta and the table exists afterwards.
+///
+/// MUTANT KILLED: dropping step 3 from the ladder (with `CURRENT_SCHEMA_VERSION` back at 2) — the
+/// report reads `2` -> `2` `applied: false` and the table never appears.
+#[test]
+fn migrate_on_a_stamp_two_workspace_reports_two_to_three_applied() {
+    let ws = Workspace::init();
+    let rt = runtime();
+    rt.block_on(async {
+        let conn = common::raw_connection(&ws.db_path()).await;
+        conn.execute("DROP TABLE config", ())
+            .await
+            .expect("revert to the stamp-2 shape: no config table");
+    });
+    stamp_user_version(&ws.db_path(), 2);
+
+    let report = migrate_report_json(&ws);
+    assert_eq!(
+        detail(&report, "schema_from"),
+        Some("2"),
+        "report: {report}"
+    );
+    assert_eq!(detail(&report, "schema_to"), Some("3"), "report: {report}");
+    assert_eq!(detail(&report, "applied"), Some("true"), "report: {report}");
+    assert_eq!(stamped_user_version(&ws), 3);
 }
 
 #[test]
@@ -266,11 +297,11 @@ fn migrate_on_a_future_schema_db_exits_2_with_schema_mismatch() {
 #[test]
 fn a_lying_stamp_exits_2_with_a_hint_that_names_the_repair_and_the_missing_columns() {
     let ws = Workspace::init();
-    // Current stamp (2) + stale shape (5 columns) — the state the stamp alone cannot detect.
+    // Current stamp (3) + stale shape (5 columns) — the state the stamp alone cannot detect.
     drop_comment_columns(&ws);
     assert_eq!(
         stamped_user_version(&ws),
-        2,
+        3,
         "the stamp still claims current"
     );
 

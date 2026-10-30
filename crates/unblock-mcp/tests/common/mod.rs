@@ -795,6 +795,22 @@ pub mod recording {
             self.record();
             self.inner.close_issues(ids, reason, actor).await
         }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        // D57: the two config MUTATIONS record, so every zero-write cell on the `config` arm is
+        // non-vacuous (spine §3.2).
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.record();
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.record();
+            self.inner.unset_config(key).await
+        }
     }
 }
 
@@ -1110,6 +1126,18 @@ pub mod gated {
         ) -> Result<Vec<String>, StorageError> {
             self.inner.close_issues(ids, reason, actor).await
         }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.inner.unset_config(key).await
+        }
     }
 }
 
@@ -1367,6 +1395,18 @@ pub mod failing {
             actor: &str,
         ) -> Result<Vec<String>, StorageError> {
             self.inner.close_issues(ids, reason, actor).await
+        }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.inner.unset_config(key).await
         }
     }
 }

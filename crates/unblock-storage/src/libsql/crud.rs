@@ -1723,3 +1723,100 @@ pub(super) async fn row_exists(
         .map_err(map_libsql_err)?;
     Ok(rows.next().await.map_err(map_libsql_err)?.is_some())
 }
+
+// --- config table (FR-13 full, D57; spine §3.2.1 "Config table (D57)") ---
+
+/// The SQL spelling of one `config` cell as [`read_config`] returns it: a `TEXT` cell verbatim, any
+/// other storage class (a hand-written `BLOB`, `INTEGER`, `REAL` or `NULL`) — and a `TEXT` cell that
+/// itself BEGINS with the marker character — as [`NON_TEXT_CELL_MARKER`](crate::NON_TEXT_CELL_MARKER)
+/// followed by `<typeof>:<HEX>`. The spelling is therefore INJECTIVE: no `TEXT` cell can read back
+/// as another row's marked spelling, so one `unset_config` addresses at most one row. Such a row is
+/// never silently skipped (PRD §4 D57 clause (2a)): `unblock-config` decodes it as a fault and
+/// `unset_config` addresses it by that same spelling. The column is a crate literal, never input.
+macro_rules! config_cell_sql {
+    ($col:literal) => {
+        concat!(
+            "CASE WHEN typeof(",
+            $col,
+            ") = 'text' AND substr(",
+            $col,
+            ", 1, 1) <> char(1) THEN ",
+            $col,
+            " ELSE char(1) || typeof(",
+            $col,
+            ") || ':' || hex(",
+            $col,
+            ") END"
+        )
+    };
+}
+
+/// `read_config`: every `config` row as `(key, value)`, ordered by the returned key in byte order
+/// (`BINARY` collation; for a `TEXT` key that is the key itself) — a PURE read on the read
+/// connection (no permit, no `.write.lock`, FR-10). Storage never classifies a key or parses a value
+/// (`unblock-config` owns both, D57 clause (2)); a non-`TEXT` cell is returned in its
+/// `config_cell_sql!` spelling, never dropped.
+pub(super) async fn read_config(conn: &Connection) -> Result<Vec<(String, String)>, StorageError> {
+    const SQL: &str = concat!(
+        "SELECT ",
+        config_cell_sql!("key"),
+        ", ",
+        config_cell_sql!("value"),
+        " FROM config ORDER BY 1 ASC"
+    );
+    let mut rows = conn.query(SQL, ()).await.map_err(map_libsql_err)?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+        let key: String = row.get(0).map_err(map_libsql_err)?;
+        let value: String = row.get(1).map_err(map_libsql_err)?;
+        out.push((key, value));
+    }
+    Ok(out)
+}
+
+/// The `set_config` UPSERT (D57, spine §3.2.1): an `ON CONFLICT(key) DO UPDATE` — deliberately NOT
+/// `INSERT OR REPLACE` (which deletes and re-inserts) and NOT an ignored conflict (which would drop
+/// the write silently). Binds exactly two parameters (`?1` = key, `?2` = value).
+pub(super) const SET_CONFIG_SQL: &str = "INSERT INTO config (key, value) VALUES (?1, ?2) \
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+
+/// `set_config`: UPSERT one `config` row in ONE `BEGIN IMMEDIATE`. Writes no `Event` (a `config`
+/// row is workspace state, not an issue — the spine §3.2.1 `EventType` table).
+pub(super) async fn set_config(
+    conn: &Connection,
+    hook: WriteHook<'_>,
+    key: &str,
+    value: &str,
+) -> Result<(), StorageError> {
+    with_immediate_tx(conn, hook, |tx| async move {
+        tx.execute(SET_CONFIG_SQL, libsql::params![key, value])
+            .await
+            .map_err(map_libsql_err)?;
+        Ok(((), tx))
+    })
+    .await
+}
+
+/// `unset_config`: DELETE the `config` row(s) whose [`read_config`] key spelling is `key`, in ONE
+/// `BEGIN IMMEDIATE`, returning whether a row was deleted (an absent key is `Ok(false)`, never an
+/// error). Matching the read's spelling is what lets `config unset` remove a hand-written non-`TEXT`
+/// row (D57 clause (2a)). Writes no `Event`.
+pub(super) async fn unset_config(
+    conn: &Connection,
+    hook: WriteHook<'_>,
+    key: &str,
+) -> Result<bool, StorageError> {
+    const SQL: &str = concat!(
+        "DELETE FROM config WHERE ",
+        config_cell_sql!("key"),
+        " = ?1"
+    );
+    with_immediate_tx(conn, hook, |tx| async move {
+        let changed = tx
+            .execute(SQL, libsql::params![key])
+            .await
+            .map_err(map_libsql_err)?;
+        Ok((changed >= 1, tx))
+    })
+    .await
+}
