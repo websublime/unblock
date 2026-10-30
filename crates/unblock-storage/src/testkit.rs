@@ -231,6 +231,8 @@ where
     contract_close_issues_closes_in_given_order(factory().await).await;
     contract_close_issues_skips_closed_and_tombstoned(factory().await).await;
     contract_close_issues_missing_id_rolls_back(factory().await).await;
+    // Config table (FR-13 full, D57 — spine §3.2.1 "Config table (D57)").
+    run_config_contract_cells(&factory).await;
 
     // Cross-cutting invariants.
     contract_noop_update_writes_no_event(factory().await).await;
@@ -3733,6 +3735,119 @@ pub async fn contract_close_issues_missing_id_rolls_back<S: Storage + StorageTes
         raw_before
     );
     assert_eq!(event_triples(&storage, "ub-valid").await, events_before);
+}
+
+// --------------------------------------------------------------------------------------------------
+// Config table (FR-13 full, D57 — spine §3.2.1 "Config table (D57)", PRD §4 D57 criterion (m))
+// --------------------------------------------------------------------------------------------------
+
+/// The config-table cells, registered in [`run_storage_contract_suite`] (D57 criterion (m)).
+async fn run_config_contract_cells<S, F, Fut>(factory: &F)
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = S>,
+    S: Storage,
+{
+    contract_config_read_orders_by_key(factory().await).await;
+    contract_config_set_inserts_then_overwrites(factory().await).await;
+    contract_config_unset_true_then_false(factory().await).await;
+    contract_config_writes_no_event(factory().await).await;
+}
+
+/// `read_config` is ORDERED BY KEY in byte order (`BINARY` collation — uppercase before lowercase),
+/// whatever the insertion order, and an empty table reads as no rows. Storage stores OPAQUE
+/// strings: a key no build knows and a value no parser accepts round-trip verbatim.
+pub async fn contract_config_read_orders_by_key<S: Storage>(storage: S) {
+    assert!(
+        storage.read_config().await.unwrap().is_empty(),
+        "a fresh store has no config rows"
+    );
+    storage.set_config("search_cap", "50").await.unwrap();
+    storage.set_config("actor", "bob").await.unwrap();
+    storage.set_config("Zeta", "not a key").await.unwrap();
+    storage.set_config("output_format", "§ junk").await.unwrap();
+    assert_eq!(
+        storage.read_config().await.unwrap(),
+        vec![
+            ("Zeta".to_string(), "not a key".to_string()),
+            ("actor".to_string(), "bob".to_string()),
+            ("output_format".to_string(), "§ junk".to_string()),
+            ("search_cap".to_string(), "50".to_string()),
+        ],
+        "byte order by key; opaque values verbatim"
+    );
+}
+
+/// `set_config` INSERTS a new key, then OVERWRITES it in place (an upsert — never a second row,
+/// never a silently dropped write), each in its own transaction, leaving other rows untouched.
+pub async fn contract_config_set_inserts_then_overwrites<S: Storage>(storage: S) {
+    storage.set_config("actor", "alice").await.unwrap();
+    storage.set_config("search_cap", "7").await.unwrap();
+    assert_eq!(
+        storage.read_config().await.unwrap(),
+        vec![
+            ("actor".to_string(), "alice".to_string()),
+            ("search_cap".to_string(), "7".to_string()),
+        ]
+    );
+    storage.set_config("actor", "bob").await.unwrap();
+    assert_eq!(
+        storage.read_config().await.unwrap(),
+        vec![
+            ("actor".to_string(), "bob".to_string()),
+            ("search_cap".to_string(), "7".to_string()),
+        ],
+        "the overwrite replaces the value in place; no duplicate row, the other row untouched"
+    );
+}
+
+/// `unset_config` returns `true` when it deleted a row and `false` — never an error — when no row
+/// held the key; the other rows are untouched.
+pub async fn contract_config_unset_true_then_false<S: Storage>(storage: S) {
+    storage.set_config("actor", "bob").await.unwrap();
+    storage.set_config("search_cap", "9").await.unwrap();
+    assert!(
+        storage.unset_config("actor").await.unwrap(),
+        "the first unset deletes the row"
+    );
+    assert!(
+        !storage.unset_config("actor").await.unwrap(),
+        "the second unset finds no row: Ok(false), not an error"
+    );
+    assert!(
+        !storage.unset_config("never-set").await.unwrap(),
+        "an absent key is Ok(false)"
+    );
+    assert_eq!(
+        storage.read_config().await.unwrap(),
+        vec![("search_cap".to_string(), "9".to_string())]
+    );
+}
+
+/// Neither config mutation writes an `Event` (a `config` row is workspace state, not an issue —
+/// the spine §3.2.1 `EventType` table) or touches any issue row.
+pub async fn contract_config_writes_no_event<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-1", "bystander"), "a")
+        .await
+        .unwrap();
+    let before = storage.get_issue("ub-1").await.unwrap().unwrap();
+    let events_before = storage.list_events("ub-1").await.unwrap().len();
+
+    storage.set_config("actor", "bob").await.unwrap();
+    storage.set_config("actor", "carol").await.unwrap();
+    assert!(storage.unset_config("actor").await.unwrap());
+
+    assert_eq!(
+        storage.list_events("ub-1").await.unwrap().len(),
+        events_before,
+        "config writes append no event"
+    );
+    assert_eq!(
+        storage.get_issue("ub-1").await.unwrap().unwrap(),
+        before,
+        "config writes touch no issue row"
+    );
 }
 
 // --------------------------------------------------------------------------------------------------

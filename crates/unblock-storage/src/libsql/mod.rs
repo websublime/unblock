@@ -50,6 +50,11 @@ pub(crate) use schema::CURRENT_SCHEMA_VERSION;
 // and a hint that hard-coded that number would be a second, un-pinned copy of it.
 pub(crate) use schema::BASELINE_SCHEMA_VERSION;
 
+// D57: the versions whose steps add each lying-stamp gap (`comments` columns: 2, the `config` table:
+// 3). Crate-internal, for the same reason as the baseline above: `src/error.rs` names them in the
+// per-gap reason and recovery, and a hard-coded copy would be an un-pinned second home.
+pub(crate) use migrations::{COMMENTS_STEP_VERSION, CONFIG_STEP_VERSION};
+
 // The `StorageTestkit` impl for `LibsqlStorage` lives **in-module** (gated) so it can reach the
 // `pub(super)` connection accessors (`read`/`write`) and `ids::next_child_number` without widening
 // any visibility at the crate root (resolved-decision #1). It is compiled for the crate's own tests
@@ -819,6 +824,22 @@ impl Storage for LibsqlStorage {
         let conn = self.write().await;
         crud::close_issues(&conn, self.hook(), ids, reason, actor).await
     }
+
+    // --- config table (FR-13 full, D57; spine §3.2.1 "Config table (D57)") ---
+
+    async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+        crud::read_config(self.read()).await
+    }
+
+    async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        let conn = self.write().await;
+        crud::set_config(&conn, self.hook(), key, value).await
+    }
+
+    async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+        let conn = self.write().await;
+        crud::unset_config(&conn, self.hook(), key).await
+    }
 }
 
 #[cfg(test)]
@@ -1166,11 +1187,11 @@ mod tests {
         );
     }
 
-    /// `migrate` stamps `user_version = 2` on a fresh DB (D46 — the fresh arm creates the BASELINE
+    /// `migrate` stamps `user_version = 3` on a fresh DB (D46 — the fresh arm creates the BASELINE
     /// and then FALLS THROUGH the ladder, so a brand-new database ends at the CURRENT version having
-    /// genuinely applied step 2).
+    /// genuinely applied steps 2 and 3; D57 added step 3, the `config` table).
     #[tokio::test]
-    async fn migrate_stamps_user_version_two() {
+    async fn migrate_stamps_user_version_three() {
         let storage = LibsqlStorage::open_in_memory().await.expect("open");
         storage.migrate().await.expect("migrate");
         let conn = storage.read();
@@ -1178,7 +1199,7 @@ mod tests {
         let row = rows.next().await.expect("row").expect("present");
         assert_eq!(
             row.get_value(0).expect("val").as_integer().copied(),
-            Some(2)
+            Some(3)
         );
     }
 
@@ -1198,7 +1219,7 @@ mod tests {
             result,
             Err(StorageError::SchemaMismatch {
                 found: 99,
-                expected: 2
+                expected: 3
             })
         ));
     }

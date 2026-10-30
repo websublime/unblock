@@ -18,7 +18,7 @@ use std::ops::Deref;
 
 use libsql::{Connection, Statement};
 use unblock_error::CodedError as _;
-use unblock_storage::{LibsqlStorage, Storage, StorageError};
+use unblock_storage::{LibsqlStorage, SchemaGap, Storage, StorageError};
 
 /// **FROZEN HISTORY — the baseline DDL as it stood when the migration ladder began. THE PAST CANNOT
 /// DRIFT, so this constant must NEVER be "updated" to track `SCHEMA_SQL`.**
@@ -325,7 +325,8 @@ async fn open_and_migrate(path: &std::path::Path) -> LibsqlStorage {
 ///
 /// The database a build before 2026-07-17 wrote: indistinguishable from a GA one by `user_version`,
 /// and unable to serve a single hydrated comment read. It must reach the seven-column shape stamped
-/// `2`, with the pre-existing row intact and both new columns NULL.
+/// at the current version (`3` since D57, with the step-3 `config` table), with the pre-existing row
+/// intact and both new columns NULL.
 ///
 /// MUTANT KILLED: emptying `MIGRATIONS` — the columns never arrive and the shape assertion goes red.
 ///
@@ -341,7 +342,7 @@ async fn a_five_column_database_stamped_one_reaches_the_current_shape() {
     let storage = open_and_migrate(&db).await;
     assert_eq!(
         storage.schema_version().await.expect("schema_version"),
-        2,
+        3,
         "the ladder advanced the stale database to the current stamp"
     );
 
@@ -414,7 +415,7 @@ async fn a_seven_column_database_stamped_one_succeeds_with_no_ddl() {
     let storage = open_and_migrate(&db).await;
     assert_eq!(
         storage.schema_version().await.expect("schema_version"),
-        2,
+        3,
         "an already-shaped database is still ADVANCED to the current stamp"
     );
 
@@ -439,7 +440,7 @@ async fn a_stamped_zero_database_with_tables_falls_through_the_ladder() {
     seed_historical(&db, 0).await;
 
     let storage = open_and_migrate(&db).await;
-    assert_eq!(storage.schema_version().await.expect("schema_version"), 2);
+    assert_eq!(storage.schema_version().await.expect("schema_version"), 3);
 
     let conn = raw(&db).await;
     assert_eq!(columns(&conn, "comments").await.len(), 7);
@@ -468,8 +469,8 @@ async fn a_fresh_database_reaches_the_current_shape_by_running_the_ladder() {
     let storage = open_and_migrate(&db).await;
     assert_eq!(
         storage.schema_version().await.expect("schema_version"),
-        2,
-        "0 -> 2 is a REAL migration even on a brand-new file"
+        3,
+        "0 -> 3 is a REAL migration even on a brand-new file"
     );
 
     let conn = raw(&db).await;
@@ -486,6 +487,11 @@ async fn a_fresh_database_reaches_the_current_shape_by_running_the_ladder() {
             "redacted_at"
         ],
         "a fresh database reaches the SEVEN-column shape through step 2, not through the DDL"
+    );
+    assert_eq!(
+        columns(&conn, "config").await,
+        vec!["key", "value"],
+        "D57 criterion (l): a fresh database reaches the step-3 `config` table through the ladder"
     );
 }
 
@@ -518,6 +524,7 @@ async fn a_migrated_database_and_a_fresh_one_agree_on_shape() {
         "events",
         "metadata",
         "child_counters",
+        "config",
     ] {
         assert_eq!(
             columns(&migrated_conn, table).await,
@@ -545,7 +552,7 @@ async fn re_migrating_is_a_noop_and_a_future_stamp_is_refused() {
 
     let storage = open_and_migrate(&db).await;
     storage.migrate().await.expect("re-migrate is a no-op");
-    assert_eq!(storage.schema_version().await.expect("schema_version"), 2);
+    assert_eq!(storage.schema_version().await.expect("schema_version"), 3);
     drop(storage);
 
     {
@@ -566,30 +573,32 @@ async fn re_migrating_is_a_noop_and_a_future_stamp_is_refused() {
             err,
             StorageError::SchemaMismatch {
                 found: 99,
-                expected: 2
+                expected: 3
             }
         ),
         "got {err:?}"
     );
 }
 
-/// **THE SENTINEL — a CURRENT-stamped database missing a newest-step column is an ERROR, never a
-/// silent read failure (spine §3.2 clause (v)).**
+/// **THE SENTINEL — a database whose stamp lies about the `comments` columns is an ERROR, never a
+/// silent read failure (spine §3.2 clause (v)) — KEPT on its stamp-2 seed since D57.**
 ///
-/// This is the lying-stamp state: the ladder does NOT run on it (the stamp is already current), which
-/// is why the witness must sit on EVERY exit path including the already-at-current early return.
-/// "Only where the ladder ran" is precisely the complement of the defect.
+/// The D46 seed: the stale five-column SHAPE stamped `2`. Since D57 step 3 follows that stamp, so
+/// the database first runs step 3 (the stamp becomes `3`) and only then fails the sentinel with
+/// `from = 2`, `to = 3` — the case the retired `from == to` dispatch would have handed the
+/// stale-direction text ("run `unblock migrate`"), which re-emits the same error forever. The
+/// error carries NON-EMPTY `gaps` naming each missing column and the step that adds it.
 ///
 /// MUTANT KILLED: deleting the sentinel — `migrate` returns `Ok(())` on a database that cannot serve
 /// a hydrated read, which is the exact false green D46 exists to end.
 ///
-/// MUTANT KILLED: running the sentinel only when the ladder ran — this cell's database is at the
-/// current stamp, so the ladder is skipped and the error never fires.
+/// MUTANT KILLED: restoring the `from == to` hint dispatch (D57) — `from = 2`, `to = 3` here, so the
+/// stale-direction text comes back and the lying-stamp assertions below go red.
 #[tokio::test]
 async fn a_lying_stamp_is_refused_naming_the_missing_column() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db = tmp.path().join("unblock.db");
-    // The stale SHAPE with the CURRENT stamp: nothing in `user_version` can tell them apart.
+    // The stale SHAPE stamped 2: nothing in `user_version` can tell it apart from a GA database.
     seed_historical(&db, 2).await;
 
     let storage = LibsqlStorage::open_local(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
@@ -600,30 +609,240 @@ async fn a_lying_stamp_is_refused_naming_the_missing_column() {
         .await
         .expect_err("a stamp that lies about the shape is an error");
 
-    let StorageError::Migration { reason, .. } = &err else {
+    let StorageError::Migration {
+        from,
+        to,
+        reason,
+        gaps,
+    } = &err
+    else {
         panic!("expected StorageError::Migration, got {err:?}");
     };
+    assert_eq!(
+        (*from, *to),
+        (2, 3),
+        "step 3 ran first, so the sentinel fires with from = 2, to = 3"
+    );
+    assert_eq!(
+        gaps,
+        &vec![
+            SchemaGap::CommentsColumn("updated_at"),
+            SchemaGap::CommentsColumn("redacted_at"),
+        ],
+        "the gaps name exactly the missing `comments` columns"
+    );
+    assert!(gaps.iter().all(|g| g.step_version() == 2));
     for column in STEP_TWO_COLUMNS {
         assert!(
             reason.contains(column),
             "the error must NAME what is missing; reason: {reason}"
         );
     }
-
-    // And it carries the self-correction hint (D46 clause (7)) — composed from these same fields.
-    //
-    // MUTANT KILLED (the one this cell exists for since the 2026-08-03 ruling): restoring the single
-    // shipped `Migration` text ("at schema version {from}, but this build expects {to} … Run
-    // `unblock migrate`"). On THIS database that text advises a command that cannot repair the
-    // state — `run_migrations` skips the ladder at this stamp, so the advised command returns this
-    // identical error forever — and it renders a delta between two numbers that are the same. Both
-    // assertions below go red on it: that text carries no `PRAGMA user_version` reset and does not
-    // name the stamp as the false thing.
-    let hint = err.hint().expect("the failure carries a hint");
     assert!(
-        hint.contains("PRAGMA user_version = 1"),
-        "the recovery that actually works starts by resetting the LYING stamp to the baseline, \
-         spelled out executably: {hint}"
+        reason.contains("schema version 2 adds"),
+        "the reason names the STEP that adds the columns: {reason}"
+    );
+    assert_eq!(err.code(), unblock_error::ErrorCode::SchemaMismatch);
+
+    let hint = err.hint().expect("the failure carries a hint");
+    assert_lying_stamp_hint(&hint, 1, false);
+
+    // The advice is EXECUTABLE, not aspirational: follow it literally and the database recovers.
+    follow_hint(&db, 1, false).await;
+    assert_recovered(&db).await;
+}
+
+/// **D57 criterion (l)(ii) — the stamp-3 twin of the cell above:** the stale `comments` shape
+/// stamped at the CURRENT version, the step-3 `config` table present. The ladder does NOT run at this
+/// stamp, which is why the witness sits on EVERY exit path including the already-at-current return.
+///
+/// MUTANT KILLED: running the sentinel only when the ladder ran — this database is at the current
+/// stamp, so the ladder is skipped and the error would never fire.
+#[tokio::test]
+async fn a_lying_stamp_three_is_refused_naming_the_missing_column() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = tmp.path().join("unblock.db");
+    seed_historical(&db, 3).await;
+    {
+        let conn = raw(&db).await;
+        conn.execute_batch(CONFIG_TABLE_SQL)
+            .await
+            .expect("the step-3 table is present");
+    }
+
+    let err = migrate_err(&db).await;
+    let StorageError::Migration { from, to, gaps, .. } = &err else {
+        panic!("expected StorageError::Migration, got {err:?}");
+    };
+    assert_eq!((*from, *to), (3, 3));
+    assert_eq!(
+        gaps,
+        &vec![
+            SchemaGap::CommentsColumn("updated_at"),
+            SchemaGap::CommentsColumn("redacted_at"),
+        ]
+    );
+    assert_lying_stamp_hint(&err.hint().expect("hint"), 1, false);
+
+    follow_hint(&db, 1, false).await;
+    assert_recovered(&db).await;
+}
+
+/// **D57 criterion (l)(iii) — a stamp-3 database whose `config` table is ABSENT.** The gap is
+/// [`SchemaGap::ConfigTable`] (version 3 creates it); the hint resets the stamp to `2` — never the
+/// baseline, and never a `DROP` — so step 3 re-runs and creates the table.
+///
+/// MUTANT KILLED: one reset stamp for every gap (resetting to `1` here re-runs step 2 needlessly;
+/// the exact-`2` assertion fires).
+#[tokio::test]
+async fn a_stamp_three_database_missing_the_config_table_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = tmp.path().join("unblock.db");
+    drop(open_and_migrate(&db).await);
+    {
+        let conn = raw(&db).await;
+        conn.execute("DROP TABLE config", ())
+            .await
+            .expect("drop the step-3 table under a stamp that claims it");
+    }
+
+    let err = migrate_err(&db).await;
+    let StorageError::Migration {
+        from,
+        to,
+        reason,
+        gaps,
+    } = &err
+    else {
+        panic!("expected StorageError::Migration, got {err:?}");
+    };
+    assert_eq!((*from, *to), (3, 3));
+    assert_eq!(gaps, &vec![SchemaGap::ConfigTable]);
+    assert_eq!(gaps[0].step_version(), 3);
+    assert!(
+        reason.contains("`config` table that schema version 3 creates is absent"),
+        "{reason}"
+    );
+    assert_lying_stamp_hint(&err.hint().expect("hint"), 2, false);
+
+    follow_hint(&db, 2, false).await;
+    assert_recovered(&db).await;
+}
+
+/// **D57 criterion (l)(iv) — a stamp-3 database whose `config` table LACKS a column.** The gap is
+/// [`SchemaGap::ConfigColumn`]; step 3's `IF NOT EXISTS` would keep the broken table, so the hint
+/// says `DROP TABLE config` first (its rows are LOST — disclosed), then reset to `2`.
+///
+/// MUTANT KILLED: a missing-column branch that skips the `DROP` — following that hint keeps the
+/// broken table and the recovery loops (the post-recovery `migrate` fails).
+#[tokio::test]
+async fn a_stamp_three_database_whose_config_table_lacks_a_column_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = tmp.path().join("unblock.db");
+    drop(open_and_migrate(&db).await);
+    {
+        let conn = raw(&db).await;
+        conn.execute_batch(
+            "DROP TABLE config; CREATE TABLE config (key TEXT PRIMARY KEY NOT NULL);",
+        )
+        .await
+        .expect("a config table without its value column");
+    }
+
+    let err = migrate_err(&db).await;
+    let StorageError::Migration { gaps, reason, .. } = &err else {
+        panic!("expected StorageError::Migration, got {err:?}");
+    };
+    assert_eq!(gaps, &vec![SchemaGap::ConfigColumn("value")]);
+    assert!(reason.contains("value"), "{reason}");
+    assert_lying_stamp_hint(&err.hint().expect("hint"), 2, true);
+
+    follow_hint(&db, 2, true).await;
+    assert_recovered(&db).await;
+}
+
+/// **NFR-19 — the SEED-STAMP-2 cell (D57 clause (9), criterion (l)).** A database as every GA,
+/// v1.0.1 and v1.0.2 build left it — seven-column `comments`, stamped `2`, no `config` table —
+/// migrates to `3` on open, gaining the `config` table and PRESERVING its rows verbatim.
+///
+/// MUTANT KILLED: leaving `CURRENT_SCHEMA_VERSION` at `2` with the step present (a compile error via
+/// the ladder-contiguity assertion); a step 3 that recreates `comments` (the row assertion fires).
+#[tokio::test]
+async fn a_seven_column_database_stamped_two_reaches_three_preserving_rows() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = tmp.path().join("unblock.db");
+    seed_historical(&db, 1).await;
+    {
+        let conn = raw(&db).await;
+        for column in STEP_TWO_COLUMNS {
+            conn.query(
+                &format!("ALTER TABLE comments ADD COLUMN {column} DATETIME"),
+                (),
+            )
+            .await
+            .expect("the seven-column shape stamp 2 always has");
+        }
+        conn.query("PRAGMA user_version = 2", ())
+            .await
+            .expect("stamp 2");
+    }
+    seed_historical_comment(&db, "ub-ga", "written by a GA build").await;
+    assert!(
+        columns(&*raw(&db).await, "config").await.is_empty(),
+        "the seed has no config table"
+    );
+
+    let storage = open_and_migrate(&db).await;
+    assert_eq!(storage.schema_version().await.expect("schema_version"), 3);
+    assert!(
+        storage.read_config().await.expect("read_config").is_empty(),
+        "the new table is empty"
+    );
+    let issue = storage
+        .get_issue("ub-ga")
+        .await
+        .expect("get")
+        .expect("the issue survived");
+    assert_eq!(issue.comments.len(), 1);
+    assert_eq!(issue.comments[0].body, "written by a GA build");
+    let conn = raw(&db).await;
+    assert_eq!(columns(&conn, "comments").await.len(), 7);
+    assert_eq!(columns(&conn, "config").await, vec!["key", "value"]);
+}
+
+/// Step 3's DDL as the production ladder applies it — a FIXTURE copy, for seeding the stamp-3 twin.
+const CONFIG_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)";
+
+/// Open `db` and return the `migrate()` error the sentinel raises.
+async fn migrate_err(db: &std::path::Path) -> StorageError {
+    let storage = LibsqlStorage::open_local(db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+        .await
+        .expect("open_local");
+    storage
+        .migrate()
+        .await
+        .expect_err("a stamp that lies about the shape is an error")
+}
+
+/// The lying-stamp hint for one branch: the stamp named as the false thing, the executable reset to
+/// `reset_to`, a `DROP TABLE config` exactly when `drops_config`, then `unblock migrate` — and NEVER
+/// the stale-direction text.
+fn assert_lying_stamp_hint(hint: &str, reset_to: i32, drops_config: bool) {
+    assert!(
+        hint.contains(&format!("PRAGMA user_version = {reset_to}")),
+        "the recovery resets the LYING stamp to {reset_to}, spelled out executably: {hint}"
+    );
+    for other in [1, 2].iter().filter(|s| **s != reset_to) {
+        assert!(
+            !hint.contains(&format!("PRAGMA user_version = {other}")),
+            "exactly one reset stamp: {hint}"
+        );
+    }
+    assert_eq!(
+        hint.contains("DROP TABLE config"),
+        drops_config,
+        "the DROP appears exactly on the missing-column branch: {hint}"
     );
     assert!(
         hint.contains("STAMP is what is wrong"),
@@ -635,19 +854,27 @@ async fn a_lying_stamp_is_refused_naming_the_missing_column() {
     );
     assert!(
         !hint.contains("but this build expects"),
-        "the retired text claimed a version delta between two IDENTICAL numbers: {hint}"
+        "NEVER the stale-direction text, which re-emits this same error: {hint}"
     );
+}
 
-    // The advice is EXECUTABLE, not aspirational: follow it literally and the database recovers.
-    // (This is what makes the hint the remedy rather than a description — there is no in-product
-    // rescue verb for this state, since `sync export` is broken by the same stale shape.)
-    {
-        let conn = raw(&db).await;
-        conn.query("PRAGMA user_version = 1", ())
+/// Follow the lying-stamp hint literally: `DROP TABLE config` when told to, reset the stamp.
+async fn follow_hint(db: &std::path::Path, reset_to: i32, drop_config: bool) {
+    let conn = raw(db).await;
+    if drop_config {
+        conn.execute("DROP TABLE config", ())
             .await
-            .expect("reset the lying stamp to the baseline, exactly as the hint says");
+            .expect("drop the incomplete table, exactly as the hint says");
     }
-    let storage = LibsqlStorage::open_local(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+    conn.query(&format!("PRAGMA user_version = {reset_to}"), ())
+        .await
+        .expect("reset the lying stamp, exactly as the hint says");
+}
+
+/// After following the hint, `unblock migrate` reaches a GREEN open at the current version with
+/// every witnessed piece present.
+async fn assert_recovered(db: &std::path::Path) {
+    let storage = LibsqlStorage::open_local(db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
         .await
         .expect("open_local");
     storage
@@ -656,10 +883,10 @@ async fn a_lying_stamp_is_refused_naming_the_missing_column() {
         .expect("the hint's recovery repairs the database it fired on");
     assert_eq!(
         storage.schema_version().await.expect("schema_version"),
-        2,
+        3,
         "the recovered database ends at the current version"
     );
-    let conn = raw(&db).await;
+    let conn = raw(db).await;
     let present = columns(&conn, "comments").await;
     for column in STEP_TWO_COLUMNS {
         assert!(
@@ -667,4 +894,5 @@ async fn a_lying_stamp_is_refused_naming_the_missing_column() {
             "the recovery ADDS the missing column {column}; columns: {present:?}"
         );
     }
+    assert_eq!(columns(&conn, "config").await, vec!["key", "value"]);
 }

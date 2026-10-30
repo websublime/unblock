@@ -39,7 +39,11 @@
 /// ladder now carries its first real step and this constant names the version that step reaches;
 /// [`BASELINE_SCHEMA_VERSION`] names the version [`SCHEMA_SQL`] itself creates. Any database whose
 /// `user_version` is **greater** than this is rejected with [`crate::StorageError::SchemaMismatch`].
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 2;
+///
+/// **D57 (v1.1) — `2` → `3`.** Step 3 creates the FR-13-full `config` table (PRD §4 D57 clause (9)),
+/// the ladder's first ordinary `Sql` step. A stamp-2 database (every GA, v1.0.1 and v1.0.2 database)
+/// reaches 3 implicitly on open; an OLDER binary meets a stamp-3 database with `SCHEMA_MISMATCH`.
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 /// The version the embedded [`SCHEMA_SQL`] tables correspond to (D46, v1.0.1).
 ///
@@ -304,9 +308,11 @@ const SCHEMA_CONTENT_DIGEST: u64 = {
 /// in the tree — a build script, an `include!`, an `env!`, or a committed test that writes the
 /// literal — would make the pin self-satisfying.
 ///
-/// Blessed ONCE, at the D46 implementation commit, over the POST-revert state of that same commit:
-/// the five-column baseline `comments` table, `CURRENT_SCHEMA_VERSION = 2`, and the one-step ladder.
-const BLESSED_SCHEMA_CONTENT_DIGEST: u64 = 0xf764_6f13_a7e9_95ba;
+/// Blessed at the D46 implementation commit (five-column baseline `comments`,
+/// `CURRENT_SCHEMA_VERSION = 2`, the one-step ladder) and RE-BLESSED at the D57 implementation
+/// commit: `SCHEMA_SQL` unchanged, `CURRENT_SCHEMA_VERSION = 3`, the two-step ladder with step 3's
+/// `CREATE TABLE IF NOT EXISTS config` SQL text hashed.
+const BLESSED_SCHEMA_CONTENT_DIGEST: u64 = 0x7e3c_ee6f_885e_0ed4;
 
 const _: () = assert!(
     SCHEMA_CONTENT_DIGEST == BLESSED_SCHEMA_CONTENT_DIGEST,
@@ -320,10 +326,11 @@ const _: () = assert!(
 mod tests {
     use super::{BASELINE_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION};
 
-    /// The stamp this build writes (D46: `1` → `2`). A by-VALUE pin — moving it is deliberate.
+    /// The stamp this build writes (D46: `1` → `2`; D57: `2` → `3`). A by-VALUE pin — moving it is
+    /// deliberate.
     #[test]
-    fn schema_version_is_two() {
-        assert_eq!(CURRENT_SCHEMA_VERSION, 2);
+    fn schema_version_is_three() {
+        assert_eq!(CURRENT_SCHEMA_VERSION, 3);
     }
 
     /// The DDL's own version (D46 clause (1)) — the version `SCHEMA_SQL` creates, distinct from the

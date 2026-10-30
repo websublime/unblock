@@ -161,7 +161,7 @@ mod tests {
     use super::ConfigError;
     use std::path::PathBuf;
     use unblock_error::{CodedError, ErrorCode};
-    use unblock_storage::StorageError;
+    use unblock_storage::{SchemaGap, StorageError};
 
     #[test]
     fn workspace_not_found_maps_to_not_initialized() {
@@ -204,6 +204,7 @@ mod tests {
             from: 1,
             to: 2,
             reason: "step failed".to_string(),
+            gaps: Vec::new(),
         };
         assert_eq!(inner.code(), ErrorCode::SchemaMismatch);
         let err = ConfigError::MigrationFailed { source: inner };
@@ -237,12 +238,19 @@ mod tests {
     fn db_open_and_migration_failures_forward_the_storage_hint() {
         use unblock_error::StructuredError;
 
+        let gaps = || {
+            vec![
+                SchemaGap::CommentsColumn("updated_at"),
+                SchemaGap::CommentsColumn("redacted_at"),
+            ]
+        };
+        let reason = "the `comments` table is missing the column(s) updated_at, redacted_at that \
+                      schema version 2 adds";
         let inner = StorageError::Migration {
             from: 2,
-            to: 2,
-            reason: "the `comments` table is missing the column(s) updated_at, redacted_at that \
-                     schema version 2 adds"
-                .to_string(),
+            to: 3,
+            reason: reason.to_string(),
+            gaps: gaps(),
         };
         let expected = inner.hint().expect("storage composes the hint");
 
@@ -250,11 +258,9 @@ mod tests {
             ConfigError::MigrationFailed {
                 source: StorageError::Migration {
                     from: 2,
-                    to: 2,
-                    reason:
-                        "the `comments` table is missing the column(s) updated_at, redacted_at \
-                             that schema version 2 adds"
-                            .to_string(),
+                    to: 3,
+                    reason: reason.to_string(),
+                    gaps: gaps(),
                 },
             },
             ConfigError::DbOpenFailed {
@@ -347,6 +353,7 @@ mod tests {
                     from: 1,
                     to: 2,
                     reason: "r".to_string(),
+                    gaps: Vec::new(),
                 },
             },
             ConfigError::ActorUnresolved,

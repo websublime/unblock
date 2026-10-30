@@ -619,6 +619,22 @@ impl Storage for StorageInjector {
     ) -> Result<Vec<String>, unblock_storage::StorageError> {
         self.inner.close_issues(ids, reason, actor).await
     }
+
+    async fn read_config(&self) -> Result<Vec<(String, String)>, unblock_storage::StorageError> {
+        self.inner.read_config().await
+    }
+
+    async fn set_config(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), unblock_storage::StorageError> {
+        self.inner.set_config(key, value).await
+    }
+
+    async fn unset_config(&self, key: &str) -> Result<bool, unblock_storage::StorageError> {
+        self.inner.unset_config(key).await
+    }
 }
 
 #[tokio::test]

@@ -60,7 +60,7 @@ mod trait_def;
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
 
-pub use error::{BackendOpaque, StorageError};
+pub use error::{BackendOpaque, SchemaGap, StorageError};
 pub use filters::{DeleteMode, DeletePlan, IssuePatch};
 pub use libsql::{LibsqlStorage, WriteLockGuard};
 pub use trait_def::Storage;
