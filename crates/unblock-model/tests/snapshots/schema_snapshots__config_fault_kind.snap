@@ -1,0 +1,26 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConfigFaultKind",
+  "description": "Why a database `config` row contributes no value.",
+  "oneOf": [
+    {
+      "description": "The row names a startup key, which only the command line, the environment and the project\nfile may set. Blocking.",
+      "type": "string",
+      "const": "startup_key"
+    },
+    {
+      "description": "The row's value cannot be decoded for its key. Blocking.",
+      "type": "string",
+      "const": "invalid_value"
+    },
+    {
+      "description": "The row names a key this build does not know. Not blocking.",
+      "type": "string",
+      "const": "unknown_key"
+    }
+  ]
+}
