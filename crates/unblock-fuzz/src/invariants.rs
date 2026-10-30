@@ -77,3 +77,21 @@ pub fn assert_code_total(code: ErrorCode) {
         "ErrorCode::as_str must be defined"
     );
 }
+
+/// Assert the FR-13 layered precedence on a resolved runtime snapshot (D57, the `config_toml`
+/// core): `output_format` resolved to `expected` and its `source` names the layer that supplied it —
+/// the highest set layer of CLI > env (`UNBLOCK_*`) > project > defaults.
+pub fn assert_config_precedence(
+    runtime: &unblock_config::RuntimeConfig,
+    expected: unblock_config::OutputFormat,
+    source: unblock_model::ConfigSource,
+) {
+    assert_eq!(
+        runtime.output_format, expected,
+        "output_format must come from the highest set layer"
+    );
+    assert_eq!(
+        runtime.sources.output_format, source,
+        "output_format's source must name the layer that supplied it"
+    );
+}

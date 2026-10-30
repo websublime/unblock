@@ -1,0 +1,4 @@
+db_filename = "other.db"
+id_prefix = "zz"
+write_lock_timeout_ms = 10
+deletions_retention_days = 3

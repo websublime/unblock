@@ -19,6 +19,10 @@
 //! - **error (D43):** `dup_scan` ([`run_dup_scan_case`]) — the DIFFERENTIAL duplicate-JSON-key
 //!   target: the scanner's verdict is compared against an independent duplicate-preserving walker
 //!   ([`RawJson`]) for under-rejection, and against rmcp's own frame parse for over-rejection.
+//! - **config (D57, v1.1):** `config_toml` ([`run_config_toml_case`]) — the same bytes parsed as
+//!   BOTH TOML layers through `unblock-config`: the project file (total parse + resolve-only open,
+//!   CLI > env > project > defaults precedence) and the user file (a startup key is always
+//!   `StartupKeyInRuntimeLayer`, never a panic and never a silent accept).
 //!
 //! The JSONL/`bd`/sync targets are **post-T0.7** (they need `unblock-sync`, which this member does
 //! not yet depend on). See `docs/plans/crates/unblock-fuzz.md`.
@@ -32,6 +36,7 @@
 #![forbid(unsafe_code)]
 
 mod arbitraries;
+mod config_target;
 mod cursor;
 mod dup_scan_target;
 pub mod invariants;
@@ -42,6 +47,7 @@ mod workspace;
 use snafu::Snafu;
 
 pub use arbitraries::{arbitrary_issue, arbitrary_issues, normalize_issue};
+pub use config_target::{ConfigCorpus, run_config_toml_case};
 pub use cursor::{ByteCursor, CursorExt};
 pub use dup_scan_target::{RawJson, run_dup_scan_case};
 pub use model_targets::{

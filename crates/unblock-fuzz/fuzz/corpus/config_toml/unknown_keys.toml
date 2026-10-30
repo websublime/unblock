@@ -1,0 +1,5 @@
+future_key = 1
+[future_table]
+nested = "x"
+[remote]
+url = "https://example.invalid"

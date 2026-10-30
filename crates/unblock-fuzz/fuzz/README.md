@@ -58,5 +58,11 @@ cargo +nightly-2026-04-01 fuzz coverage content_hash
 | `cycle_detect` | the cycle detector **always terminates** on a fuzzer-built dependency graph; `add_dependency` never lets a gating cycle through the public path; a cycle planted via the testkit seam is detected. |
 | `id_alloc` | the id child-counter high-water mark advances **monotonically** past the children created. |
 
+### config (L4, D57 — v1.1)
+
+| Target | Proves |
+|---|---|
+| `config_toml` | the same bytes parsed as BOTH TOML layers through `unblock-config` never panic: as the project file, `ProjectConfig::load` and the resolve-only open are `Ok` or a non-empty structured `CONFIG_PARSE_ERROR`/`CONFIG_ERROR`/`IO_ERROR`, and an accepted file honours CLI > env > project > defaults; as the user file, `load_user_config` agrees with the project parse — any startup key (either `jsonl_filename` spelling) is `StartupKeyInRuntimeLayer { layer: user }`, never a silent accept, and `jsonl_export` is refused. |
+
 The JSONL/`bd`/sync targets are **post-T0.7** (they need `unblock-sync`, which the member crate does
 not yet depend on). See `docs/plans/crates/unblock-fuzz.md`.
