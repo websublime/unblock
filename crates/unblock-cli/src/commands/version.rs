@@ -2,15 +2,19 @@
 //! values. Runs with NO workspace, NO network, NO git (NFR-6/D13; the update-check lives only in
 //! `unblock update`). Rendered via the shared to-`DiagnosticReport` path.
 
+use unblock_config::ProcessEnv;
+
 use crate::cli::{GlobalArgs, VersionArgs};
 use crate::exit::CliError;
-use crate::output::{self, ToDiagnosticReport, VersionReport};
+use crate::output::{self, FormatPass, ToDiagnosticReport, VersionReport};
 
 /// Run `unblock version`.
 ///
 /// `--short` prints the bare `CARGO_PKG_VERSION` and returns. Otherwise builds a `VersionReport` from
 /// compile-time env (`option_env!("UNBLOCK_BUILD_*")`, absent → `None`) and renders it in the format
-/// resolved from CLI+env (no workspace → `--output > UNBLOCK_OUTPUT_FORMAT > Json`, FR-13/SF-1).
+/// resolved with no workspace: `--output > UNBLOCK_OUTPUT_FORMAT > the user file's output_format >
+/// Json` (FR-13/SF-1, PRD §4 D57 clause (6)). This is the command's OWN-REPORT pass: a user file
+/// that fails to load is ONE stderr warning and never fails `version`.
 ///
 /// # Errors
 /// - [`CliError::Render`]/[`CliError::Io`] if rendering / writing the report fails.
@@ -32,7 +36,7 @@ pub fn run(args: &VersionArgs, global: &GlobalArgs) -> Result<Option<u8>, CliErr
         features: enabled_features(),
     };
 
-    let fmt = output::pick_cli_format(global);
+    let fmt = output::pick_cli_format(global, &ProcessEnv, FormatPass::OwnReport);
     output::emit_report(&report.to_report(), fmt).map(|()| None)
 }
 

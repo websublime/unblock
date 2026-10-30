@@ -2,21 +2,21 @@
 //! the SAME engine-level outcome as the identical op called on `Session` directly. The CLI is a thin
 //! adapter over the single mutation home (D14) — it must not compute anything the engine doesn't.
 //!
-//! Both sides run against the SAME on-disk workspace (opened through the SAME config facade the CLI
-//! uses, `open_with_storage_with_cli`), so any drift between the CLI's rendered report and the engine
-//! truth fails here.
+//! Both sides run against the SAME on-disk workspace (opened through the SAME config facade body the
+//! CLI uses, here via its `open_with_storage_with_env` test entry over an EMPTY injected environment,
+//! D57/NFR-16), so any drift between the CLI's rendered report and the engine truth fails here.
 
 mod common;
 
-use common::{Workspace, output_locked};
+use common::{MapEnv, Workspace, output_locked};
 use serde_json::Value;
-use unblock_config::{CliOverrides, open_with_storage_with_cli};
+use unblock_config::{CliOverrides, open_with_storage_with_env};
 use unblock_engine::{Session, SessionConfig};
 
 /// Open a `Session` directly over `ws`'s workspace via the SAME facade the CLI dispatches through.
 async fn open_session(ws: &Workspace) -> Session {
     let overrides = CliOverrides::new().with_dir(ws.unblock_dir());
-    let ctx = open_with_storage_with_cli(&overrides)
+    let ctx = open_with_storage_with_env(None, &overrides, &MapEnv::empty())
         .await
         .expect("open workspace via the config facade");
     Session::open(
@@ -86,7 +86,7 @@ async fn migrate_cli_matches_session_directly() {
     let cli_applied = detail(&cli_report, "applied").expect("applied");
 
     let overrides = CliOverrides::new().with_dir(engine_ws.unblock_dir());
-    let ctx = open_with_storage_with_cli(&overrides)
+    let ctx = open_with_storage_with_env(None, &overrides, &MapEnv::empty())
         .await
         .expect("open workspace via the config facade");
     let pre_open = ctx.schema_version_before_migrate;

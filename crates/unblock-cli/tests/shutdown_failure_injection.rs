@@ -364,9 +364,10 @@ async fn c_neg_reopen_and_check_oracle_channels_can_both_fail() {
 /// is not reused here: every OTHER case funnels through it expecting `integrity_check` to never fail).
 async fn integrity_channel_detects_a_problem(root: &std::path::Path) -> bool {
     let overrides = unblock_config::CliOverrides::new().with_dir(root.join(".unblock"));
-    let ctx = unblock_config::open_with_storage_with_cli(&overrides)
-        .await
-        .expect("reopen workspace via the config facade");
+    let ctx =
+        unblock_config::open_with_storage_with_env(None, &overrides, &common::MapEnv::empty())
+            .await
+            .expect("reopen workspace via the config facade");
     let session = unblock_engine::Session::open(ctx, unblock_engine::SessionConfig::default())
         .await
         .expect("reopen session");

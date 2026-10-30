@@ -133,6 +133,38 @@ async fn update_refuses_a_receiptless_binary_and_swaps_nothing() {
     );
 }
 
+/// **D57 criterion (n) — `unblock update` with a malformed user file prints no user-file warning.**
+/// `update` takes only the silent error pre-pass and reads the user file nowhere else (PRD §4 D57
+/// clause (6)), so its receiptless refusal is unchanged — exit 1, a JSON `INTERNAL_ERROR` on stdout
+/// in the JSON default — and its stderr carries no warning about the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_update_with_a_malformed_user_file_prints_no_user_file_warning() {
+    let server = untrusted_release_server().await;
+    let empty_config = tempfile::tempdir().expect("empty config tempdir");
+    let home = common::user_config_home("output_format = [unclosed\n");
+    let out = output_locked(
+        unblock()
+            .arg("update")
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("AXOUPDATER_CONFIG_PATH", empty_config.path())
+            .env_remove("AXOUPDATER_CONFIG_WORKING_DIR")
+            .env(GHE_BASE_URL_ENV, server.uri()),
+        "run `unblock update` under a malformed user file",
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the receiptless refusal; stderr: {stderr}"
+    );
+    let value: Value = serde_json::from_slice(&out.stdout).expect("the JSON default error");
+    assert_eq!(value["code"], "INTERNAL_ERROR");
+    assert!(
+        !stderr.contains("user config file") && !stderr.contains("warning: "),
+        "update never reports the user file: {stderr}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_dry_run_refuses_a_receiptless_binary_and_swaps_nothing() {
     let server = untrusted_release_server().await;
