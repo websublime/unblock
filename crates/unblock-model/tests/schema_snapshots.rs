@@ -55,6 +55,20 @@ schema_test!(
     "close_eligible_outcome",
     unblock_model::CloseEligibleOutcome
 );
+// D57 (FR-13 full, v1.1): the `config` action's result row and the DB-layer fault types (spine §1.10).
+schema_test!(config_source, "config_source", unblock_model::ConfigSource);
+schema_test!(
+    config_fault_kind,
+    "config_fault_kind",
+    unblock_model::ConfigFaultKind
+);
+schema_test!(config_fault, "config_fault", unblock_model::ConfigFault);
+schema_test!(
+    db_config_fault,
+    "db_config_fault",
+    unblock_model::DbConfigFault
+);
+schema_test!(config_entry, "config_entry", unblock_model::ConfigEntry);
 
 schema_test!(list_filters, "list_filters", unblock_model::ListFilters);
 schema_test!(

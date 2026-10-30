@@ -1,0 +1,46 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConfigSource",
+  "description": "The layer that supplied a resolved runtime configuration value, highest precedence first.",
+  "oneOf": [
+    {
+      "description": "A command-line flag.",
+      "type": "string",
+      "const": "cli"
+    },
+    {
+      "description": "An `UNBLOCK_*` environment variable.",
+      "type": "string",
+      "const": "env"
+    },
+    {
+      "description": "The project file, `.unblock/config.toml`.",
+      "type": "string",
+      "const": "project"
+    },
+    {
+      "description": "The user file, `config.toml` under the user configuration directory.",
+      "type": "string",
+      "const": "user"
+    },
+    {
+      "description": "A row of the database `config` table.",
+      "type": "string",
+      "const": "db"
+    },
+    {
+      "description": "The operating-system user name (the actor's `$USER` fallback).",
+      "type": "string",
+      "const": "os_user"
+    },
+    {
+      "description": "The built-in default.",
+      "type": "string",
+      "const": "default"
+    }
+  ]
+}
