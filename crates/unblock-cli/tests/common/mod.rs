@@ -138,20 +138,41 @@ impl Workspace {
 /// snapshot. They are set rather than removed because a removed `HOME` falls back to
 /// `USERPROFILE`, and an empty home is the one value that is hermetic on every OS. A case that wants
 /// a user file sets `XDG_CONFIG_HOME` back with `Command::env` (which wins over this one).
+///
+/// The REST of the resolution's environment is scrubbed for the same hermeticity (Verify round 1):
+/// `USER` (the actor's `os_user` tier) and `USERPROFILE` (the user-file home fallback), the other
+/// `UNBLOCK_*` variables config parses (`UNBLOCK_JSONL`, `UNBLOCK_REMOTE_URL`,
+/// `UNBLOCK_AUTH_TOKEN` — a malformed host value would fail every open), and `RUST_LOG` (a host
+/// `RUST_LOG=info` adds stderr lines that break the "exactly one stderr line" cells).
 #[must_use]
 pub fn unblock() -> Command {
     let mut cmd = Command::cargo_bin("unblock").expect("locate the `unblock` binary");
-    cmd.env_remove("CLAUDE_PROJECT_DIR");
-    cmd.env_remove("UNBLOCK_DIR");
-    cmd.env_remove("UNBLOCK_ACTOR");
-    // FR-13/D48: see the paragraph above — inherited, it makes the frame-only cells vacuous.
-    cmd.env_remove("UNBLOCK_OUTPUT_FORMAT");
+    for key in SCRUBBED_ENV {
+        cmd.env_remove(key);
+    }
     // D57: see the paragraph above — no host user file reaches a spawn.
     let home = empty_user_home();
     cmd.env("XDG_CONFIG_HOME", &home);
     cmd.env("HOME", &home);
     cmd
 }
+
+/// Every variable [`unblock`] REMOVES from a spawn's environment (see its doc): the discovery
+/// inputs, every `UNBLOCK_*` variable config reads, the actor's and the user file's OS fallbacks,
+/// and `RUST_LOG`.
+pub const SCRUBBED_ENV: [&str; 10] = [
+    "CLAUDE_PROJECT_DIR",
+    "UNBLOCK_DIR",
+    "UNBLOCK_ACTOR",
+    // FR-13/D48: see the paragraph above — inherited, it makes the frame-only cells vacuous.
+    "UNBLOCK_OUTPUT_FORMAT",
+    "UNBLOCK_JSONL",
+    "UNBLOCK_REMOTE_URL",
+    "UNBLOCK_AUTH_TOKEN",
+    "USER",
+    "USERPROFILE",
+    "RUST_LOG",
+];
 
 /// The EMPTY directory every spawn gets as `XDG_CONFIG_HOME` and `HOME` (D57, NFR-16): a fixed
 /// directory under this crate's `CARGO_TARGET_TMPDIR`, created on first use and never written, so

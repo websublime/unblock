@@ -270,6 +270,30 @@ fn config_init_refuses_a_bad_user_file_with_nothing_written() {
     }
 }
 
+/// **D57 clause (6), "ANY user file the open would refuse fails `init` with NOTHING written"** —
+/// the layer-VALUE half: a user `search_cap = 0`, a blank actor and an over-long actor are refused
+/// by `init`'s `load_user_config` pre-check with exit 7, `CONFIG_ERROR` naming the key, and an
+/// EMPTY root (no `.unblock/`, no `config.toml`, no `unblock.db`, no `AGENTS.md`).
+///
+/// MUTANT KILLED: dropping the user-file bound check (the open would then refuse the file after
+/// `init` had created `.unblock/`, `config.toml` and `unblock.db`).
+#[test]
+fn config_init_refuses_an_out_of_bound_user_value_with_nothing_written() {
+    let long_actor = format!("actor = \"{}\"\n", "a".repeat(201));
+    for (contents, key) in [
+        ("search_cap = 0\n", "search_cap"),
+        ("actor = \"   \"\n", "actor"),
+        (long_actor.as_str(), "actor"),
+    ] {
+        let error = init_with_user_file(contents, "CONFIG_ERROR");
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(&format!("`{key}`")),
+            "{contents}: the refusal names the key: {error}"
+        );
+    }
+}
+
 /// Runs `init --agents -o json` in a fresh root under a user file holding `contents`, asserts exit 7
 /// with `code` and an EMPTY root (no `.unblock/`, no `_unblock/`, no `AGENTS.md`), and returns the
 /// error document.
@@ -400,13 +424,20 @@ fn config_agents_resolves_over_five_layers_and_never_opens_the_database() {
         "the resolve-only facade never opens or creates the database"
     );
 
+    // A storage-bearing open would FAIL here (`migrate` exits 2 on the corrupted schema page), so
+    // `agents` exiting 0 over the SAME file proves it never opens the database at all — a blocking
+    // `config` row could not prove that, because the storage-bearing open succeeds over one too.
+    // The DB layer's VALUE invisibility is the config facade cell
+    // `the_resolve_only_open_never_reads_the_db_layer`.
     let ws = Workspace::init();
-    common::plant_config_row(&ws.db_path(), "db_filename", "x.db");
-    let out = output_locked(ws.cmd().arg("agents"), "run agents over a blocking row");
+    common::corrupt_db_schema_page(&ws.db_path());
+    let migrate = output_locked(ws.cmd().arg("migrate"), "run migrate over a corrupted db");
+    assert_eq!(migrate.status.code(), Some(2), "the database is unreadable");
+    let out = output_locked(ws.cmd().arg("agents"), "run agents over a corrupted db");
     assert_eq!(
         out.status.code(),
         Some(0),
-        "the DB layer is invisible to agents; stderr: {}",
+        "agents never opens the database; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
@@ -1409,19 +1440,17 @@ fn run_retry_in_sh(retry: &str, cwd: &Path, project_dir: &Path) -> Output {
     let binary = assert_cmd::cargo::cargo_bin("unblock");
     let script = format!("{} {args}", posix_quote(&binary.display().to_string()));
     let home = common::empty_user_home();
-    output_locked(
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&script)
-            .current_dir(cwd)
-            .env("CLAUDE_PROJECT_DIR", project_dir)
-            .env("XDG_CONFIG_HOME", &home)
-            .env("HOME", &home)
-            .env_remove("UNBLOCK_DIR")
-            .env_remove("UNBLOCK_ACTOR")
-            .env_remove("UNBLOCK_OUTPUT_FORMAT"),
-        "run sh -c",
-    )
+    let mut sh = std::process::Command::new("sh");
+    sh.arg("-c").arg(&script).current_dir(cwd);
+    // The harness scrub (every discovery, `UNBLOCK_*`, `USER` and `RUST_LOG` variable), then
+    // `CLAUDE_PROJECT_DIR` set back to name `project_dir`.
+    for key in common::SCRUBBED_ENV {
+        sh.env_remove(key);
+    }
+    sh.env("CLAUDE_PROJECT_DIR", project_dir)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("HOME", &home);
+    output_locked(&mut sh, "run sh -c")
 }
 
 /// Single-quotes `text` for a POSIX shell.

@@ -309,7 +309,9 @@ fn the_framing_guard_rejects_a_structured_error_blob() {
 /// `env_remove`, which is the only way to pin a REMOVAL: mutating process env is `unsafe` under
 /// edition 2024 and forbidden here. Pins the three pre-existing removals as well. Since D57 it also
 /// pins `XDG_CONFIG_HOME` and `HOME`, each SET to the harness's empty user home, so no host user
-/// `config.toml` can reach a spawn (NFR-16).
+/// `config.toml` can reach a spawn (NFR-16), and the removal of `USER`, `USERPROFILE`, `RUST_LOG`
+/// and every other `UNBLOCK_*` variable config parses. The list is spelled out HERE, independently
+/// of the harness's own `SCRUBBED_ENV`, so dropping a key from the harness turns this RED.
 #[test]
 fn the_harness_scrubs_every_discovery_and_format_env() {
     for key in [
@@ -317,6 +319,12 @@ fn the_harness_scrubs_every_discovery_and_format_env() {
         "UNBLOCK_DIR",
         "UNBLOCK_ACTOR",
         "UNBLOCK_OUTPUT_FORMAT",
+        "UNBLOCK_JSONL",
+        "UNBLOCK_REMOTE_URL",
+        "UNBLOCK_AUTH_TOKEN",
+        "USER",
+        "USERPROFILE",
+        "RUST_LOG",
     ] {
         assert!(
             common::unblock()

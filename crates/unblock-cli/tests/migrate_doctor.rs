@@ -860,3 +860,61 @@ fn plant_dangling_edge(ws: &Workspace, source: &str, target: &str, dep_type: &st
         .expect("plant the dangling edge");
     });
 }
+
+/// **D57 criterion (d), the CLI half — "`unblock migrate` and `unblock doctor` exit 7 with that
+/// hint".** Over a workspace whose `config` table holds a blocking row (a startup key, and an
+/// undecodable layer-key value), both commands exit 7 with a `CONFIG_ERROR` document whose
+/// `context.keys` names the row and whose hint names its exact recovery call; after the repair
+/// (the row removed) both exit 0 again.
+#[test]
+fn config_migrate_and_doctor_exit_7_with_the_hint_over_a_blocking_row() {
+    for (key, value, recovery) in [
+        (
+            "db_filename",
+            "x.db",
+            r#"issue {"action":"config","op":"unset","key":"db_filename"}"#,
+        ),
+        (
+            "output_format",
+            "xml",
+            r#"issue {"action":"config","op":"get","key":"output_format"}"#,
+        ),
+    ] {
+        let ws = Workspace::init();
+        common::plant_config_row(&ws.db_path(), key, value);
+        for command in ["migrate", "doctor"] {
+            let out = output_locked(
+                ws.cmd().args([command, "--output", "json"]),
+                "run a gated lifecycle command",
+            );
+            assert_eq!(
+                out.status.code(),
+                Some(7),
+                "{command} over a blocking `{key}` row; stderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let error: Value = serde_json::from_slice(&out.stdout).expect("a JSON error document");
+            assert_eq!(error["code"], "CONFIG_ERROR", "{command}: {error}");
+            assert_eq!(
+                error["context"]["keys"],
+                serde_json::json!([key]),
+                "{command}: {error}"
+            );
+            let hint = error["hint"].as_str().unwrap_or_default();
+            assert!(
+                hint.contains(recovery),
+                "{command}: names `{recovery}`: {hint}"
+            );
+        }
+        common::runtime().block_on(async {
+            let conn = common::raw_connection(&ws.db_path()).await;
+            conn.execute("DELETE FROM config", ())
+                .await
+                .expect("repair: remove the row");
+        });
+        for command in ["migrate", "doctor"] {
+            let out = output_locked(ws.cmd().arg(command), "run the command after the repair");
+            assert_eq!(out.status.code(), Some(0), "{command} after the repair");
+        }
+    }
+}

@@ -235,7 +235,9 @@ fn pick_cli_format_to(
 /// The error's message is folded onto that line (a TOML parse error spans several), and it never
 /// carries `error[`, because the command it accompanies succeeds.
 fn user_file_warning(err: &unblock_config::ConfigError) -> String {
-    let message = err.to_string();
+    // NFR-14: through the ONE sanitising chokepoint before the fold, so no control byte from the
+    // file's path or the parser's message reaches the terminal.
+    let message = unblock_error::sanitize_message(&err.to_string()).into_owned();
     let folded: Vec<&str> = message.split_whitespace().collect();
     format!(
         "warning: the user config file was ignored for the output format: {}",

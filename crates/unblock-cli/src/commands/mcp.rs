@@ -377,19 +377,31 @@ fn emit_workspace_binding(line: &str, out: &mut impl std::io::Write) {
 
 /// The D57 startup line for a fail-closed workspace (PRD §4 D57 clause (2a)): `None` when the
 /// runtime snapshot holds no BLOCKING database config fault (`ConfigFaultKind::is_blocking`), else
-/// ONE line naming every blocking key and its exact `issue {"action":"config",…}` recovery call —
-/// the `FaultyDbConfig` message and hint every gated call returns, folded onto one line. PURE, so a
-/// unit test pins it; it never contains `error[`, because the server still starts.
+/// ONE line naming every blocking key and its exact `issue {"action":"config",…}` recovery call (the
+/// `FaultyDbConfig` hint every gated call returns). PURE, so a unit test pins it.
+///
+/// HOSTILE-ROW SAFE (spine §2.4, NFR-14): the line never carries a row VALUE (a hand-written row is
+/// attacker-controlled text) — only the keys, which for a blocking fault are a known key name or a
+/// storage-class/hex spelling — and it goes through `sanitize_message` and a whitespace fold, so it
+/// is always exactly one printable line and never contains `error[`, because the server still starts.
 fn config_fault_line(runtime: &unblock_config::RuntimeConfig) -> Option<String> {
     use unblock_error::CodedError as _;
     let err = runtime.blocking_fault_error()?;
     let hint = err.hint().unwrap_or_default();
-    let recovery: Vec<&str> = hint.lines().collect();
-    Some(format!(
-        "unblock: {err}; every call except issue action config returns CONFIG_ERROR until it is \
-         repaired: {}",
-        recovery.join("; ")
-    ))
+    let keys: Vec<String> = runtime
+        .db_faults
+        .iter()
+        .filter(|f| f.fault.kind.is_blocking())
+        .map(|f| format!("`{}`", f.key.escape_default()))
+        .collect();
+    let line = format!(
+        "unblock: the workspace is fail-closed: the database config table holds a blocking row for \
+         {}; every call except issue action config returns CONFIG_ERROR until it is repaired: {}",
+        keys.join(", "),
+        hint.lines().collect::<Vec<_>>().join("; ")
+    );
+    let sanitized = unblock_error::sanitize_message(&line);
+    Some(sanitized.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 #[cfg(test)]
@@ -484,6 +496,34 @@ mod tests {
             !line.contains("future_key"),
             "a non-blocking row is not named: {line}"
         );
+    }
+
+    /// Spine §2.4 / NFR-14: a HOSTILE row — its value carrying ESC/OSC, a newline that forges an
+    /// `error[` line and a megabyte of text, decoded the way the open decodes it — still yields ONE
+    /// printable line with no raw control character, no `error[` and no echo of the value.
+    #[test]
+    fn config_fault_line_never_echoes_a_hostile_row_value() {
+        let value = format!(
+            "x\n error[FORGED]: pwned \u{1b}]52;c;aGk=\u{7}{}",
+            "A".repeat(1 << 20)
+        );
+        let rows = vec![
+            ("search_cap".to_string(), value),
+            (
+                format!("{}blob:6B", unblock_storage::NON_TEXT_CELL_MARKER),
+                "1".to_string(),
+            ),
+        ];
+        let runtime = RuntimeConfig {
+            db_faults: unblock_config::decode_db_rows(&rows),
+            ..RuntimeConfig::default()
+        };
+        let line = config_fault_line(&runtime).expect("both rows block");
+        assert_eq!(line.lines().count(), 1, "{line:?}");
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+        assert!(!line.contains("error["), "{line:?}");
+        assert!(!line.contains("FORGED") && line.len() < 4096, "{line:?}");
+        assert!(line.contains("`search_cap`"), "{line}");
     }
 
     /// The emitter actually WRITES the line to its sink (D39 visibility is only real if the bytes hit
