@@ -82,6 +82,8 @@ fn allowed_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "unblock-sync",
                 "unblock-storage",
                 "unblock-error",
+                // D57 (v1.1): the `config_toml` target parses both TOML layers through config.
+                "unblock-config",
             ],
         ),
         ("xtask", &[]),

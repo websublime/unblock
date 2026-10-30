@@ -19,10 +19,10 @@ use crate::WriteLockGuard;
 use crate::error::StorageError;
 use crate::filters::{DeletePlan, IssuePatch};
 
-// NOTE: the CF-E reserved seams (`read_config`/`diagnostic_probe`/`diagnostic_probes`) reference
+// NOTE: the CF-E reserved seams (`diagnostic_probe`/`diagnostic_probes`) reference
 // `DiagnosticKind`/`DiagnosticReport`. They are kept **commented** below per spine §3.2 (reserved
 // for v1.1, NOT live default methods), so those DTOs are intentionally NOT imported here — importing
-// them would trip the unused-import lint.
+// them would trip the unused-import lint. (The CF-E `read_config` reservation landed with D57.)
 
 /// The backend-agnostic storage contract (spine §3.2).
 ///
@@ -720,12 +720,40 @@ pub trait Storage: Send + Sync {
     ) -> Result<Vec<String>, StorageError>;
 
     // ---------------------------------------------------------------------------------------------
-    // [v1.1] reserved seams (CF-E; spine §3.2) — additive, depended on by config db-layer +
-    //         health full-taxonomy. Kept COMMENTED (not live default methods) so the seam is
-    //         reserved without v1 behaviour and this file does not `use` the diagnostics DTOs.
+    // config table (FR-13 full, D57, v1.1) — the CF-E `read_config` reservation LANDS, with its write
+    // seam. NO default body: a default would let a delegating wrapper silently stop forwarding.
+    // Storage stores OPAQUE strings — it never classifies a key or parses a value (`unblock-config`
+    // owns both, D57 clause (2)). Rows are `(String, String)` pairs; there is no `ConfigKv` type.
+    // Semantics: spine §3.2.1 "Config table (D57)".
+    // ---------------------------------------------------------------------------------------------
+
+    /// Every `config` row as `(key, value)`, ordered by key ascending (`SQLite` `BINARY` collation)
+    /// — a PURE READ: no permit, no lock (FR-10). Every open path migrates first, so a missing
+    /// table on a stamp-3 database is the sentinel's `SchemaMismatch`, never an empty result. A cell
+    /// not stored as plain `TEXT` (a hand-written row of another storage class, or a `TEXT` cell
+    /// that itself begins with the marker) is NEVER skipped (D57 clause (2a)): it is returned as
+    /// [`crate::NON_TEXT_CELL_MARKER`] followed by `<storage class>:<HEX>` — an INJECTIVE spelling —
+    /// and the row is ordered by that spelling.
+    async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError>;
+
+    /// UPSERT the `config` row `key` to `value` in ONE `BEGIN IMMEDIATE` (`INSERT … ON
+    /// CONFLICT(key) DO UPDATE SET value = excluded.value` — never `INSERT OR REPLACE`, never an
+    /// ignored conflict). Writes no `Event` (events are per issue, spine §1.7). Callers validate
+    /// first (the engine's `config_set`); storage does not.
+    async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError>;
+
+    /// DELETE the `config` row whose [`Storage::read_config`] key spelling is `key` (a marked key
+    /// included — the spelling is injective, so at most ONE row) in ONE `BEGIN IMMEDIATE`, returning
+    /// whether a row was deleted (an absent key is `Ok(false)`, never an error). Writes no `Event`.
+    async fn unset_config(&self, key: &str) -> Result<bool, StorageError>;
+
+    // ---------------------------------------------------------------------------------------------
+    // [v1.1] reserved seams (CF-E; spine §3.2) — additive, depended on by health full-taxonomy.
+    //         Kept COMMENTED (not live default methods) so the seam is reserved without v1
+    //         behaviour and this file does not `use` the diagnostics DTOs. (The CF-E `read_config`
+    //         reservation that sat here landed with D57, above.)
     // ---------------------------------------------------------------------------------------------
     //
-    // [v1.1] async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError>;
     // [v1.1] async fn diagnostic_probe(&self, kind: DiagnosticKind) -> Result<DiagnosticReport, StorageError>;
     // [v1.1] async fn diagnostic_probes(&self) -> Result<Vec<DiagnosticReport>, StorageError>;
 }
@@ -999,6 +1027,18 @@ mod tests {
             _reason: &str,
             _actor: &str,
         ) -> Result<Vec<String>, StorageError> {
+            Err(StorageError::NotInitialized)
+        }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            Err(StorageError::NotInitialized)
+        }
+
+        async fn set_config(&self, _key: &str, _value: &str) -> Result<(), StorageError> {
+            Err(StorageError::NotInitialized)
+        }
+
+        async fn unset_config(&self, _key: &str) -> Result<bool, StorageError> {
             Err(StorageError::NotInitialized)
         }
     }

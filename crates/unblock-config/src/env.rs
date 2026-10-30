@@ -38,7 +38,7 @@ impl EnvSource for ProcessEnv {
 ///
 /// Every field is `Option` (set-or-unset). An empty/whitespace value at any key is normalized to
 /// `None` (unset), matching the original beads `filter(!is_empty)` behaviour.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct EnvOverrides {
     /// `UNBLOCK_ACTOR` — the default actor (highest-but-one in the actor chain, FORK-4).
     pub actor: Option<String>,
@@ -51,6 +51,24 @@ pub struct EnvOverrides {
     /// `UNBLOCK_AUTH_TOKEN` — reserved for v1.3 (parsed but unused in v1; the sanctioned credential
     /// path, never `config.toml` — NFR-18).
     pub auth_token: Option<String>,
+}
+
+/// `Debug` REDACTS `auth_token` (NFR-18): since D57 the `ConfigReloader` keeps these overrides for
+/// the whole session, so a derived `Debug` would print `UNBLOCK_AUTH_TOKEN` in plaintext wherever a
+/// reloader or context is ever debug-formatted.
+impl std::fmt::Debug for EnvOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvOverrides")
+            .field("actor", &self.actor)
+            .field("jsonl_export", &self.jsonl_export)
+            .field("output_format", &self.output_format)
+            .field("remote_url", &self.remote_url)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl EnvOverrides {
@@ -117,8 +135,9 @@ fn parse_bool(key: &str, raw: &str) -> Result<bool, ConfigError> {
     }
 }
 
-/// Parse an [`OutputFormat`] via serde (SF-2 — the enum has no `FromStr`).
-fn parse_output_format(key: &str, raw: &str) -> Result<OutputFormat, ConfigError> {
+/// Parse an [`OutputFormat`] via serde (SF-2 — the enum has no `FromStr`). Shared with the D57
+/// user/DB-layer value parser, so a `config` row decodes exactly as `UNBLOCK_OUTPUT_FORMAT` does.
+pub(crate) fn parse_output_format(key: &str, raw: &str) -> Result<OutputFormat, ConfigError> {
     // Route through serde so the snake_case wire strings are the single source of truth (no second
     // string table). A bare string deserializes as a unit-variant enum via the value deserializer.
     serde::Deserialize::deserialize(

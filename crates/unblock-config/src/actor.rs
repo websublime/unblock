@@ -1,69 +1,20 @@
-//! Actor resolution — the global precedence chain
-//! `--actor` > `UNBLOCK_ACTOR` > `config.toml [actor]` > `$USER` > `"unblock"` literal
-//! (FORK-4, D10, spine §4).
+//! Actor resolution — the global precedence chain, SEVEN tiers since D57 (D10 as amended, PRD §4
+//! D57 clause (5)): `--actor` > `UNBLOCK_ACTOR` > project `[actor]` > user `actor` > DB `actor` >
+//! `$USER` > `"unblock"`.
 //!
-//! The resolution reads from an injectable [`EnvSource`] (defined in [`crate::env`]) so tests do not
-//! touch the process environment (parallel-safe). The literal default always resolves, so
-//! [`ConfigError::ActorUnresolved`] is **unreachable** (reserved for a future strict mode). The
-//! resolved actor is then bounded by [`unblock_model::validate_actor`] (Seam A) — that check lives
-//! in [`crate::config`] where the full layer set is available.
-
-use crate::env::EnvSource;
-use crate::error::ConfigError;
+//! The chain is folded by the ordinary highest-first merge (`merge.rs`): each layer contributes its
+//! own TRIMMED actor (a blank value is unset), and the defaults layer carries the two-tier bottom
+//! (`$USER` > `"unblock"`, built by `Defaults::with_os_user`), so the resolved actor's `source`
+//! names the tier that supplied it (`os_user` for the `$USER` fallback). The literal default always
+//! resolves, so [`crate::ConfigError::ActorUnresolved`] stays unreachable (reserved for a future
+//! strict mode). The resolved actor is then bounded by [`unblock_model::validate_actor`] (Seam A).
 
 /// The literal fallback actor when nothing else resolves (D10).
 pub(crate) const DEFAULT_ACTOR: &str = "unblock";
 
-/// Resolve the authoritative actor across the global precedence chain (FORK-4):
-/// `cli_actor` > `UNBLOCK_ACTOR` > `config_actor` (`config.toml [actor]`) > `$USER` > `"unblock"`.
-///
-/// `cli_actor` is the `--actor` override, `config_actor` is the project-TOML `[actor]` key. An empty
-/// (or whitespace-only) value at any layer is treated as **unset** (trimmed before use), matching the
-/// original beads `filter(!is_empty)` behaviour, so a blank `--actor`/`UNBLOCK_ACTOR=` falls through.
-/// The returned actor is **not** yet bounded — the caller routes it through
-/// [`unblock_model::validate_actor`] (Seam A).
-///
-/// # Errors
-///
-/// Returns [`ConfigError::ActorUnresolved`] only if no layer yields a non-empty actor. With the
-/// `"unblock"` literal default this is effectively unreachable — the variant is reserved for a
-/// future strict-actor mode.
-pub(crate) fn resolve_actor_layered(
-    cli_actor: Option<&str>,
-    config_actor: Option<&str>,
-    env: &dyn EnvSource,
-) -> Result<String, ConfigError> {
-    // CLI override first.
-    if let Some(actor) = cli_actor.and_then(trimmed_non_empty) {
-        return Ok(actor);
-    }
-    // Then UNBLOCK_ACTOR env.
-    if let Some(actor) = env
-        .get("UNBLOCK_ACTOR")
-        .as_deref()
-        .and_then(trimmed_non_empty)
-    {
-        return Ok(actor);
-    }
-    // Then config.toml [actor].
-    if let Some(actor) = config_actor.and_then(trimmed_non_empty) {
-        return Ok(actor);
-    }
-    // Then $USER env.
-    if let Some(actor) = env.get("USER").as_deref().and_then(trimmed_non_empty) {
-        return Ok(actor);
-    }
-    // Finally the literal default.
-    if DEFAULT_ACTOR.is_empty() {
-        // Unreachable with the current constant; kept honest so a future empty default surfaces
-        // the reserved error instead of an empty actor.
-        return Err(ConfigError::ActorUnresolved);
-    }
-    Ok(DEFAULT_ACTOR.to_string())
-}
-
-/// Trim `value` and return it only if non-empty after trimming.
-fn trimmed_non_empty(value: &str) -> Option<String> {
+/// Trim `value` and return it only if non-empty after trimming — the "blank is unset" rule every
+/// actor tier shares (the original beads `filter(!is_empty)` behaviour).
+pub(crate) fn trimmed_non_empty(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None
@@ -74,94 +25,95 @@ fn trimmed_non_empty(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_ACTOR, resolve_actor_layered};
-    use crate::env::EnvSource;
-    use std::collections::HashMap;
+    use unblock_model::ConfigSource;
 
-    struct MapEnv(HashMap<String, String>);
+    use super::DEFAULT_ACTOR;
+    use crate::cli::CliOverrides;
+    use crate::config::resolve_runtime;
+    use crate::env::EnvOverrides;
+    use crate::schema::ProjectConfig;
 
-    impl MapEnv {
-        fn new(pairs: &[(&str, &str)]) -> Self {
-            Self(
-                pairs
-                    .iter()
-                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-                    .collect(),
-            )
+    /// One full stack: which tiers are set (each to its own name), resolved over the six layers.
+    fn resolve(tiers: &[&str]) -> (String, ConfigSource) {
+        let has = |t: &str| tiers.contains(&t);
+        let cli = CliOverrides {
+            actor: has("cli").then(|| "  cli  ".to_string()),
+            ..CliOverrides::default()
+        };
+        let env = EnvOverrides {
+            actor: has("env").then(|| "env".to_string()),
+            ..EnvOverrides::default()
+        };
+        let project = ProjectConfig {
+            actor: has("project").then(|| "project".to_string()),
+            ..ProjectConfig::default()
+        };
+        let user = ProjectConfig {
+            actor: has("user").then(|| "user".to_string()),
+            ..ProjectConfig::default()
+        };
+        let rows: Vec<(String, String)> = if has("db") {
+            vec![("actor".to_string(), "db".to_string())]
+        } else {
+            Vec::new()
+        };
+        let os_user = has("os_user").then_some("  os_user  ");
+        let runtime =
+            resolve_runtime(&cli, &env, &project, &user, &rows, os_user).expect("resolves");
+        (runtime.actor, runtime.sources.actor)
+    }
+
+    /// **D57 criterion (g) — the seven-tier order holds tier by tier**, every tier trimmed, with
+    /// `source` naming the tier (`os_user` for the `$USER` fallback, `default` for the literal).
+    ///
+    /// MUTANT KILLED: placing the DB layer above the user layer (the `user` step fails), dropping a
+    /// tier, or tagging the `$USER` fallback `default`.
+    #[test]
+    fn seven_tier_actor_chain_holds_tier_by_tier() {
+        let order = [
+            ("cli", ConfigSource::Cli),
+            ("env", ConfigSource::Env),
+            ("project", ConfigSource::Project),
+            ("user", ConfigSource::User),
+            ("db", ConfigSource::Db),
+            ("os_user", ConfigSource::OsUser),
+        ];
+        for (i, (winner, source)) in order.iter().enumerate() {
+            let set: Vec<&str> = order[i..].iter().map(|(t, _)| *t).collect();
+            assert_eq!(
+                resolve(&set),
+                ((*winner).to_string(), *source),
+                "with tiers {set:?} set, `{winner}` wins"
+            );
         }
+        assert_eq!(
+            resolve(&[]),
+            (DEFAULT_ACTOR.to_string(), ConfigSource::Default),
+            "nothing set → the literal `unblock`, source `default`"
+        );
     }
 
-    impl EnvSource for MapEnv {
-        fn get(&self, key: &str) -> Option<String> {
-            self.0.get(key).cloned()
-        }
-    }
-
+    /// A blank value at any tier is UNSET (it falls through), and every tier is trimmed.
     #[test]
-    fn cli_actor_wins_over_everything() {
-        let env = MapEnv::new(&[("UNBLOCK_ACTOR", "envactor"), ("USER", "bob")]);
-        assert_eq!(
-            resolve_actor_layered(Some("cliactor"), Some("cfgactor"), &env).expect("actor"),
-            "cliactor"
-        );
-    }
-
-    #[test]
-    fn unblock_actor_wins_over_config_user_and_default() {
-        let env = MapEnv::new(&[("UNBLOCK_ACTOR", "alice"), ("USER", "bob")]);
-        assert_eq!(
-            resolve_actor_layered(None, Some("cfgactor"), &env).expect("actor"),
-            "alice"
-        );
-    }
-
-    #[test]
-    fn config_actor_wins_over_user_and_default() {
-        let env = MapEnv::new(&[("USER", "bob")]);
-        assert_eq!(
-            resolve_actor_layered(None, Some("cfgactor"), &env).expect("actor"),
-            "cfgactor"
-        );
-    }
-
-    #[test]
-    fn falls_back_to_user_when_higher_layers_unset() {
-        let env = MapEnv::new(&[("USER", "bob")]);
-        assert_eq!(
-            resolve_actor_layered(None, None, &env).expect("actor"),
-            "bob"
-        );
-    }
-
-    #[test]
-    fn falls_back_to_literal_default_when_nothing_set() {
-        let env = MapEnv::new(&[]);
-        assert_eq!(
-            resolve_actor_layered(None, None, &env).expect("actor"),
-            DEFAULT_ACTOR
-        );
-        assert_eq!(
-            resolve_actor_layered(None, None, &env).expect("actor"),
-            "unblock"
-        );
-    }
-
-    #[test]
-    fn empty_at_any_layer_is_treated_as_unset() {
-        let env = MapEnv::new(&[("UNBLOCK_ACTOR", "   "), ("USER", "bob")]);
-        // Empty cli, empty env -> config wins.
-        assert_eq!(
-            resolve_actor_layered(Some("  "), Some("cfgactor"), &env).expect("actor"),
-            "cfgactor"
-        );
-    }
-
-    #[test]
-    fn trims_surrounding_whitespace() {
-        let env = MapEnv::new(&[]);
-        assert_eq!(
-            resolve_actor_layered(Some("  carol  "), None, &env).expect("actor"),
-            "carol"
-        );
+    fn a_blank_tier_falls_through_and_values_are_trimmed() {
+        let cli = CliOverrides {
+            actor: Some("   ".to_string()),
+            ..CliOverrides::default()
+        };
+        let project = ProjectConfig {
+            actor: Some("  carol  ".to_string()),
+            ..ProjectConfig::default()
+        };
+        let runtime = resolve_runtime(
+            &cli,
+            &EnvOverrides::default(),
+            &project,
+            &ProjectConfig::default(),
+            &[],
+            Some("bob"),
+        )
+        .expect("resolves");
+        assert_eq!(runtime.actor, "carol");
+        assert_eq!(runtime.sources.actor, ConfigSource::Project);
     }
 }

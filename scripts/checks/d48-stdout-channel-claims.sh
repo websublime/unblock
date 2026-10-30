@@ -59,21 +59,21 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; e
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
 # The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
-# the day a D57 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# the day a D58 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
 # goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves: the
-# prose range `(D1..D56)` and the tokenizer's regex ALTERNATION `\bD(56|55|54|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D57 finding — the lint would stop tokenizing
+# prose range `(D1..D57)` and the tokenizer's regex ALTERNATION `\bD(57|56|55|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D58 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D56'
-RANGE_ALT_RE='D\(56\|55\|'
+RANGE_RE='D1\.\.D57'
+RANGE_ALT_RE='D\(57\|56\|'
 
 # The LIVE published contract version. D48 does NOT move it (see the header): this row is the
 # affirmative record of that, so a silent bump riding this decision goes red. It tracks the LIVE id,
 # so a later decision's bump moves it in that decision's implementation commit (D52: v1.9 -> v1.10).
-CONTRACT_RE='unblock\.mcp\.v1\.11'
+CONTRACT_RE='unblock\.mcp\.v1\.12'
 
 # The SAME two spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte rather than a regex operator. DERIVED, never hand-written a second time: a second copy of

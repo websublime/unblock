@@ -37,6 +37,11 @@ serde = { workspace = true }
 toml = { workspace = true }
 snafu = { workspace = true }
 tracing = { workspace = true }
+# D57: the three FR-13-full `ConfigError` variants publish a structured `context` map
+# (`CodedError::context` is a `serde_json::Map`) and the `FaultyDbConfig` hint spells each
+# recovery call as JSON. Already in the dependency graph (via unblock-storage/unblock-error), so
+# no new crate meets cargo-deny.
+serde_json = { workspace = true }
 # The workspace-open facades are `async fn` (open/migrate libsql); the trait is async throughout.
 tokio = { workspace = true }
 # Symlinked-workspace canonicalization (Seam C, FORK-3): resolves symlinks without Windows `\\?\`
@@ -55,3 +60,7 @@ proptest = { workspace = true }
 # Golden snapshots: error (variant->code->exit) table, default WorkspaceConfig, ConfigPaths fixture,
 # startup/runtime key lists (T1.3).
 insta = { workspace = true }
+# D57 criterion (e2) "warned": a scoped capture layer (the `unblock-sync` reliability_tracing
+# precedent) asserts the `unblock.config` warn on an unknown user-file key and an unknown DB row.
+# Already a workspace dependency (no new crate meets cargo-deny).
+tracing-subscriber = { workspace = true }

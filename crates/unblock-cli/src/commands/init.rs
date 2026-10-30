@@ -21,7 +21,14 @@
 //!
 //! The open forwards the global flags with the target as its `--dir`, so `-o` and `--actor` reach
 //! config (the spine §5b forwarder rule). An actor that fails validation fails that open (exit 7)
-//! after `config.toml` is written, and `init --force` recovers.
+//! after `config.toml` is written — and, because the open is two-phase (PRD §4 D57 clause (6): the
+//! runtime keys resolve only after the database is opened and migrated), after `unblock.db` is
+//! created — and `init --force` recovers.
+//!
+//! Since D57 (clause (6)) `init` loads the user file through `unblock_config::load_user_config`
+//! after the three checks and before it writes anything, so a user file the open would refuse fails
+//! `init` with exit 7 and nothing written. After its open, a blocking fault in the database `config`
+//! table fails `init` with `ConfigError::FaultyDbConfig` (exit 7) before any `--agents` write.
 //!
 //! `init --agents` (v1.1) then writes the managed `AGENTS.md` block through the write `agents`
 //! runs, at the root of the workspace its own open bound, before the report renders. A bare `init`
@@ -35,8 +42,8 @@ use std::path::{Path, PathBuf};
 
 use snafu::ResultExt;
 use unblock_config::{
-    CliOverrides, UNBLOCK_DIR_NAMES, has_unblock_dir_name, open_with_storage_with_cli,
-    probe_workspace_root,
+    CliOverrides, ProcessEnv, UNBLOCK_DIR_NAMES, has_unblock_dir_name, load_user_config,
+    open_with_storage_with_cli, probe_workspace_root,
 };
 use unblock_model::normalize_prefix;
 
@@ -65,7 +72,9 @@ const NEW_UNBLOCK_DIR: &str = UNBLOCK_DIR_NAMES[0];
 /// - [`CliError::AlreadyInitialized`] if the target already holds a scaffold (no `--force`), or if
 ///   a distinct sibling of the target holds one, with or without `--force`;
 /// - [`CliError::Io`] if reading the cwd, creating the directory or writing `config.toml` fails;
-/// - [`CliError::Config`] if opening/migrating the fresh database fails;
+/// - [`CliError::Config`] if the user file is refused (before anything is written), if
+///   opening/migrating the database fails, or if its `config` table holds a blocking fault
+///   (`FaultyDbConfig`, after `config.toml` is written and before any `--agents` write);
 /// - [`CliError::InitAgentsWrite`] if `--agents` cannot write `AGENTS.md` after the scaffold;
 /// - [`CliError::Render`]/[`CliError::Io`] if rendering / writing the report fails.
 pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, CliError> {
@@ -84,10 +93,15 @@ pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, Cli
     // 4. The sibling guard refuses a target beside a distinct sibling that holds a scaffold.
     check_sibling(&unblock_dir, args.agents)?;
 
-    // 5. Create the target (mkdir -p).
+    // 5. Load the user file BEFORE any write (PRD §4 D57 clause (6)): `load_user_config` is the
+    //    single home of every user-file refusal, the same function the open below runs, so a user
+    //    file the open would refuse fails `init` with exit 7 and NOTHING written.
+    load_user_config(&ProcessEnv)?;
+
+    // 6. Create the target (mkdir -p).
     std::fs::create_dir_all(&unblock_dir).context(IoSnafu)?;
 
-    // 6. Hand-write config.toml (`ProjectConfig` is Deserialize-only — DR-8). Seed the NORMALIZED prefix.
+    // 7. Hand-write config.toml (`ProjectConfig` is Deserialize-only — DR-8). Seed the NORMALIZED prefix.
     let prefix = args
         .prefix
         .as_deref()
@@ -95,13 +109,20 @@ pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, Cli
     let config_path = unblock_dir.join(CONFIG_FILENAME);
     std::fs::write(&config_path, render_config_toml(&prefix)).context(IoSnafu)?;
 
-    // 7. Open+migrate via the facade to create the migrated empty unblock.db (FR-9 no-drift). The
+    // 8. Open+migrate via the facade to create the migrated empty unblock.db (FR-9 no-drift). The
     //    open forwards the global flags, and the target replaces any raw `--dir`.
     let overrides = global.to_overrides().with_dir(&unblock_dir);
     let ctx = open_with_storage_with_cli(&overrides).await?;
 
-    // 8. Under `--agents`, write the managed block at the root this open bound, before the report
-    //    renders, so stdout never carries a second document.
+    // 9. A blocking database config fault fails `init` with the `issue config unset` hint BEFORE any
+    //    `--agents` write (PRD §4 D57 clause (6)). A fresh database has no rows and passes; an
+    //    `init --force` over a faulty table has already rewritten `config.toml`.
+    if let Some(err) = ctx.config.runtime.blocking_fault_error() {
+        return Err(err.into());
+    }
+
+    // 10. Under `--agents`, write the managed block at the root this open bound, before the report
+    //     renders, so stdout never carries a second document.
     let agents_path = if args.agents {
         let path = agents::agents_path(&ctx.workspace_dir);
         agents::write_managed_block(&path)
@@ -115,8 +136,8 @@ pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, Cli
         None
     };
 
-    // 9. Report exactly what was scaffolded.
-    let fmt = ctx.config.output_format;
+    // 11. Report exactly what was scaffolded.
+    let fmt = ctx.config.runtime.output_format;
     let report = InitReport {
         workspace_dir: ctx.workspace_dir,
         unblock_dir: ctx.paths.unblock_dir,
@@ -127,7 +148,7 @@ pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, Cli
     };
     output::emit_report(&report.to_report(), fmt)?;
 
-    // 10. A bare `init` names the next step on stderr, only after the report is out.
+    // 12. A bare `init` names the next step on stderr, only after the report is out.
     if !args.agents && !global.quiet {
         output::diag(&agents_hint(&report.unblock_dir));
     }

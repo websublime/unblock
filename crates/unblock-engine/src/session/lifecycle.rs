@@ -3,13 +3,17 @@
 //!
 //! `open` **consumes** a `WorkspaceContext` built by `unblock-config` (CF-D): config already did
 //! `.unblock/` discovery, opened/migrated libsql, and built the `Arc<dyn Storage>` — the engine takes
-//! `ctx.storage`/`ctx.workspace_dir`/`ctx.actor`/`ctx.config`/`ctx.paths` and **does not** construct
-//! storage or run migrations itself. It builds the single write `Semaphore(1)` (D14) and wires its
-//! own (never-set) shutdown flag (the cli installs the OS handler later via
-//! [`Session::with_shutdown_flag`], OQ-4).
+//! `ctx.storage`/`ctx.workspace_dir`/`ctx.config`/`ctx.reloader`/`ctx.paths` and **does not**
+//! construct storage or run migrations itself. It builds the single write `Semaphore(1)` (D14), the
+//! live runtime snapshot (D57) and wires its own (never-set) shutdown flag (the cli installs the OS
+//! handler later via [`Session::with_shutdown_flag`], OQ-4).
+//!
+//! D57 clause (2a): `open` and `shutdown` are EXEMPT from the fail-closed gate (a gated workspace
+//! must still open — so `unblock mcp` and its repair action stay reachable — and always close);
+//! `migrate`, `doctor` and `recover` apply it.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 use tokio::sync::Semaphore;
 use unblock_config::WorkspaceContext;
@@ -51,6 +55,9 @@ impl Session {
     /// applies **no** DB write (never a faked import). The flag-on path is wired; only the body is
     /// the seam.
     ///
+    /// `open` is EXEMPT from the D57 clause (2a) fail-closed gate: a context whose runtime snapshot
+    /// holds a blocking DB config fault still opens, so the `config` repair action stays reachable.
+    ///
     /// # Errors
     ///
     /// - [`EngineError::FeatureNotWired`] (`feature: "sync"`) if `cfg.import_on_open` is `true` (the
@@ -61,8 +68,10 @@ impl Session {
         let WorkspaceContext {
             storage,
             workspace_dir,
-            actor,
             config,
+            // D57 clause (8): the reloader moves into the session — `config_set`/`config_unset`
+            // re-resolve the runtime keys through it.
+            reloader,
             paths,
             // The D39 discovery-tier tag is surfaced by the CLI at startup, not consumed by the engine.
             source: _,
@@ -75,8 +84,9 @@ impl Session {
         let session = Self {
             storage,
             write_permit: Arc::new(Semaphore::new(WRITE_PERMITS)),
-            config,
-            actor,
+            config: config.startup,
+            runtime: Arc::new(RwLock::new(Arc::new(config.runtime))),
+            reloader,
             workspace_dir,
             unblock_dir: paths.unblock_dir,
             db_path: paths.db_path,
@@ -94,7 +104,8 @@ impl Session {
         Ok(session)
     }
 
-    /// Cooperatively shut the session down (FR-17 AC).
+    /// Cooperatively shut the session down (FR-17 AC). EXEMPT from the D57 fail-closed gate: a
+    /// session always closes cleanly.
     ///
     /// Flips the shutdown flag (so subsequent `acquire_write` calls fail fast with
     /// [`EngineError::ShutdownInProgress`]), then **drains the in-flight permit** — it acquires the
@@ -146,6 +157,8 @@ impl Session {
     /// own call never observed and would falsify the post-open idempotence cell.
     ///
     /// # Errors
+    /// - [`EngineError::Config`] (`FaultyDbConfig`) while a blocking DB config fault exists (D57
+    ///   clause (2a) — checked after the permit, before any storage call).
     /// - [`EngineError::ShutdownInProgress`] if a shutdown is in progress (the permit is refused up
     ///   front, before any read/migrate).
     /// - The transparent storage source (`SchemaMismatch`/`Migration`/backend read) on any failure.
@@ -155,6 +168,8 @@ impl Session {
         // Write permit (D14), shutdown-aware. `Session::acquire` (write.rs) is private to the `write`
         // module, so — like `interchange.rs` — the lifecycle path calls the crate helper directly.
         let _guard = acquire_write(&self.write_permit, &self.shutdown).await?;
+        // D57 clause (2a): the fail-closed gate, on the snapshot taken under the permit.
+        self.gated_runtime()?;
         // Read `from` UNDER the permit so the read + migrate see one serialized writer window.
         let from = self.storage.schema_version().await?;
         self.storage.migrate().await?; // idempotent; a no-op on a current DB.
@@ -217,11 +232,14 @@ impl Session {
     ///
     /// # Errors
     ///
+    /// - [`EngineError::Config`] (`FaultyDbConfig`) while a blocking DB config fault exists (D57
+    ///   clause (2a)), before any storage call.
     /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) until the T3.3 wiring lands; thereafter
     ///   the transparent `Health { source: HealthError }` variant on a health failure, or the
     ///   transparent storage source from the D45 dangling read.
     #[cfg_attr(not(feature = "health"), allow(clippy::unused_async))] // no await without health
     pub async fn doctor(&self) -> Result<DiagnosticReport> {
+        self.gated_runtime()?;
         #[cfg(feature = "health")]
         {
             // Compose the ONE corruption signal reachable now (integrity_check rows) + the pure
@@ -289,10 +307,13 @@ impl Session {
     ///
     /// # Errors
     ///
+    /// - [`EngineError::Config`] (`FaultyDbConfig`) while a blocking DB config fault exists (D57
+    ///   clause (2a)).
     /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) through v1 (the recover seam is unwired
     ///   until v1.1).
     #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the v1.1 body awaits health repair.
     pub async fn recover(&self) -> Result<DiagnosticReport> {
+        self.gated_runtime()?;
         Err(EngineError::FeatureNotWired { feature: "health" })
     }
 }

@@ -287,8 +287,14 @@ pub async fn run(_args: &McpArgs, overrides: &CliOverrides) -> Result<Option<u8>
         &workspace_binding_line(&ctx.paths.unblock_dir, ctx.source),
         &mut std::io::stderr().lock(),
     );
+    // D57 clause (2a): a blocking database config fault fail-closes the `Session`, but the server
+    // STARTS anyway so the repair tool (`issue action: config`) stays reachable. ONE stderr line
+    // names the blocking keys and the recovery call (spine §4 startup visibility; no `error[`).
+    if let Some(line) = config_fault_line(&ctx.config.runtime) {
+        emit_workspace_binding(&line, &mut std::io::stderr().lock());
+    }
     tracing::debug!("mcp: workspace opened");
-    let cfg = session_config(&ctx);
+    let cfg = session_config();
 
     let session = Session::open(ctx, cfg)
         .await?
@@ -369,15 +375,45 @@ fn emit_workspace_binding(line: &str, out: &mut impl std::io::Write) {
     let _ignored = writeln!(out, "{line}");
 }
 
+/// The D57 startup line for a fail-closed workspace (PRD §4 D57 clause (2a)): `None` when the
+/// runtime snapshot holds no BLOCKING database config fault (`ConfigFaultKind::is_blocking`), else
+/// ONE line naming every blocking key and its exact `issue {"action":"config",…}` recovery call (the
+/// `FaultyDbConfig` hint every gated call returns). PURE, so a unit test pins it.
+///
+/// HOSTILE-ROW SAFE (spine §2.4, NFR-14): the line never carries a row VALUE (a hand-written row is
+/// attacker-controlled text) — only the keys, which for a blocking fault are a known key name or a
+/// storage-class/hex spelling — and it goes through `sanitize_message` and a whitespace fold, so it
+/// is always exactly one printable line and never contains `error[`, because the server still starts.
+fn config_fault_line(runtime: &unblock_config::RuntimeConfig) -> Option<String> {
+    use unblock_error::CodedError as _;
+    let err = runtime.blocking_fault_error()?;
+    let hint = err.hint().unwrap_or_default();
+    let keys: Vec<String> = runtime
+        .db_faults
+        .iter()
+        .filter(|f| f.fault.kind.is_blocking())
+        .map(|f| format!("`{}`", unblock_error::clip(&f.key).escape_default()))
+        .collect();
+    let line = format!(
+        "unblock: the workspace is fail-closed: the database config table holds a blocking row for \
+         {}; every call except issue action config returns CONFIG_ERROR until it is repaired: {}",
+        keys.join(", "),
+        hint.lines().collect::<Vec<_>>().join("; ")
+    );
+    let sanitized = unblock_error::sanitize_message(&line);
+    Some(sanitized.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagnosticRoute, McpExit, diagnostic_route, emit_workspace_binding, instructions,
-        resolve_mcp_exit, workspace_binding_line,
+        DiagnosticRoute, McpExit, config_fault_line, diagnostic_route, emit_workspace_binding,
+        instructions, resolve_mcp_exit, workspace_binding_line,
     };
     use crate::exit::CliError;
-    use unblock_config::WorkspaceSource;
+    use unblock_config::{RuntimeConfig, WorkspaceSource};
     use unblock_error::ErrorCode;
+    use unblock_model::{ConfigFault, ConfigFaultKind, DbConfigFault};
 
     #[test]
     fn instructions_mention_the_contract_version() {
@@ -418,6 +454,92 @@ mod tests {
         );
         assert!(workspace_binding_line(dir, WorkspaceSource::ExplicitDb).contains("--db"));
         assert!(workspace_binding_line(dir, WorkspaceSource::WalkUp).contains("walk-up from cwd"));
+    }
+
+    /// D57 clause (2a)/(d): a blocking fault yields ONE line naming every blocking key and the
+    /// `issue config unset` recovery, never `error[`; a non-blocking `unknown_key` row, or no fault,
+    /// yields no line.
+    #[test]
+    fn config_fault_line_names_each_blocking_key_and_its_unset_recovery() {
+        let fault = |key: &str, kind| DbConfigFault {
+            key: key.to_string(),
+            value: "x".to_string(),
+            fault: ConfigFault {
+                kind,
+                reason: "a reason".to_string(),
+            },
+        };
+        let mut runtime = RuntimeConfig::default();
+        assert_eq!(config_fault_line(&runtime), None, "no fault, no line");
+        runtime.db_faults = vec![fault("future_key", ConfigFaultKind::UnknownKey)];
+        assert_eq!(
+            config_fault_line(&runtime),
+            None,
+            "unknown_key never blocks"
+        );
+
+        runtime.db_faults = vec![
+            fault("db_filename", ConfigFaultKind::StartupKey),
+            fault("search_cap", ConfigFaultKind::InvalidValue),
+            fault("future_key", ConfigFaultKind::UnknownKey),
+        ];
+        let line = config_fault_line(&runtime).expect("a blocking fault prints a line");
+        assert_eq!(line.lines().count(), 1, "exactly one line: {line}");
+        assert!(!line.contains("error["), "{line}");
+        for call in [
+            r#"issue {"action":"config","op":"unset","key":"db_filename"}"#,
+            r#"issue {"action":"config","op":"unset","key":"search_cap"}"#,
+        ] {
+            assert!(line.contains(call), "names `{call}`: {line}");
+        }
+        assert!(
+            !line.contains("future_key"),
+            "a non-blocking row is not named: {line}"
+        );
+    }
+
+    /// Spine §2.4 / NFR-14: a HOSTILE row — its value carrying ESC/OSC, a newline that forges an
+    /// `error[` line and a megabyte of text, decoded the way the open decodes it — still yields ONE
+    /// printable line with no raw control character, no `error[` and no echo of the value. A BLOB
+    /// key (the marked spelling) is NAMED with its copy-pasteable JSON-escaped `unset` call, and an
+    /// over-long hand-written key is clipped and pointed to `config list` instead of echoed whole.
+    #[test]
+    fn config_fault_line_never_echoes_a_hostile_row_value() {
+        let value = format!(
+            "x\n error[FORGED]: pwned \u{1b}]52;c;aGk=\u{7}{}",
+            "A".repeat(1 << 20)
+        );
+        let marker = unblock_storage::NON_TEXT_CELL_MARKER;
+        let long_key = format!("{marker}blob:{}", "AB".repeat(1 << 16));
+        let rows = vec![
+            (format!("{marker}blob:6B"), "1".to_string()),
+            (long_key, "1".to_string()),
+            ("search_cap".to_string(), value),
+        ];
+        let runtime = RuntimeConfig {
+            db_faults: unblock_config::decode_db_rows(&rows),
+            ..RuntimeConfig::default()
+        };
+        let line = config_fault_line(&runtime).expect("every row blocks");
+        assert_eq!(line.lines().count(), 1, "{line:?}");
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+        assert!(!line.contains("error["), "{line:?}");
+        assert!(
+            !line.contains("FORGED") && line.len() < 8192,
+            "{}",
+            line.len()
+        );
+        assert!(line.contains("`search_cap`"), "{line}");
+        // Reverting the marker decode turns the BLOB key into a non-blocking unknown key, which
+        // the line would then not name.
+        assert!(
+            line.contains(r#"issue {"action":"config","op":"unset","key":"\u0001blob:6B"}"#),
+            "the BLOB key's copy-pasteable repair: {line}"
+        );
+        assert!(
+            line.contains(r#"issue {"action":"config","op":"list"}"#),
+            "the over-long key points to config list: {line}"
+        );
     }
 
     /// The emitter actually WRITES the line to its sink (D39 visibility is only real if the bytes hit

@@ -163,7 +163,9 @@ fn init_csv_reports_the_scaffold() {
 }
 
 /// `--actor` reaches `init`'s open, so an actor over the length bound fails there with exit 7.
-/// `config.toml` is already written and `unblock.db` is not. A plain re-run then meets the clobber
+/// `config.toml` is already written. Since D57 the open is TWO-PHASE (PRD §4 D57 clause (6)): the
+/// runtime keys, the actor among them, resolve only after the database is opened and migrated and
+/// its `config` rows are read, so `unblock.db` exists too. A plain re-run then meets the clobber
 /// guard, and `init --force` without the bad actor recovers.
 #[test]
 fn init_rejects_an_invalid_actor_after_writing_config_and_force_recovers() {
@@ -195,8 +197,8 @@ fn init_rejects_an_invalid_actor_after_writing_config_and_force_recovers() {
         "config.toml is written before the open"
     );
     assert!(
-        !unblock_dir.join("unblock.db").exists(),
-        "the open fails before it creates the database"
+        unblock_dir.join("unblock.db").exists(),
+        "the two-phase open creates and migrates the database before it resolves the actor (D57)"
     );
     assert!(
         !stderr.lines().any(|line| line.starts_with("hint: ")),
@@ -228,6 +230,231 @@ fn init_rejects_an_invalid_actor_after_writing_config_and_force_recovers() {
         unblock_dir.join("unblock.db").exists(),
         "the recovery creates the database"
     );
+}
+
+/// **D57 criterion (c), the `init` half — USER STARTUP REFUSAL with NOTHING written.** `init` loads
+/// the user file through `load_user_config` before it creates `.unblock/` (PRD §4 D57 clause (6)),
+/// so a user file carrying a startup key — in either `jsonl_filename` spelling — fails with
+/// `CONFIG_ERROR`, `context.layer:"user"` and the key named, and every other user-file refusal
+/// (malformed TOML, a credential, `jsonl_export`) fails with exit 7 too; in every case the target
+/// root stays EMPTY, so there is no half-made scaffold.
+#[test]
+fn config_init_refuses_a_bad_user_file_with_nothing_written() {
+    let startup = [
+        ("db_filename = \"x.db\"\n", "db_filename"),
+        ("jsonl_filename = \"x.jsonl\"\n", "jsonl_filename"),
+        (
+            "jsonl_export_filename = \"x.jsonl\"\n",
+            "jsonl_export_filename",
+        ),
+        ("id_prefix = \"zz\"\n", "id_prefix"),
+        ("write_lock_timeout_ms = 10\n", "write_lock_timeout_ms"),
+        ("deletions_retention_days = 3\n", "deletions_retention_days"),
+        ("backend = \"local\"\n", "backend"),
+    ];
+    for (contents, key) in startup {
+        let error = init_with_user_file(contents, "CONFIG_ERROR");
+        assert_eq!(error["context"]["layer"], "user", "{contents}: {error}");
+        assert_eq!(error["context"]["key"], key, "{contents}: {error}");
+    }
+    for (contents, code) in [
+        ("output_format = [unclosed\n", "CONFIG_PARSE_ERROR"),
+        ("auth_token = \"secret\"\n", "CONFIG_ERROR"),
+        ("jsonl_export = true\n", "CONFIG_ERROR"),
+    ] {
+        let error = init_with_user_file(contents, code);
+        if contents.starts_with("jsonl_export") {
+            let message = error["message"].as_str().unwrap_or_default();
+            assert!(message.contains("ub-p1h"), "names ub-p1h: {error}");
+        }
+    }
+}
+
+/// **D57 clause (6), "ANY user file the open would refuse fails `init` with NOTHING written"** —
+/// the layer-VALUE half: a user `search_cap = 0` and an over-long actor are refused by `init`'s
+/// `load_user_config` pre-check with exit 7, `CONFIG_ERROR` naming the key, and an EMPTY root (no
+/// `.unblock/`, no `config.toml`, no `unblock.db`, no `AGENTS.md`). (A blank user actor is UNSET,
+/// as at every actor tier, so it is not a refusal.)
+///
+/// MUTANT KILLED: dropping the user-file bound check (the open would then refuse the file after
+/// `init` had created `.unblock/`, `config.toml` and `unblock.db`).
+#[test]
+fn config_init_refuses_an_out_of_bound_user_value_with_nothing_written() {
+    let long_actor = format!("actor = \"{}\"\n", "a".repeat(201));
+    for (contents, key) in [
+        ("search_cap = 0\n", "search_cap"),
+        (long_actor.as_str(), "actor"),
+    ] {
+        let error = init_with_user_file(contents, "CONFIG_ERROR");
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(&format!("`{key}`")),
+            "{contents}: the refusal names the key: {error}"
+        );
+    }
+}
+
+/// Runs `init --agents -o json` in a fresh root under a user file holding `contents`, asserts exit 7
+/// with `code` and an EMPTY root (no `.unblock/`, no `_unblock/`, no `AGENTS.md`), and returns the
+/// error document.
+fn init_with_user_file(contents: &str, code: &str) -> Value {
+    let home = common::user_config_home(contents);
+    let root = tempfile::tempdir().expect("tempdir");
+    let out = output_locked(
+        common::unblock_in(root.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .args(["init", "--agents", "--output", "json"]),
+        "run init under a bad user file",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "{contents}: stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let error: Value = serde_json::from_slice(&out.stdout).expect("a JSON error document");
+    assert_eq!(error["code"], code, "{contents}: {error}");
+    let left: Vec<_> = std::fs::read_dir(root.path())
+        .expect("read the root")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "{contents}: NOTHING written, found {left:?}"
+    );
+    error
+}
+
+/// **D57 criterion (d4) — INIT.** `init --force --agents` over a workspace whose `config` table holds
+/// a blocking row (a startup-key row, and an undecodable layer-key row) rewrites `config.toml` (the
+/// existing `--force` semantics), then exits 7 with `CONFIG_ERROR`, `context.keys` naming the row
+/// and the clause (2a) recovery hint, and writes NO `AGENTS.md`; `init` on a fresh workspace exits
+/// 0.
+#[test]
+fn config_init_force_over_a_blocking_row_exits_7_before_any_agents_write() {
+    for (key, value, recovery) in [
+        (
+            "db_filename",
+            "x.db",
+            r#"issue {"action":"config","op":"unset","key":"db_filename"}"#,
+        ),
+        (
+            "search_cap",
+            "0",
+            r#"issue {"action":"config","op":"get","key":"search_cap"}"#,
+        ),
+    ] {
+        let ws = Workspace::init();
+        common::plant_config_row(&ws.db_path(), key, value);
+        std::fs::write(ws.config_path(), "id_prefix = \"zz\"\n# stale\n").expect("dirty config");
+
+        let out = output_locked(
+            ws.cmd()
+                .args(["init", "--force", "--agents", "--output", "json"]),
+            "run init --force --agents",
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(7),
+            "{key}: a blocking row fails init; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let error: Value = serde_json::from_slice(&out.stdout).expect("a JSON error document");
+        assert_eq!(error["code"], "CONFIG_ERROR", "{key}: {error}");
+        assert_eq!(
+            error["context"]["keys"],
+            serde_json::json!([key]),
+            "{error}"
+        );
+        let hint = error["hint"].as_str().unwrap_or_default();
+        assert!(
+            hint.contains(recovery),
+            "{key}: the hint names `{recovery}`: {hint}"
+        );
+        let config = std::fs::read_to_string(ws.config_path()).expect("read config.toml");
+        assert!(
+            !config.contains("# stale") && config.contains("id_prefix = \"ub\""),
+            "{key}: --force rewrote config.toml before the check: {config}"
+        );
+        assert!(
+            !ws.root().join("AGENTS.md").exists(),
+            "{key}: no AGENTS.md is written after the blocking-fault refusal"
+        );
+    }
+
+    let fresh = tempfile::tempdir().expect("tempdir");
+    let out = output_locked(
+        common::unblock_in(fresh.path()).args(["init", "--agents"]),
+        "run init --agents on a fresh root",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a fresh workspace has no rows and passes; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        fresh.path().join("AGENTS.md").exists(),
+        "the fresh init writes AGENTS.md"
+    );
+}
+
+/// **D57 criterion (n), the resolve-only half — `unblock agents` never opens the database.** A
+/// workspace holding only `config.toml` keeps NO `unblock.db` after `agents`, and a blocking database
+/// row does not fail `agents` (the DB layer is invisible there), while the user layer — one of its
+/// FIVE layers — still is read: a startup key in the user file fails `agents` with exit 7.
+#[test]
+fn config_agents_resolves_over_five_layers_and_never_opens_the_database() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let unblock_dir = root.path().join(".unblock");
+    std::fs::create_dir_all(&unblock_dir).expect("mkdir .unblock");
+    std::fs::write(unblock_dir.join("config.toml"), "id_prefix = \"ub\"\n").expect("config");
+    let out = output_locked(
+        common::unblock_in(root.path()).arg("agents"),
+        "run agents on a database-less workspace",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !unblock_dir.join("unblock.db").exists(),
+        "the resolve-only facade never opens or creates the database"
+    );
+
+    // A storage-bearing open would FAIL here (`migrate` exits 2 on the corrupted schema page), so
+    // `agents` exiting 0 over the SAME file proves it never opens the database at all — a blocking
+    // `config` row could not prove that, because the storage-bearing open succeeds over one too.
+    // The DB layer's VALUE invisibility is the config facade cell
+    // `the_resolve_only_open_never_reads_the_db_layer`.
+    let ws = Workspace::init();
+    common::corrupt_db_schema_page(&ws.db_path());
+    let migrate = output_locked(ws.cmd().arg("migrate"), "run migrate over a corrupted db");
+    assert_eq!(migrate.status.code(), Some(2), "the database is unreadable");
+    let out = output_locked(ws.cmd().arg("agents"), "run agents over a corrupted db");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "agents never opens the database; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let home = common::user_config_home("db_filename = \"x.db\"\n");
+    let out = output_locked(
+        ws.cmd()
+            .env("XDG_CONFIG_HOME", home.path())
+            .args(["agents", "--output", "json"]),
+        "run agents under a user startup key",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "the user layer is read by agents"
+    );
+    let error: Value = serde_json::from_slice(&out.stdout).expect("a JSON error document");
+    assert_eq!(error["context"]["layer"], "user", "{error}");
 }
 
 /// `UNBLOCK_OUTPUT_FORMAT=csv` reaches `init` through config's env layer, so the scaffold report
@@ -1202,8 +1429,9 @@ fn quoted_dir(retry: &str) -> &str {
 }
 
 /// Runs a printed retry command through `sh -c` from `cwd`, as a user pasting it would. The
-/// leading `unblock` becomes this build's binary, `CLAUDE_PROJECT_DIR` names `project_dir`, and no
-/// `UNBLOCK_*` variable is set.
+/// leading `unblock` becomes this build's binary, `CLAUDE_PROJECT_DIR` names `project_dir`, no
+/// `UNBLOCK_*` variable is set, and `XDG_CONFIG_HOME` and `HOME` name the harness's empty user home
+/// (D57), so no host user `config.toml` reaches the run.
 #[cfg(unix)]
 fn run_retry_in_sh(retry: &str, cwd: &Path, project_dir: &Path) -> Output {
     let args = retry
@@ -1211,17 +1439,19 @@ fn run_retry_in_sh(retry: &str, cwd: &Path, project_dir: &Path) -> Output {
         .unwrap_or_else(|| panic!("the retry text runs unblock: {retry}"));
     let binary = assert_cmd::cargo::cargo_bin("unblock");
     let script = format!("{} {args}", posix_quote(&binary.display().to_string()));
-    output_locked(
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&script)
-            .current_dir(cwd)
-            .env("CLAUDE_PROJECT_DIR", project_dir)
-            .env_remove("UNBLOCK_DIR")
-            .env_remove("UNBLOCK_ACTOR")
-            .env_remove("UNBLOCK_OUTPUT_FORMAT"),
-        "run sh -c",
-    )
+    let home = common::empty_user_home();
+    let mut sh = std::process::Command::new("sh");
+    sh.arg("-c").arg(&script).current_dir(cwd);
+    // The harness scrub (every discovery, `UNBLOCK_*`, `USER` and `RUST_LOG` variable), then
+    // `CLAUDE_PROJECT_DIR` set back to name `project_dir`.
+    sh.env_remove("UNBLOCK_OUTPUT_FORMAT");
+    for key in common::SCRUBBED_ENV {
+        sh.env_remove(key);
+    }
+    sh.env("CLAUDE_PROJECT_DIR", project_dir)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("HOME", &home);
+    output_locked(&mut sh, "run sh -c")
 }
 
 /// Single-quotes `text` for a POSIX shell.

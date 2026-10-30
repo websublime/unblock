@@ -47,17 +47,27 @@ pub async fn session_over_in_dir(
     workspace_dir: PathBuf,
     unblock_dir: PathBuf,
 ) -> Session {
-    let config = ResolvedConfig::default();
+    // D57: the actor lives in `config.runtime`, at the `$USER` (`os_user`) tier, and the reloader
+    // reproduces it — so a `config_set` keeps "tester" while a DB `actor` row still overrides it.
+    let mut config = ResolvedConfig::default();
+    config.runtime.actor = "tester".to_string();
+    config.runtime.sources.actor = unblock_model::ConfigSource::OsUser;
     let paths = ConfigPaths {
-        db_path: unblock_dir.join(&config.db_filename),
-        jsonl_path: unblock_dir.join(&config.jsonl_filename),
+        db_path: unblock_dir.join(&config.startup.db_filename),
+        jsonl_path: unblock_dir.join(&config.startup.jsonl_filename),
         unblock_dir,
     };
     let ctx = WorkspaceContext {
         storage,
         workspace_dir,
-        actor: "tester".to_string(),
         config,
+        reloader: unblock_config::ConfigReloader::new(
+            unblock_config::CliOverrides::default(),
+            unblock_config::EnvOverrides::default(),
+            Some("tester".to_string()),
+            None,
+            None,
+        ),
         paths,
         source: WorkspaceSource::WalkUp,
         schema_version_before_migrate: 0,
@@ -248,6 +258,11 @@ pub mod parked {
         close_armed: AtomicBool,
         /// The number of `close_issues` calls observed (D56: one call = one transaction).
         close_calls: AtomicUsize,
+        /// The D57 config gate (armed ONLY by [`new_gated_config`](Self::new_gated_config)): parks
+        /// the first `set_config`/`unset_config` call AFTER it has COMMITTED — inside the engine's
+        /// commit+swap task, which owns the write guard — so a test can prove the guard is held
+        /// across the commit and that a caller future dropped after the commit still swaps.
+        config_armed: AtomicBool,
     }
 
     impl ParkedStorage {
@@ -264,6 +279,7 @@ pub mod parked {
                 org_armed: AtomicBool::new(false),
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
             })
         }
 
@@ -281,6 +297,7 @@ pub mod parked {
                 org_armed: AtomicBool::new(false),
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
             })
         }
 
@@ -297,6 +314,7 @@ pub mod parked {
                 org_armed: AtomicBool::new(false),
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
             })
         }
 
@@ -314,6 +332,7 @@ pub mod parked {
                 org_armed: AtomicBool::new(true),
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
             })
         }
 
@@ -330,6 +349,25 @@ pub mod parked {
                 org_armed: AtomicBool::new(false),
                 close_armed: AtomicBool::new(true),
                 close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
+            })
+        }
+
+        /// Wrap an inner storage; the first `set_config`/`unset_config` call COMMITS, then parks
+        /// until released (D57 — the `config_set`/`config_unset` commit+swap tail). Every other gate
+        /// stays disarmed.
+        #[must_use]
+        pub fn new_gated_config(inner: Arc<dyn Storage>) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                gate: Notify::new(),
+                entered: Notify::new(),
+                armed: AtomicBool::new(false),
+                bulk_armed: AtomicBool::new(false),
+                org_armed: AtomicBool::new(false),
+                close_armed: AtomicBool::new(false),
+                close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(true),
             })
         }
 
@@ -342,6 +380,14 @@ pub mod parked {
         /// Park here when the D56 organization gate is armed (one-shot).
         async fn park_if_organization_armed(&self) {
             if self.org_armed.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.gate.notified().await;
+            }
+        }
+
+        /// Park here, AFTER a committed config write, when the D57 config gate is armed (one-shot).
+        async fn park_if_config_armed(&self) {
+            if self.config_armed.swap(false, Ordering::SeqCst) {
                 self.entered.notify_one();
                 self.gate.notified().await;
             }
@@ -574,6 +620,22 @@ pub mod parked {
                 self.gate.notified().await;
             }
             self.inner.close_issues(ids, reason, actor).await
+        }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            let committed = self.inner.set_config(key, value).await;
+            self.park_if_config_armed().await;
+            committed
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            let committed = self.inner.unset_config(key).await;
+            self.park_if_config_armed().await;
+            committed
         }
     }
 }
@@ -869,6 +931,18 @@ pub mod collide {
             actor: &str,
         ) -> Result<Vec<String>, StorageError> {
             self.inner.close_issues(ids, reason, actor).await
+        }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.inner.unset_config(key).await
         }
     }
 }
@@ -1207,6 +1281,18 @@ pub mod race {
             actor: &str,
         ) -> Result<Vec<String>, StorageError> {
             self.inner.close_issues(ids, reason, actor).await
+        }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.inner.unset_config(key).await
         }
     }
 }

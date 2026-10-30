@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{session, session_with};
+use common::session;
 use unblock_engine::{EngineError, Session, SessionConfig};
 
 #[tokio::test]
@@ -327,22 +327,6 @@ async fn doctor_schema_findings_report_the_stamp_and_the_build_version_separatel
     );
 }
 
-#[tokio::test]
-async fn open_with_jsonl_export_knob_is_accepted() {
-    // The jsonl_export knob is wired (its export body is the T2.4 seam); open must still succeed.
-    let session = session_with(SessionConfig {
-        jsonl_export: true,
-        ..SessionConfig::default()
-    })
-    .await;
-    assert!(
-        session
-            .ready(&unblock_model::ListFilters::default())
-            .await
-            .is_ok()
-    );
-}
-
 /// Build a synthetic `WorkspaceContext` over `storage` (mirrors the harness, for the explicit-open
 /// test above).
 fn make_ctx(
@@ -352,17 +336,25 @@ fn make_ctx(
     use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
     let workspace_dir = PathBuf::from("/tmp/unblock-test-ws");
     let unblock_dir = workspace_dir.join(".unblock");
-    let config = ResolvedConfig::default();
+    let mut config = ResolvedConfig::default();
+    config.runtime.actor = "tester".to_string();
+    config.runtime.sources.actor = unblock_model::ConfigSource::OsUser;
     let paths = ConfigPaths {
-        db_path: unblock_dir.join(&config.db_filename),
-        jsonl_path: unblock_dir.join(&config.jsonl_filename),
+        db_path: unblock_dir.join(&config.startup.db_filename),
+        jsonl_path: unblock_dir.join(&config.startup.jsonl_filename),
         unblock_dir,
     };
     WorkspaceContext {
         storage,
         workspace_dir,
-        actor: "tester".to_string(),
         config,
+        reloader: unblock_config::ConfigReloader::new(
+            unblock_config::CliOverrides::default(),
+            unblock_config::EnvOverrides::default(),
+            Some("tester".to_string()),
+            None,
+            None,
+        ),
         paths,
         source: WorkspaceSource::WalkUp,
         schema_version_before_migrate: 0,

@@ -10,9 +10,13 @@
 
 use std::path::PathBuf;
 
+use serde_json::{Map, Value};
 use snafu::Snafu;
 use unblock_error::{CodedError, ErrorCode};
+use unblock_model::{ConfigSource, DbConfigFault};
 use unblock_storage::StorageError;
+
+use crate::keys::{KeyClass, classify};
 
 /// The per-crate error returned by the `unblock-config` workspace facades (spine §2.1, §4).
 ///
@@ -75,8 +79,12 @@ pub enum ConfigError {
     ///
     /// Maps to [`ErrorCode::ConfigParseError`] (exit 7). The variant identifier is `Parse` (spine
     /// §2.1) even though it maps to the `ConfigParseError` code; the inner [`toml::de::Error`] is
-    /// absorbed (its message is surfaced, the type never re-exposed past this boundary).
-    #[snafu(display("failed to parse {}: {source}", path.display()))]
+    /// absorbed (its message is surfaced, the type never re-exposed past this boundary). The
+    /// display carries the parser's MESSAGE and byte offset only — never `toml`'s source-line
+    /// excerpt, which would echo a malformed line verbatim (a credential typed unquoted is refused by
+    /// the parse before the NFR-18 deny could redact it, and since D57 a reload failure is reported
+    /// in-band to an MCP client).
+    #[snafu(display("failed to parse {}: {}", path.display(), parse_summary(source)))]
     Parse {
         /// The TOML deserialization failure.
         source: toml::de::Error,
@@ -102,15 +110,184 @@ pub enum ConfigError {
     /// `validate_actor` — over-length / NUL / control char), a path-injecting or absolute
     /// `db_filename` / `jsonl_filename` / `--db` (Seam B), an unparseable `UNBLOCK_OUTPUT_FORMAT`,
     /// an unsupported `backend`, and a forbidden `[remote] auth_token` in `config.toml` (NFR-18).
-    #[snafu(display("invalid config value for `{key}` = `{value}`: {reason}"))]
+    /// The display ECHOES `key` and `value` through [`shown`] (clipped to
+    /// [`unblock_error::MAX_ECHOED_BYTES`], control characters escaped), because both can be
+    /// attacker-controlled (an MCP `config` argument, a hand-written database row); an EMPTY `value`
+    /// is not echoed.
+    #[snafu(display(
+        "invalid config value for `{}`{}: {reason}",
+        shown(key),
+        shown_value(value)
+    ))]
     InvalidValue {
         /// The config key whose value was rejected.
         key: String,
-        /// The rejected value (terminal-safe; rendered as-supplied).
+        /// The rejected value (echoed through [`shown`]; empty when no value was supplied).
         value: String,
         /// Why the value was rejected.
         reason: String,
     },
+
+    /// A STARTUP key appeared in a runtime layer (PRD §4 D57 clause (2)) — in the user file
+    /// (`layer: User`), or named by the `issue` tool's `config` action (`layer: Db`).
+    ///
+    /// Maps to [`ErrorCode::ConfigError`] (exit 7, not retryable); `context` carries `key` and
+    /// `layer` (the §1.10 [`ConfigSource`], only ever `User` or `Db`, wire `"user"`/`"db"`).
+    #[snafu(display(
+        "`{}` is a startup-only key and cannot be set in the {} configuration layer; set it on \
+         the command line, in the environment or in the project file .unblock/config.toml",
+        shown(key),
+        source_name(*layer)
+    ))]
+    StartupKeyInRuntimeLayer {
+        /// The startup key that was named.
+        key: String,
+        /// The runtime layer that carried it (`User` or `Db`).
+        layer: ConfigSource,
+    },
+
+    /// The `issue` tool's `config` action named a key this build does not know (PRD §4 D57 clause
+    /// (7)). Maps to [`ErrorCode::ConfigError`] (exit 7); `context` carries `key` (clipped).
+    #[snafu(display(
+        "unknown config key `{}` (the runtime layer keys are actor, output_format and \
+         search_cap)",
+        shown(key)
+    ))]
+    UnknownKey {
+        /// The unknown key.
+        key: String,
+    },
+
+    /// The workspace is FAIL-CLOSED: the database `config` table holds at least one BLOCKING row
+    /// (PRD §4 D57 clause (2a), [`unblock_model::ConfigFaultKind::is_blocking`]).
+    ///
+    /// Maps to [`ErrorCode::ConfigError`] (exit 7); `context` = `{ "keys": [the blocking keys] }`.
+    /// The FIRST `ConfigError` variant with a production [`CodedError::hint`]: one recovery call per
+    /// blocking key — `issue {"action":"config","op":"unset","key":"<key>"}` for a NON-layer key (a
+    /// startup key or a `jsonl_export` row), and for a LAYER key holding an undecodable value
+    /// `op:"get"` first, then `op:"set"` with a valid value (or `op:"unset"`).
+    #[snafu(display("{}", faulty_db_config_message(faults)))]
+    FaultyDbConfig {
+        /// The blocking faulty rows.
+        faults: Vec<DbConfigFault>,
+    },
+}
+
+/// The wire spelling of a [`ConfigSource`] (its serde `snake_case` name) — `"user"`, `"db"`, … — so
+/// the layer has ONE name in messages, `context` and the published schema.
+#[must_use]
+pub(crate) fn source_name(source: ConfigSource) -> &'static str {
+    match source {
+        ConfigSource::Cli => "cli",
+        ConfigSource::Env => "env",
+        ConfigSource::Project => "project",
+        ConfigSource::User => "user",
+        ConfigSource::Db => "db",
+        ConfigSource::OsUser => "os_user",
+        ConfigSource::Default => "default",
+    }
+}
+
+/// Echo attacker-controllable text (an MCP `config` argument, a hand-written database row, a user
+/// file value) into a message: CLIPPED to [`unblock_error::MAX_ECHOED_BYTES`] (spine §2.4 — each
+/// origin clips its own attacker-controlled text) and with every control character ESCAPED
+/// (`\n` → `\\n`, ESC → `\\u{1b}`), so the echo is always one printable line. Printable text,
+/// non-ASCII included, is unchanged.
+#[must_use]
+pub(crate) fn shown(text: &str) -> String {
+    let clipped = unblock_error::clip(text);
+    let mut out = String::with_capacity(clipped.len());
+    for c in clipped.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The echoed-value part of `InvalidValue`'s message (a space, `=`, a space and the quoted value), or
+/// nothing for an empty value (a refusal that read no value, e.g. `config get jsonl_export`, never
+/// prints a misleading empty echo).
+fn shown_value(value: &str) -> String {
+    if value.is_empty() {
+        String::new()
+    } else {
+        format!(" = `{}`", shown(value))
+    }
+}
+
+/// A TOML parse failure without the parser's source excerpt: its message and, when known, the byte
+/// offset it points at (see [`ConfigError::Parse`]).
+fn parse_summary(err: &toml::de::Error) -> String {
+    let message = shown(err.message());
+    match err.span() {
+        Some(span) => format!("{message} (at byte {})", span.start),
+        None => message,
+    }
+}
+
+/// [`unblock_error::clip`] as an owned `String` — the `context` echo of a key (JSON escapes control
+/// characters itself, so only the size is bounded there).
+fn clipped(text: &str) -> String {
+    unblock_error::clip(text).into_owned()
+}
+
+/// The `FaultyDbConfig` message: the blocking keys and why each row blocks.
+fn faulty_db_config_message(faults: &[DbConfigFault]) -> String {
+    let rows: Vec<String> = faults
+        .iter()
+        .map(|f| format!("`{}` ({})", shown(&f.key), shown(&f.fault.reason)))
+        .collect();
+    format!(
+        "the workspace is fail-closed: the database config table holds a blocking row for {}",
+        rows.join("; ")
+    )
+}
+
+/// Whether `key` is a D57 LAYER key (`actor`, `output_format`, `search_cap`).
+fn is_layer_key(key: &str) -> bool {
+    matches!(classify(key), Some(KeyClass::Runtime(rk)) if rk.is_layer_key())
+}
+
+/// The `FaultyDbConfig` recovery hint: one line per blocking key naming the exact call (PRD §4 D57
+/// clause (2a)). The key is spelled as a JSON string so the call is copy-pasteable whatever bytes the
+/// row holds — up to [`unblock_error::MAX_ECHOED_BYTES`]: a LONGER key (only a hand-written row can
+/// hold one) is not echoed in full on every gated call; its line shows the clipped key and points to
+/// `config list`, which returns the exact key to `unset`.
+fn faulty_db_config_hint(faults: &[DbConfigFault]) -> String {
+    let lines: Vec<String> = faults
+        .iter()
+        .map(|f| {
+            if f.key.len() > unblock_error::MAX_ECHOED_BYTES {
+                return format!(
+                    "`{}` (a key too long to echo in full) blocks the workspace: read its exact key \
+                     with issue {{\"action\":\"config\",\"op\":\"list\"}}, then remove it with \
+                     issue {{\"action\":\"config\",\"op\":\"unset\",\"key\":\"<that key>\"}}",
+                    shown(&f.key)
+                );
+            }
+            let key = Value::String(f.key.clone()).to_string();
+            if is_layer_key(&f.key) {
+                format!(
+                    "`{}` holds a value this build cannot decode: read it with \
+                     issue {{\"action\":\"config\",\"op\":\"get\",\"key\":{key}}} first, then \
+                     replace it with issue {{\"action\":\"config\",\"op\":\"set\",\"key\":{key},\
+                     \"value\":\"<valid value>\"}} (or remove it with \
+                     issue {{\"action\":\"config\",\"op\":\"unset\",\"key\":{key}}})",
+                    shown(&f.key)
+                )
+            } else {
+                format!(
+                    "`{}` cannot be set in the database: remove it with \
+                     issue {{\"action\":\"config\",\"op\":\"unset\",\"key\":{key}}}",
+                    shown(&f.key)
+                )
+            }
+        })
+        .collect();
+    lines.join("\n")
 }
 
 impl CodedError for ConfigError {
@@ -124,13 +301,17 @@ impl CodedError for ConfigError {
             // Config-file additive set (spine §2.1): exit 7 (Parse/InvalidValue) + exit 8 (Io).
             Self::Parse { .. } => ErrorCode::ConfigParseError,
             Self::Io { .. } => ErrorCode::IoError,
-            Self::InvalidValue { .. } => ErrorCode::ConfigError,
+            // D57: the three FR-13-full variants ride the EXISTING `CONFIG_ERROR` (exit 7); no code
+            // is minted (`ErrorCode::ALL` stays 36).
+            Self::InvalidValue { .. }
+            | Self::StartupKeyInRuntimeLayer { .. }
+            | Self::UnknownKey { .. }
+            | Self::FaultyDbConfig { .. } => ErrorCode::ConfigError,
         }
     }
 
-    /// **D46 (v1.0.1) — the ONE change this crate's error type carries, and it is plumbing, not
-    /// policy:** forward the inner [`StorageError`]'s own hint on the two storage-wrapping variants,
-    /// mirroring EXACTLY the `code()` forward those two already share.
+    /// **D46 (v1.0.1)** — forward the inner [`StorageError`]'s own hint on the two storage-wrapping
+    /// variants, mirroring EXACTLY the `code()` forward those two already share.
     ///
     /// **Why it is REQUIRED rather than tidy.** D46 clause (5) makes the migration run IMPLICITLY ON
     /// OPEN, and that path is this crate's open facade (`src/context.rs`). With only `code()`
@@ -140,19 +321,57 @@ impl CodedError for ConfigError {
     /// `unblock.mcp.v1.8` → `unblock.mcp.v1.9` bump) while the user on the normative path received no
     /// hint: this decision's own failure mode wearing the contract's clothes.
     ///
-    /// Every other variant keeps the trait default `None`. No variant is added, no `ErrorCode` moves,
-    /// and no exit code changes.
+    /// **D57 (v1.1)** — `FaultyDbConfig` composes the recovery hint (one call per blocking key),
+    /// `CONFIG_ERROR`'s first production hint site, which is why its published `hint_shape` moves
+    /// `none` → `contextual_text`. `StartupKeyInRuntimeLayer` and `UnknownKey` keep `None`.
     fn hint(&self) -> Option<String> {
         match self {
             Self::DbOpenFailed { source } | Self::MigrationFailed { source } => source.hint(),
+            Self::FaultyDbConfig { faults } => Some(faulty_db_config_hint(faults)),
             // Enumerated rather than a catch-all `_`, for the same reason `code()` is: a future
             // variant must DECLARE whether it carries a hint.
             Self::WorkspaceNotFound { .. }
             | Self::ActorUnresolved
             | Self::Parse { .. }
             | Self::Io { .. }
-            | Self::InvalidValue { .. } => None,
+            | Self::InvalidValue { .. }
+            | Self::StartupKeyInRuntimeLayer { .. }
+            | Self::UnknownKey { .. } => None,
         }
+    }
+
+    /// D57 — the structured payload of the three FR-13-full variants: `key`/`layer` on
+    /// `StartupKeyInRuntimeLayer`, `key` on `UnknownKey`, `keys` (the blocking keys) on
+    /// `FaultyDbConfig`. Every other variant keeps the empty map it carried before D57.
+    fn context(&self) -> Map<String, Value> {
+        let mut map = Map::new();
+        match self {
+            Self::StartupKeyInRuntimeLayer { key, layer } => {
+                map.insert("key".to_string(), Value::String(clipped(key)));
+                map.insert(
+                    "layer".to_string(),
+                    Value::String(source_name(*layer).to_string()),
+                );
+            }
+            Self::UnknownKey { key } => {
+                map.insert("key".to_string(), Value::String(clipped(key)));
+            }
+            Self::FaultyDbConfig { faults } => {
+                let keys = faults
+                    .iter()
+                    .map(|f| Value::String(clipped(&f.key)))
+                    .collect();
+                map.insert("keys".to_string(), Value::Array(keys));
+            }
+            Self::WorkspaceNotFound { .. }
+            | Self::DbOpenFailed { .. }
+            | Self::MigrationFailed { .. }
+            | Self::ActorUnresolved
+            | Self::Parse { .. }
+            | Self::Io { .. }
+            | Self::InvalidValue { .. } => {}
+        }
+        map
     }
 }
 
@@ -161,7 +380,7 @@ mod tests {
     use super::ConfigError;
     use std::path::PathBuf;
     use unblock_error::{CodedError, ErrorCode};
-    use unblock_storage::StorageError;
+    use unblock_storage::{SchemaGap, StorageError};
 
     #[test]
     fn workspace_not_found_maps_to_not_initialized() {
@@ -204,6 +423,7 @@ mod tests {
             from: 1,
             to: 2,
             reason: "step failed".to_string(),
+            gaps: Vec::new(),
         };
         assert_eq!(inner.code(), ErrorCode::SchemaMismatch);
         let err = ConfigError::MigrationFailed { source: inner };
@@ -237,12 +457,19 @@ mod tests {
     fn db_open_and_migration_failures_forward_the_storage_hint() {
         use unblock_error::StructuredError;
 
+        let gaps = || {
+            vec![
+                SchemaGap::CommentsColumn("updated_at"),
+                SchemaGap::CommentsColumn("redacted_at"),
+            ]
+        };
+        let reason = "the `comments` table is missing the column(s) updated_at, redacted_at that \
+                      schema version 2 adds";
         let inner = StorageError::Migration {
             from: 2,
-            to: 2,
-            reason: "the `comments` table is missing the column(s) updated_at, redacted_at that \
-                     schema version 2 adds"
-                .to_string(),
+            to: 3,
+            reason: reason.to_string(),
+            gaps: gaps(),
         };
         let expected = inner.hint().expect("storage composes the hint");
 
@@ -250,11 +477,9 @@ mod tests {
             ConfigError::MigrationFailed {
                 source: StorageError::Migration {
                     from: 2,
-                    to: 2,
-                    reason:
-                        "the `comments` table is missing the column(s) updated_at, redacted_at \
-                             that schema version 2 adds"
-                            .to_string(),
+                    to: 3,
+                    reason: reason.to_string(),
+                    gaps: gaps(),
                 },
             },
             ConfigError::DbOpenFailed {
@@ -347,6 +572,7 @@ mod tests {
                     from: 1,
                     to: 2,
                     reason: "r".to_string(),
+                    gaps: Vec::new(),
                 },
             },
             ConfigError::ActorUnresolved,
@@ -363,6 +589,14 @@ mod tests {
                 value: "v".to_string(),
                 reason: "r".to_string(),
             },
+            ConfigError::StartupKeyInRuntimeLayer {
+                key: "db_filename".to_string(),
+                layer: unblock_model::ConfigSource::User,
+            },
+            ConfigError::UnknownKey {
+                key: "nope".to_string(),
+            },
+            ConfigError::FaultyDbConfig { faults: Vec::new() },
         ];
 
         let table: Vec<(String, String, u8)> = variants
@@ -376,6 +610,9 @@ mod tests {
                     ConfigError::Parse { .. } => "Parse",
                     ConfigError::Io { .. } => "Io",
                     ConfigError::InvalidValue { .. } => "InvalidValue",
+                    ConfigError::StartupKeyInRuntimeLayer { .. } => "StartupKeyInRuntimeLayer",
+                    ConfigError::UnknownKey { .. } => "UnknownKey",
+                    ConfigError::FaultyDbConfig { .. } => "FaultyDbConfig",
                 };
                 (
                     variant.to_string(),
@@ -386,5 +623,70 @@ mod tests {
             .collect();
 
         insta::assert_json_snapshot!("config_error_variant_code_exit_table", table);
+    }
+
+    /// **D57 clause (2a) — the `FaultyDbConfig` recovery hint.** A NON-layer key (a startup key or
+    /// a `jsonl_export` row) is told `op:"unset"`; a LAYER key with an undecodable value is told
+    /// `op:"get"` FIRST, then `op:"set"` (or `op:"unset"`); `context.keys` lists the blocking keys.
+    ///
+    /// MUTANT KILLED: one `unset` text for every key (an agent whose gate is stale would delete a
+    /// valid value another process already wrote).
+    #[test]
+    fn faulty_db_config_hint_names_the_exact_recovery_per_key() {
+        use unblock_model::{ConfigFault, ConfigFaultKind, DbConfigFault};
+        let fault = |key: &str, kind| DbConfigFault {
+            key: key.to_string(),
+            value: "v".to_string(),
+            fault: ConfigFault {
+                kind,
+                reason: "r".to_string(),
+            },
+        };
+        let err = ConfigError::FaultyDbConfig {
+            faults: vec![
+                fault("db_filename", ConfigFaultKind::StartupKey),
+                fault("search_cap", ConfigFaultKind::InvalidValue),
+            ],
+        };
+        assert_eq!(err.code(), ErrorCode::ConfigError);
+        let hint = err.hint().expect("FaultyDbConfig carries a hint");
+        let mut lines = hint.lines();
+        let first = lines.next().unwrap();
+        assert!(
+            first.contains(r#"issue {"action":"config","op":"unset","key":"db_filename"}"#),
+            "{first}"
+        );
+        let second = lines.next().unwrap();
+        let get = second
+            .find(r#"issue {"action":"config","op":"get","key":"search_cap"}"#)
+            .expect("get first");
+        let set = second
+            .find(r#""op":"set","key":"search_cap""#)
+            .expect("then set");
+        assert!(get < set, "{second}");
+        let structured: unblock_error::StructuredError = (&err).into();
+        assert_eq!(
+            structured.context["keys"],
+            serde_json::json!(["db_filename", "search_cap"])
+        );
+        assert_eq!(structured.hint.as_deref(), Some(hint.as_str()));
+    }
+
+    #[test]
+    fn d57_refusals_carry_key_and_layer_context() {
+        let err = ConfigError::StartupKeyInRuntimeLayer {
+            key: "id_prefix".to_string(),
+            layer: unblock_model::ConfigSource::Db,
+        };
+        let structured: unblock_error::StructuredError = (&err).into();
+        assert_eq!(structured.code, ErrorCode::ConfigError);
+        assert_eq!(structured.context["layer"], "db");
+        assert_eq!(structured.context["key"], "id_prefix");
+        assert_eq!(err.hint(), None);
+        let err = ConfigError::UnknownKey {
+            key: "zz".to_string(),
+        };
+        assert_eq!(err.code(), ErrorCode::ConfigError);
+        assert_eq!(err.hint(), None);
     }
 }

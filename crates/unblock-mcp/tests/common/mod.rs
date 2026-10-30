@@ -28,28 +28,43 @@ pub async fn session() -> Arc<Session> {
     storage.migrate().await.expect("migrate");
     let storage: Arc<dyn Storage> = Arc::new(storage);
 
-    let workspace_dir = PathBuf::from("/tmp/unblock-mcp-test-ws");
-    let unblock_dir = workspace_dir.join(".unblock");
-    let config = ResolvedConfig::default();
-    let paths = ConfigPaths {
-        db_path: unblock_dir.join(&config.db_filename),
-        jsonl_path: unblock_dir.join(&config.jsonl_filename),
-        unblock_dir,
-    };
-    let ctx = WorkspaceContext {
-        storage,
-        workspace_dir,
-        actor: "tester".to_string(),
-        config,
-        paths,
-        source: WorkspaceSource::WalkUp,
-        schema_version_before_migrate: 0,
-    };
+    let ctx = tester_ctx(storage);
     Arc::new(
         Session::open(ctx, SessionConfig::default())
             .await
             .expect("open session"),
     )
+}
+
+/// The harness `WorkspaceContext` over `storage` (D57): actor `"tester"` in `config.runtime` at the
+/// `$USER` (`os_user`) tier, with a reloader that reproduces it — so a `config set` keeps "tester"
+/// while a DB `actor` row still overrides it, exactly as in production.
+pub fn tester_ctx(storage: Arc<dyn Storage>) -> WorkspaceContext {
+    let workspace_dir = PathBuf::from("/tmp/unblock-mcp-test-ws");
+    let unblock_dir = workspace_dir.join(".unblock");
+    let mut config = ResolvedConfig::default();
+    config.runtime.actor = "tester".to_string();
+    config.runtime.sources.actor = unblock_model::ConfigSource::OsUser;
+    let paths = ConfigPaths {
+        db_path: unblock_dir.join(&config.startup.db_filename),
+        jsonl_path: unblock_dir.join(&config.startup.jsonl_filename),
+        unblock_dir,
+    };
+    WorkspaceContext {
+        storage,
+        workspace_dir,
+        config,
+        reloader: unblock_config::ConfigReloader::new(
+            unblock_config::CliOverrides::default(),
+            unblock_config::EnvOverrides::default(),
+            Some("tester".to_string()),
+            None,
+            None,
+        ),
+        paths,
+        source: WorkspaceSource::WalkUp,
+        schema_version_before_migrate: 0,
+    }
 }
 
 /// Build an `Arc<Session>` over a [`recording::RecordingStorage`] spy (NFR-18 AC): the spy wraps a real
@@ -65,23 +80,7 @@ pub async fn session_recording() -> (Arc<Session>, Arc<recording::RecordingStora
     let spy = recording::RecordingStorage::new(inner);
     let spy_dyn: Arc<dyn Storage> = spy.clone();
 
-    let workspace_dir = PathBuf::from("/tmp/unblock-mcp-test-ws");
-    let unblock_dir = workspace_dir.join(".unblock");
-    let config = ResolvedConfig::default();
-    let paths = ConfigPaths {
-        db_path: unblock_dir.join(&config.db_filename),
-        jsonl_path: unblock_dir.join(&config.jsonl_filename),
-        unblock_dir,
-    };
-    let ctx = WorkspaceContext {
-        storage: spy_dyn,
-        workspace_dir,
-        actor: "tester".to_string(),
-        config,
-        paths,
-        source: WorkspaceSource::WalkUp,
-        schema_version_before_migrate: 0,
-    };
+    let ctx = tester_ctx(spy_dyn);
     let session = Arc::new(
         Session::open(ctx, SessionConfig::default())
             .await
@@ -795,6 +794,22 @@ pub mod recording {
             self.record();
             self.inner.close_issues(ids, reason, actor).await
         }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        // D57: the two config MUTATIONS record, so every zero-write cell on the `config` arm is
+        // non-vacuous (spine §3.2).
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.record();
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.record();
+            self.inner.unset_config(key).await
+        }
     }
 }
 
@@ -812,23 +827,7 @@ pub async fn session_gated(n: usize) -> (Arc<Session>, gated::Gate) {
     let gate = gated::Gate::new(n);
     let storage: Arc<dyn Storage> = Arc::new(gated::GateStorage::new(inner, gate.clone()));
 
-    let workspace_dir = PathBuf::from("/tmp/unblock-mcp-test-ws");
-    let unblock_dir = workspace_dir.join(".unblock");
-    let config = ResolvedConfig::default();
-    let paths = ConfigPaths {
-        db_path: unblock_dir.join(&config.db_filename),
-        jsonl_path: unblock_dir.join(&config.jsonl_filename),
-        unblock_dir,
-    };
-    let ctx = WorkspaceContext {
-        storage,
-        workspace_dir,
-        actor: "tester".to_string(),
-        config,
-        paths,
-        source: WorkspaceSource::WalkUp,
-        schema_version_before_migrate: 0,
-    };
+    let ctx = tester_ctx(storage);
     let session = Arc::new(
         Session::open(ctx, SessionConfig::default())
             .await
@@ -1110,6 +1109,18 @@ pub mod gated {
         ) -> Result<Vec<String>, StorageError> {
             self.inner.close_issues(ids, reason, actor).await
         }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.inner.unset_config(key).await
+        }
     }
 }
 
@@ -1124,23 +1135,7 @@ pub async fn session_failing_list() -> Arc<Session> {
     let inner: Arc<dyn Storage> = Arc::new(inner);
     let storage: Arc<dyn Storage> = Arc::new(failing::FailListStorage { inner });
 
-    let workspace_dir = PathBuf::from("/tmp/unblock-mcp-test-ws");
-    let unblock_dir = workspace_dir.join(".unblock");
-    let config = ResolvedConfig::default();
-    let paths = ConfigPaths {
-        db_path: unblock_dir.join(&config.db_filename),
-        jsonl_path: unblock_dir.join(&config.jsonl_filename),
-        unblock_dir,
-    };
-    let ctx = WorkspaceContext {
-        storage,
-        workspace_dir,
-        actor: "tester".to_string(),
-        config,
-        paths,
-        source: WorkspaceSource::WalkUp,
-        schema_version_before_migrate: 0,
-    };
+    let ctx = tester_ctx(storage);
     Arc::new(
         Session::open(ctx, SessionConfig::default())
             .await
@@ -1367,6 +1362,18 @@ pub mod failing {
             actor: &str,
         ) -> Result<Vec<String>, StorageError> {
             self.inner.close_issues(ids, reason, actor).await
+        }
+
+        async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+            self.inner.read_config().await
+        }
+
+        async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            self.inner.set_config(key, value).await
+        }
+
+        async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+            self.inner.unset_config(key).await
         }
     }
 }

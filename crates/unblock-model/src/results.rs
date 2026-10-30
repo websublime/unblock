@@ -173,14 +173,147 @@ pub struct CloseEligibleOutcome {
     pub dry_run: bool,
 }
 
+// --- FR-13 full (D57, v1.1) — the `issue action: config` result row and the DB-layer fault types
+//     (spine §1.10). `ConfigEntry` reaches L7 (spine §5.3) through the `issue` output union, so every
+//     `///` line on it and on the types it names is CONTRACT BYTES (a schema `description` digested
+//     by `CONTRACT_HASH`).
+
+/// The layer that supplied a resolved runtime configuration value, highest precedence first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigSource {
+    /// A command-line flag.
+    Cli,
+    /// An `UNBLOCK_*` environment variable.
+    Env,
+    /// The project file, `.unblock/config.toml`.
+    Project,
+    /// The user file, `config.toml` under the user configuration directory.
+    User,
+    /// A row of the database `config` table.
+    Db,
+    /// The operating-system user name (the actor's `$USER` fallback).
+    OsUser,
+    /// The built-in default.
+    Default,
+}
+
+/// Why a database `config` row contributes no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigFaultKind {
+    /// The row names a startup key, which only the command line, the environment and the project
+    /// file may set. Blocking.
+    StartupKey,
+    /// The row's value cannot be decoded for its key. Blocking.
+    InvalidValue,
+    /// The row names a key this build does not know. Not blocking.
+    UnknownKey,
+}
+
+impl ConfigFaultKind {
+    /// Whether a row with this fault fail-closes the workspace (D57 clause (2a)) — the ONE blocking
+    /// predicate: the engine's fail-closed gate, the cli `mcp` startup line and `unblock init`'s
+    /// check all call it. `startup_key` and `invalid_value` block; `unknown_key` does not (SF-4
+    /// forward compatibility).
+    #[must_use]
+    pub const fn is_blocking(self) -> bool {
+        matches!(self, Self::StartupKey | Self::InvalidValue)
+    }
+}
+
+/// A database `config` row's fault.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct ConfigFault {
+    /// What is wrong with the row.
+    pub kind: ConfigFaultKind,
+    /// A human description of the fault.
+    pub reason: String,
+}
+
+/// One faulty database `config` row, as read (D57 clause (2a)).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct DbConfigFault {
+    /// The row's key.
+    pub key: String,
+    /// The row's value, as stored.
+    pub value: String,
+    /// Why the row contributes no value.
+    pub fault: ConfigFault,
+}
+
+/// One runtime configuration entry (`issue action: config`, FR-13 / D57).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct ConfigEntry {
+    /// The configuration key.
+    pub key: String,
+    /// The database `config` row's value, or null when no row holds the key.
+    pub value: Option<String>,
+    /// The canonical value this session resolved, or null when the key is not a runtime layer key.
+    pub effective: Option<String>,
+    /// The layer that supplied `effective`, or null when the key is not a runtime layer key.
+    pub source: Option<ConfigSource>,
+    /// The row's fault, or null for a sound or absent row.
+    pub fault: Option<ConfigFault>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseOutcome, CountBucket, DepTree, DiagnosticFinding, DiagnosticKind, DiagnosticReport,
-        ExportReport, GraphEdge, ImportReport,
+        CloseOutcome, ConfigEntry, ConfigFault, ConfigFaultKind, ConfigSource, CountBucket,
+        DepTree, DiagnosticFinding, DiagnosticKind, DiagnosticReport, ExportReport, GraphEdge,
+        ImportReport,
     };
     use crate::enums::DependencyType;
     use std::path::PathBuf;
+
+    /// D57 clause (2a): `is_blocking` is the ONE blocking predicate — `startup_key` and
+    /// `invalid_value` block, `unknown_key` does not (SF-4 forward compatibility).
+    #[test]
+    fn config_fault_kind_blocking_is_startup_and_invalid_only() {
+        assert!(ConfigFaultKind::StartupKey.is_blocking());
+        assert!(ConfigFaultKind::InvalidValue.is_blocking());
+        assert!(!ConfigFaultKind::UnknownKey.is_blocking());
+    }
+
+    /// The `ConfigEntry` wire shape: `snake_case` sources and fault kinds, nulls spelled out.
+    #[test]
+    fn config_entry_wire_shape() {
+        let entry = ConfigEntry {
+            key: "actor".to_string(),
+            value: Some("bob".to_string()),
+            effective: Some("alice".to_string()),
+            source: Some(ConfigSource::OsUser),
+            fault: Some(ConfigFault {
+                kind: ConfigFaultKind::InvalidValue,
+                reason: "r".to_string(),
+            }),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "key": "actor",
+                "value": "bob",
+                "effective": "alice",
+                "source": "os_user",
+                "fault": { "kind": "invalid_value", "reason": "r" }
+            })
+        );
+        let empty = ConfigEntry {
+            key: "db_filename".to_string(),
+            value: None,
+            effective: None,
+            source: None,
+            fault: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&empty).unwrap(),
+            serde_json::json!({
+                "key": "db_filename", "value": null, "effective": null, "source": null, "fault": null
+            })
+        );
+    }
 
     #[test]
     fn count_bucket_roundtrip() {

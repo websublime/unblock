@@ -354,6 +354,22 @@ pub const CELLS: &[FlipCell] = &[
         both_arms_schema_clean: true,
         shown_arm_mutates: false,
     },
+    // -- D57 (FR-13 full, v1.1) — the `config` arm appended to `issue` ---------------------------
+    // The read-to-write escalation on `op`: the text READS the actor row, GA would have DELETED it.
+    // `get` and `unset` accept the SAME field set (`key`), so both arms are schema-clean; the shown
+    // arm does not mutate, the hidden one does — the analogue of D56's `dry_run` cell.
+    FlipCell {
+        id: "S3 issue{config op get->unset escalation}",
+        tool: "issue",
+        arguments_text: r#"{"action":"config","op":"get","key":"actor","op":"unset"}"#,
+        shown: r#"{"action":"config","op":"get","key":"actor"}"#,
+        hidden: r#"{"action":"config","key":"actor","op":"unset"}"#,
+        duplicated_key: "op",
+        pointer: "/arguments",
+        kind: FlipKind::FieldSubstitution,
+        both_arms_schema_clean: true,
+        shown_arm_mutates: false,
+    },
 ];
 
 /// A `tools/call` frame with `arguments_text` spliced in VERBATIM (no serde on the payload).

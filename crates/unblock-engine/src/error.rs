@@ -15,10 +15,14 @@
 //!   `create`/`update` *before* the storage delegation, so `ModelError` is unambiguously
 //!   engine-produced and `StorageError` stays validation-free (it has no `ModelError` variant).
 //!
-//! **`ConfigError` is NOT wrapped** (CF-D): the engine never calls `unblock-config`; the caller
-//! (cli/mcp/test) runs the open facade, handles `ConfigError`, and hands an already-built
-//! `WorkspaceContext` to `Session::open`. A `ConfigError` is therefore never produced inside the
-//! engine.
+//! **`ConfigError` is wrapped since D57 (v1.1)** as the transparent `Config` source. Workspace OPEN
+//! still runs in `unblock-config` (CF-D unchanged: the caller runs the open facade, handles its
+//! `ConfigError`, and hands an already-built `WorkspaceContext` to `Session::open`), but a LIVE
+//! session now calls `unblock-config` itself — `ConfigReloader::reload_runtime` and the two
+//! key/value validators of the `config` action (`classify_runtime_key`,
+//! `canonicalize_runtime_value`) — and its fail-closed gate returns
+//! `ConfigError::FaultyDbConfig` (PRD §4 D57 clause (2a)). The source forwards
+//! `code()`/`hint()`/`context()`, so the gate's recovery hint survives the engine boundary.
 //!
 //! # Engine-local variant → existing `ErrorCode` (spine §2.2 — never a NEW code)
 //!
@@ -69,6 +73,15 @@ pub enum EngineError {
     Model {
         /// The underlying model/validation failure (aggregate or scalar).
         source: ModelError,
+    },
+
+    /// A runtime-configuration failure (FR-13 full, PRD §4 D57): the `config` action's key/value
+    /// refusals, a reload failure (a malformed project or user file), or the clause (2a) fail-closed
+    /// gate's `FaultyDbConfig`. Forwards `source.code()`/`hint()`/`context()` (`CodedError`).
+    #[snafu(transparent)]
+    Config {
+        /// The underlying configuration failure.
+        source: unblock_config::ConfigError,
     },
 
     /// A `unblock-sync` JSONL interchange operation failed (T2.4/D23). Additive, cfg-gated behind the
@@ -136,6 +149,7 @@ impl CodedError for EngineError {
             Self::Storage { source } => source.code(),
             Self::Policy { source } => source.code(),
             Self::Model { source } => source.code(),
+            Self::Config { source } => source.code(),
             #[cfg(feature = "sync")]
             Self::Sync { source } => source.code(),
             #[cfg(feature = "health")]
@@ -155,6 +169,7 @@ impl CodedError for EngineError {
             Self::Storage { source } => source.hint(),
             Self::Policy { source } => source.hint(),
             Self::Model { source } => source.hint(),
+            Self::Config { source } => source.hint(),
             #[cfg(feature = "sync")]
             Self::Sync { source } => source.hint(),
             #[cfg(feature = "health")]
@@ -174,6 +189,7 @@ impl CodedError for EngineError {
             Self::Storage { source } => source.context(),
             Self::Policy { source } => source.context(),
             Self::Model { source } => source.context(),
+            Self::Config { source } => source.context(),
             #[cfg(feature = "sync")]
             Self::Sync { source } => source.context(),
             #[cfg(feature = "health")]
@@ -289,5 +305,35 @@ mod tests {
     fn feature_not_wired_display_carries_the_feature() {
         let err = EngineError::FeatureNotWired { feature: "health" };
         assert!(err.to_string().contains("health"));
+    }
+
+    /// D57: the transparent `Config` source forwards the fail-closed gate's code, recovery hint and
+    /// `context.keys` across the engine boundary.
+    #[test]
+    fn config_fault_gate_survives_the_engine_boundary() {
+        use unblock_model::{ConfigFault, ConfigFaultKind, DbConfigFault};
+        let err: EngineError = unblock_config::ConfigError::FaultyDbConfig {
+            faults: vec![DbConfigFault {
+                key: "db_filename".into(),
+                value: "x.db".into(),
+                fault: ConfigFault {
+                    kind: ConfigFaultKind::StartupKey,
+                    reason: "startup key".into(),
+                },
+            }],
+        }
+        .into();
+        assert_eq!(err.code(), ErrorCode::ConfigError);
+        assert_eq!(err.code().exit_code(), 7);
+        let hint = err.hint().expect("the gate carries a recovery hint");
+        assert!(
+            hint.contains(r#"issue {"action":"config","op":"unset","key":"db_filename"}"#),
+            "{hint}"
+        );
+        let structured: StructuredError = (&err).into();
+        assert_eq!(
+            structured.context["keys"],
+            serde_json::json!(["db_filename"])
+        );
     }
 }

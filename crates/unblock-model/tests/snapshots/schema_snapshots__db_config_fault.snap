@@ -1,0 +1,69 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DbConfigFault",
+  "description": "One faulty database `config` row, as read (D57 clause (2a)).",
+  "type": "object",
+  "properties": {
+    "fault": {
+      "description": "Why the row contributes no value.",
+      "$ref": "#/$defs/ConfigFault"
+    },
+    "key": {
+      "description": "The row's key.",
+      "type": "string"
+    },
+    "value": {
+      "description": "The row's value, as stored.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "key",
+    "value",
+    "fault"
+  ],
+  "$defs": {
+    "ConfigFault": {
+      "description": "A database `config` row's fault.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "What is wrong with the row.",
+          "$ref": "#/$defs/ConfigFaultKind"
+        },
+        "reason": {
+          "description": "A human description of the fault.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ]
+    },
+    "ConfigFaultKind": {
+      "description": "Why a database `config` row contributes no value.",
+      "oneOf": [
+        {
+          "description": "The row names a startup key, which only the command line, the environment and the project\nfile may set. Blocking.",
+          "type": "string",
+          "const": "startup_key"
+        },
+        {
+          "description": "The row's value cannot be decoded for its key. Blocking.",
+          "type": "string",
+          "const": "invalid_value"
+        },
+        {
+          "description": "The row names a key this build does not know. Not blocking.",
+          "type": "string",
+          "const": "unknown_key"
+        }
+      ]
+    }
+  }
+}

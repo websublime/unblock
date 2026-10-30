@@ -77,8 +77,9 @@ pub use issue::{
 pub use output::OutputFormat;
 pub use relations::{Comment, Dependency, EpicStatus, Event};
 pub use results::{
-    CloseEligibleOutcome, CloseOutcome, CountBucket, DepTree, DiagnosticFinding, DiagnosticKind,
-    DiagnosticReport, ExportReport, GraphEdge, ImportReport, LabelCount, LabelRename,
+    CloseEligibleOutcome, CloseOutcome, ConfigEntry, ConfigFault, ConfigFaultKind, ConfigSource,
+    CountBucket, DbConfigFault, DepTree, DiagnosticFinding, DiagnosticKind, DiagnosticReport,
+    ExportReport, GraphEdge, ImportReport, LabelCount, LabelRename,
 };
 pub use time::fmt_ts_secs;
 pub use validation::{

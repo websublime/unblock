@@ -1,0 +1,34 @@
+---
+source: crates/unblock-config/tests/precedence.rs
+expression: runtime
+---
+RuntimeConfig {
+    actor: "db-actor",
+    output_format: Csv,
+    jsonl_export: false,
+    search_cap: 7,
+    sources: RuntimeSources {
+        actor: Db,
+        output_format: Env,
+        jsonl_export: Cli,
+        search_cap: User,
+    },
+    db_faults: [
+        DbConfigFault {
+            key: "db_filename",
+            value: "x.db",
+            fault: ConfigFault {
+                kind: StartupKey,
+                reason: "`db_filename` is a startup-only key; set it on the command line, in the environment or in the project file .unblock/config.toml",
+            },
+        },
+        DbConfigFault {
+            key: "zz_future",
+            value: "1",
+            fault: ConfigFault {
+                kind: UnknownKey,
+                reason: "`zz_future` is not a key this build knows",
+            },
+        },
+    ],
+}

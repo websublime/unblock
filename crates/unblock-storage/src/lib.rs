@@ -60,7 +60,7 @@ mod trait_def;
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
 
-pub use error::{BackendOpaque, StorageError};
+pub use error::{BackendOpaque, SchemaGap, StorageError};
 pub use filters::{DeleteMode, DeletePlan, IssuePatch};
 pub use libsql::{LibsqlStorage, WriteLockGuard};
 pub use trait_def::Storage;
@@ -90,6 +90,16 @@ pub const CURRENT_SCHEMA_VERSION: i64 = libsql::CURRENT_SCHEMA_VERSION as i64;
 /// [`StorageError::DatabaseLocked`] rather than an unbounded park. Faithful to beads' 30s
 /// `--lock-timeout` default.
 pub const DEFAULT_WRITE_LOCK_TIMEOUT_MS: u64 = 30_000;
+
+/// The first character of a [`Storage::read_config`] cell that was NOT stored as plain `TEXT` (D57
+/// clause (2a) — a bad row is a fault, never a silent skip). Both `config` columns are `TEXT NOT
+/// NULL`, so such a cell can only come from a hand-written row of another storage class; a backend
+/// returns it as this marker followed by `<storage class>:<HEX bytes>` (e.g. `"\u{1}blob:00FF"`),
+/// and the same spelling addresses the row in [`Storage::unset_config`]. A `TEXT` cell that itself
+/// begins with this marker is spelled the same way (`"\u{1}text:<HEX>"`), so the spelling is
+/// injective — no row can read back as another row's spelling. `unblock-config` decodes a marked
+/// cell as an `invalid_value` fault. A control character, so no canonical value can begin with it.
+pub const NON_TEXT_CELL_MARKER: char = '\u{1}';
 
 // The contract-suite entry + the gated seam trait, re-exported so a future backend (and the fuzz
 // crate) reuses them without reaching into the `testkit` module path.

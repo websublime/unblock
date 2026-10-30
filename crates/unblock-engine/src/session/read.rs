@@ -6,6 +6,11 @@
 //! function** (the pinned bucket-hybrid comparator; no policy handle — OQ-1) —
 //! `issues.sort_by(unblock_policy::cmp_ready)` after the storage call (spine §4.1 NORMATIVE).
 //! `diagnostics()` dispatches a `DiagnosticKind` over pure-DB storage calls (FR-15; no git, NFR-6).
+//!
+//! D57 clause (2a): every method here first applies the fail-closed gate
+//! ([`Session::gated_runtime`]) — a blocking DB config fault returns `ConfigError::FaultyDbConfig`
+//! before any storage call — and a read that consults a runtime key (the `search` default cap, the
+//! `info` actor finding) reads that snapshot once per call.
 
 use chrono::{DateTime, Utc};
 use unblock_model::{
@@ -23,6 +28,7 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure as the transparent `EngineError` source.
     pub async fn get(&self, id: &str) -> Result<Option<Issue>> {
+        self.gated_runtime()?;
         Ok(self.storage.get_issue(id).await?)
     }
 
@@ -31,6 +37,7 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure.
     pub async fn list(&self, filters: &ListFilters) -> Result<Vec<Issue>> {
+        self.gated_runtime()?;
         Ok(self.storage.list_issues(filters).await?)
     }
 
@@ -46,6 +53,7 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure.
     pub async fn ready(&self, filters: &ListFilters) -> Result<Vec<Issue>> {
+        self.gated_runtime()?;
         let mut issues = self.storage.ready_issues(filters).await?;
         issues.sort_by(unblock_policy::cmp_ready);
         Ok(issues)
@@ -62,19 +70,24 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure.
     pub async fn blocked(&self, filters: &ListFilters) -> Result<Vec<Issue>> {
+        self.gated_runtime()?;
         Ok(self.storage.blocked_issues(filters).await?)
     }
 
     /// Search over `query` honouring `filters` (the engine applies the default cap of 50 when no
     /// `filters.limit` is set, via the configured `search_cap`).
     ///
+    /// D57: the cap is read from the LIVE runtime snapshot once per call, so a `config set
+    /// search_cap` is visible to the very next search with no reopen (criterion (h)).
+    ///
     /// # Errors
     /// Forwards any storage failure.
     pub async fn search(&self, query: &str, filters: &ListFilters) -> Result<Vec<Issue>> {
+        let runtime = self.gated_runtime()?;
         // Storage honours `filters.limit`; the engine fills the default cap (FR-4) when unset.
         let mut filters = filters.clone();
         if filters.limit.is_none() {
-            filters.limit = Some(self.config.search_cap);
+            filters.limit = Some(runtime.search_cap);
         }
         Ok(self.storage.search_issues(query, &filters).await?)
     }
@@ -88,6 +101,7 @@ impl Session {
         filters: &ListFilters,
         by: Option<CountGroupBy>,
     ) -> Result<Vec<CountBucket>> {
+        self.gated_runtime()?;
         Ok(self.storage.count_issues(filters, by).await?)
     }
 
@@ -100,6 +114,7 @@ impl Session {
         older_than: DateTime<Utc>,
         filters: &ListFilters,
     ) -> Result<Vec<Issue>> {
+        self.gated_runtime()?;
         Ok(self.storage.stale_issues(older_than, filters).await?)
     }
 
@@ -109,6 +124,7 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure.
     pub async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>> {
+        self.gated_runtime()?;
         Ok(self.storage.list_dependencies(id).await?)
     }
 
@@ -118,6 +134,7 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure.
     pub async fn list_comments(&self, id: &str) -> Result<Vec<Comment>> {
+        self.gated_runtime()?;
         Ok(self.storage.list_comments(id).await?)
     }
 
@@ -126,6 +143,7 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure.
     pub async fn dependency_tree(&self, id: &str) -> Result<DepTree> {
+        self.gated_runtime()?;
         Ok(self.storage.dependency_tree(id).await?)
     }
 
@@ -135,6 +153,7 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure.
     pub async fn dependency_graph(&self, roots: &[String]) -> Result<DepTree> {
+        self.gated_runtime()?;
         Ok(self.storage.dependency_graph(roots).await?)
     }
 
@@ -145,6 +164,7 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure.
     pub async fn detect_cycles(&self, blocking_only: bool) -> Result<Vec<Vec<String>>> {
+        self.gated_runtime()?;
         Ok(self.storage.detect_cycles(blocking_only).await?)
     }
 
@@ -166,8 +186,9 @@ impl Session {
         kind: DiagnosticKind,
         since: Option<DateTime<Utc>>,
     ) -> Result<DiagnosticReport> {
+        let runtime = self.gated_runtime()?;
         let facts = WorkspaceFacts {
-            actor: &self.actor,
+            actor: &runtime.actor,
             workspace_dir: &self.workspace_dir,
             unblock_dir: &self.unblock_dir,
             db_path: &self.db_path,
@@ -192,6 +213,7 @@ impl Session {
     /// # Errors
     /// Forwards any storage failure as the transparent `EngineError` source.
     pub async fn integrity_check(&self) -> Result<Vec<String>> {
+        self.gated_runtime()?;
         Ok(self.storage.integrity_check().await?)
     }
 }

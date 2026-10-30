@@ -61,7 +61,7 @@ SELF='scripts/checks/d44-create-deps-claims.sh'
 # `unblock.mcp.v1.8` -> `unblock.mcp.v1.9` and D45 `unblock.mcp.v1.7` -> `unblock.mcp.v1.8` the same
 # way. Both couplings are enumerated in `docs/plans/ci-cd-and-distribution.md` §2.1 so neither is
 # rediscovered as a mystery failure.
-CONTRACT_RE='unblock\.mcp\.v1\.11'
+CONTRACT_RE='unblock\.mcp\.v1\.12'
 
 # The LIVE D-id range, pinned at its 3 bump sites (R16/R18 file-level, RW1 ROW-ANCHORED). It tracks the
 # CURRENT range and never a frozen historical one, so minting a new D-id moves THIS ONE LINE instead of
@@ -76,7 +76,7 @@ CONTRACT_RE='unblock\.mcp\.v1\.11'
 # required: the ci-cd prose now names the range instead of quoting it, and its row moved to REQUIRE_ROW
 # below, anchored on the class-(a) statement itself. Neither alone is enough — prose drifts back, and an
 # anchor on a line carrying two occurrences would be satisfied by the wrong one.
-RANGE_RE='D1\.\.D56'
+RANGE_RE='D1\.\.D57'
 
 # The FAMILY the knob belongs to — ANY published contract id, current or retired. This is not a second
 # copy of the knob: it is what makes an `EXCLUSIVE` row (below) able to say "no OTHER version literal

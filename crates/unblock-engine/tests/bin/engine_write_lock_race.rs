@@ -239,6 +239,18 @@ impl Storage for WidenedStorage {
     ) -> Result<Vec<String>, StorageError> {
         self.inner.close_issues(ids, reason, actor).await
     }
+
+    async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError> {
+        self.inner.read_config().await
+    }
+
+    async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.inner.set_config(key, value).await
+    }
+
+    async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+        self.inner.unset_config(key).await
+    }
 }
 
 #[tokio::main]
@@ -271,17 +283,25 @@ async fn main() {
     let workspace_dir = unblock_dir
         .parent()
         .map_or_else(|| unblock_dir.clone(), Path::to_path_buf);
-    let config = ResolvedConfig::default();
+    let mut config = ResolvedConfig::default();
+    config.runtime.actor.clone_from(&actor);
+    config.runtime.sources.actor = unblock_model::ConfigSource::OsUser;
     let paths = ConfigPaths {
         db_path: db_path.to_path_buf(),
-        jsonl_path: unblock_dir.join(&config.jsonl_filename),
+        jsonl_path: unblock_dir.join(&config.startup.jsonl_filename),
         unblock_dir,
     };
     let ctx = WorkspaceContext {
         storage,
         workspace_dir,
-        actor,
         config,
+        reloader: unblock_config::ConfigReloader::new(
+            unblock_config::CliOverrides::default(),
+            unblock_config::EnvOverrides::default(),
+            Some(actor),
+            None,
+            None,
+        ),
         paths,
         source: WorkspaceSource::WalkUp,
         schema_version_before_migrate: 0,

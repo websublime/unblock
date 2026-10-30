@@ -307,7 +307,11 @@ fn the_framing_guard_rejects_a_structured_error_blob() {
 
 /// **H2** — the env scrub. `Command::get_envs()` records an explicit `(key, None)` per
 /// `env_remove`, which is the only way to pin a REMOVAL: mutating process env is `unsafe` under
-/// edition 2024 and forbidden here. Pins the three pre-existing removals as well.
+/// edition 2024 and forbidden here. Pins the three pre-existing removals as well. Since D57 it also
+/// pins `XDG_CONFIG_HOME` and `HOME`, each SET to the harness's empty user home, so no host user
+/// `config.toml` can reach a spawn (NFR-16), and the removal of `USER`, `USERPROFILE`, `RUST_LOG`
+/// and every other `UNBLOCK_*` variable config parses. The list is spelled out HERE, independently
+/// of the harness's own `SCRUBBED_ENV`, so dropping a key from the harness turns this RED.
 #[test]
 fn the_harness_scrubs_every_discovery_and_format_env() {
     for key in [
@@ -315,6 +319,12 @@ fn the_harness_scrubs_every_discovery_and_format_env() {
         "UNBLOCK_DIR",
         "UNBLOCK_ACTOR",
         "UNBLOCK_OUTPUT_FORMAT",
+        "UNBLOCK_JSONL",
+        "UNBLOCK_REMOTE_URL",
+        "UNBLOCK_AUTH_TOKEN",
+        "USER",
+        "USERPROFILE",
+        "RUST_LOG",
     ] {
         assert!(
             common::unblock()
@@ -322,6 +332,24 @@ fn the_harness_scrubs_every_discovery_and_format_env() {
                 .any(|(k, v)| k == key && v.is_none()),
             "every spawn must scrub `{key}`: inherited, it makes the frame-only cells vacuous \
              (UNBLOCK_OUTPUT_FORMAT) or binds the wrong workspace (the discovery three)"
+        );
+    }
+    let home = common::empty_user_home();
+    assert!(
+        std::fs::read_dir(&home)
+            .expect("the empty user home exists")
+            .next()
+            .is_none(),
+        "the user home every spawn gets must be EMPTY: {}",
+        home.display()
+    );
+    for key in ["XDG_CONFIG_HOME", "HOME"] {
+        assert!(
+            common::unblock()
+                .get_envs()
+                .any(|(k, v)| k == key && v == Some(home.as_os_str())),
+            "every spawn must point `{key}` at the empty user home, so no host user config.toml \
+             changes an actor, a format or a snapshot (D57)"
         );
     }
 }
