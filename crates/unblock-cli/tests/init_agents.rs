@@ -1444,6 +1444,7 @@ fn run_retry_in_sh(retry: &str, cwd: &Path, project_dir: &Path) -> Output {
     sh.arg("-c").arg(&script).current_dir(cwd);
     // The harness scrub (every discovery, `UNBLOCK_*`, `USER` and `RUST_LOG` variable), then
     // `CLAUDE_PROJECT_DIR` set back to name `project_dir`.
+    sh.env_remove("UNBLOCK_OUTPUT_FORMAT");
     for key in common::SCRUBBED_ENV {
         sh.env_remove(key);
     }

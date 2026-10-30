@@ -147,6 +147,8 @@ impl Workspace {
 #[must_use]
 pub fn unblock() -> Command {
     let mut cmd = Command::cargo_bin("unblock").expect("locate the `unblock` binary");
+    // FR-13/D48: see the paragraph above — inherited, it makes the frame-only cells vacuous.
+    cmd.env_remove("UNBLOCK_OUTPUT_FORMAT");
     for key in SCRUBBED_ENV {
         cmd.env_remove(key);
     }
@@ -157,15 +159,13 @@ pub fn unblock() -> Command {
     cmd
 }
 
-/// Every variable [`unblock`] REMOVES from a spawn's environment (see its doc): the discovery
-/// inputs, every `UNBLOCK_*` variable config reads, the actor's and the user file's OS fallbacks,
-/// and `RUST_LOG`.
-pub const SCRUBBED_ENV: [&str; 10] = [
+/// Every OTHER variable [`unblock`] REMOVES from a spawn's environment (see its doc; the D48
+/// `UNBLOCK_OUTPUT_FORMAT` removal is its own pinned line): the discovery inputs, every other
+/// `UNBLOCK_*` variable config reads, the actor's and the user file's OS fallbacks, and `RUST_LOG`.
+pub const SCRUBBED_ENV: [&str; 9] = [
     "CLAUDE_PROJECT_DIR",
     "UNBLOCK_DIR",
     "UNBLOCK_ACTOR",
-    // FR-13/D48: see the paragraph above — inherited, it makes the frame-only cells vacuous.
-    "UNBLOCK_OUTPUT_FORMAT",
     "UNBLOCK_JSONL",
     "UNBLOCK_REMOTE_URL",
     "UNBLOCK_AUTH_TOKEN",
