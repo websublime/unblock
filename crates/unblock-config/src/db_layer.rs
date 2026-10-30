@@ -83,9 +83,10 @@ pub fn decode_db_rows(rows: &[(String, String)]) -> Vec<DbConfigFault> {
     db_layer(rows).1
 }
 
-/// The storage class of a cell `Storage::read_config` returned in its non-`TEXT` spelling —
-/// [`unblock_storage::NON_TEXT_CELL_MARKER`], a lowercase storage class, `:`, uppercase hex — or
-/// `None` for an ordinary `TEXT` cell.
+/// The storage class of a cell `Storage::read_config` returned in its MARKED spelling —
+/// [`unblock_storage::NON_TEXT_CELL_MARKER`], a lowercase storage class, `:`, uppercase hex (a
+/// non-`TEXT` cell, or a `TEXT` cell that itself began with the marker, class `text`) — or `None`
+/// for an ordinary `TEXT` cell.
 fn non_text_class(cell: &str) -> Option<&str> {
     let (class, hex) = cell
         .strip_prefix(unblock_storage::NON_TEXT_CELL_MARKER)?
@@ -102,11 +103,16 @@ fn non_text_class(cell: &str) -> Option<&str> {
 fn decode_row(key: &str, value: &str) -> Result<RuntimeValue, ConfigFault> {
     for (column, cell) in [("key", key), ("value", value)] {
         if let Some(class) = non_text_class(cell) {
+            let what = if class == "text" {
+                "begins with the reserved U+0001 marker".to_string()
+            } else {
+                format!("is stored as {class}, not TEXT")
+            };
             return Err(ConfigFault {
                 kind: ConfigFaultKind::InvalidValue,
                 reason: format!(
-                    "the row's {column} is stored as {class}, not TEXT (a hand-written row no \
-                     build can decode); remove it with config unset of `{}`",
+                    "the row's {column} {what} (a hand-written row no build can decode); remove \
+                     it with config unset of `{}`",
                     shown(key)
                 ),
             });

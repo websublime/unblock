@@ -253,11 +253,21 @@ fn is_layer_key(key: &str) -> bool {
 
 /// The `FaultyDbConfig` recovery hint: one line per blocking key naming the exact call (PRD §4 D57
 /// clause (2a)). The key is spelled as a JSON string so the call is copy-pasteable whatever bytes the
-/// row holds.
+/// row holds — up to [`unblock_error::MAX_ECHOED_BYTES`]: a LONGER key (only a hand-written row can
+/// hold one) is not echoed in full on every gated call; its line shows the clipped key and points to
+/// `config list`, which returns the exact key to `unset`.
 fn faulty_db_config_hint(faults: &[DbConfigFault]) -> String {
     let lines: Vec<String> = faults
         .iter()
         .map(|f| {
+            if f.key.len() > unblock_error::MAX_ECHOED_BYTES {
+                return format!(
+                    "`{}` (a key too long to echo in full) blocks the workspace: read its exact key \
+                     with issue {{\"action\":\"config\",\"op\":\"list\"}}, then remove it with \
+                     issue {{\"action\":\"config\",\"op\":\"unset\",\"key\":\"<that key>\"}}",
+                    shown(&f.key)
+                );
+            }
             let key = Value::String(f.key.clone()).to_string();
             if is_layer_key(&f.key) {
                 format!(

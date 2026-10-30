@@ -44,14 +44,15 @@ fn hostile_value() -> String {
     )
 }
 
-/// Assert `text` is ONE printable line of bounded size.
+/// Assert `text` is ONE printable line of bounded size — below the hostile value's own raw size
+/// (more than `4 * MAX_ECHOED_BYTES`), with room for a message that echoes two clipped rows.
 fn assert_one_printable_line(text: &str, what: &str) {
     assert!(
         !text.chars().any(char::is_control),
         "{what}: no raw control character survives: {text:?}"
     );
     assert!(
-        text.len() < 3 * MAX_ECHOED_BYTES,
+        text.len() < 4 * MAX_ECHOED_BYTES,
         "{what}: the echo is clipped ({} bytes)",
         text.len()
     );
@@ -62,9 +63,13 @@ fn assert_one_printable_line(text: &str, what: &str) {
 /// message and hint built from it — is one clipped, printable line.
 #[test]
 fn a_hostile_db_row_is_clipped_and_escaped_in_every_echo() {
-    let rows = vec![("search_cap".to_string(), hostile_value())];
+    let marked = format!("{}blob:6B", unblock_storage::NON_TEXT_CELL_MARKER);
+    let rows = vec![
+        ("search_cap".to_string(), hostile_value()),
+        (marked, "1".to_string()),
+    ];
     let faults = decode_db_rows(&rows);
-    assert_eq!(faults.len(), 1);
+    assert_eq!(faults.len(), 2, "both rows are faults");
     assert_eq!(faults[0].fault.kind, ConfigFaultKind::InvalidValue);
     assert_eq!(
         faults[0].value, rows[0].1,
@@ -83,6 +88,10 @@ fn a_hostile_db_row_is_clipped_and_escaped_in_every_echo() {
     assert!(
         !hint.chars().any(|c| c.is_control() && c != '\n'),
         "{hint:?}"
+    );
+    assert!(
+        hint.contains(r#""key":"\u0001blob:6B""#),
+        "the marked key's repair call is JSON-escaped, not raw: {hint}"
     );
     let structured = StructuredError::from(&err);
     assert_eq!(structured.code, ErrorCode::ConfigError);
@@ -128,6 +137,14 @@ fn a_non_text_cell_is_an_invalid_value_fault() {
         );
         assert_one_printable_line(&fault.fault.reason, "the non-TEXT reason");
     }
+    // A TEXT key that began with the marker reads back as `\u{1}text:<HEX>` (the injective
+    // spelling) and is a blocking fault naming the reserved marker.
+    let faults = decode_db_rows(&[(format!("{marker}text:016B"), "1".to_string())]);
+    assert_eq!(faults[0].fault.kind, ConfigFaultKind::InvalidValue);
+    assert!(
+        faults[0].fault.reason.contains("reserved U+0001 marker"),
+        "{faults:?}"
+    );
 }
 
 /// A TOML parse failure never echoes the offending SOURCE LINE (a credential typed unquoted fails

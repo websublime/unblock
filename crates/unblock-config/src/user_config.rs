@@ -15,7 +15,8 @@
 //! parse ([`ConfigError::Parse`] → `CONFIG_PARSE_ERROR`), the NFR-18 credential deny, the startup-key
 //! refusal ([`ConfigError::StartupKeyInRuntimeLayer`] with `layer: User`, either `jsonl_filename`
 //! spelling), the `jsonl_export` refusal ([`ConfigError::InvalidValue`] naming `ub-p1h`) and the
-//! layer-value bounds (a blank or out-of-policy `actor`, a `search_cap` outside `1..=i64::MAX` —
+//! layer-value bounds (a NON-blank out-of-policy `actor` — a blank one is unset, as at every actor
+//! tier — and a `search_cap` outside `1..=i64::MAX`:
 //! [`ConfigError::InvalidValue`]), so `unblock init`'s pre-check refuses every user file the open
 //! would (PRD §4 D57 clause (6)). An
 //! unknown key keeps the SF-4 rule (warned on `unblock.config`, ignored). Every path that reads the
@@ -73,9 +74,10 @@ fn absolute(value: Option<String>) -> Option<PathBuf> {
 /// `output_format`), [`ConfigError::InvalidValue`] (a credential, NFR-18),
 /// [`ConfigError::StartupKeyInRuntimeLayer`] (`layer: User` — any startup key, either
 /// `jsonl_filename` spelling), [`ConfigError::InvalidValue`] (`jsonl_export`, naming `ub-p1h`),
-/// then [`ConfigError::InvalidValue`] for a layer value out of bounds — an `actor` that is blank or
-/// fails `validate_actor` after trimming, a `search_cap` outside `1..=i64::MAX` — by the same per-key
-/// rules a `config set` value and a database row are held to.
+/// then [`ConfigError::InvalidValue`] for a layer value out of bounds — a non-blank `actor` that
+/// fails `validate_actor` after trimming (a blank one is UNSET, as at every actor tier), a
+/// `search_cap` outside `1..=i64::MAX` — by the same per-key rules a `config set` value and a
+/// database row are held to.
 pub fn load_user_config(env: &dyn EnvSource) -> Result<ProjectConfig, ConfigError> {
     load_user_file(user_config_path(env).as_deref())
 }
@@ -131,7 +133,8 @@ pub(crate) fn load_user_file(path: Option<&Path>) -> Result<ProjectConfig, Confi
 /// user file the open would refuse is refused by [`load_user_config`] itself — before `init` writes
 /// anything. (`output_format` is a closed enum, already enforced by the parse.)
 fn check_layer_bounds(user: &ProjectConfig) -> Result<(), ConfigError> {
-    if let Some(actor) = &user.actor {
+    // A blank actor is UNSET, as at every actor tier (`actor.rs`); only a non-blank one is bounded.
+    if let Some(actor) = user.actor.as_deref().filter(|a| !a.trim().is_empty()) {
         parse_runtime_value(RuntimeKey::Actor, actor)?;
     }
     if let Some(cap) = user.search_cap {
@@ -279,35 +282,33 @@ mod tests {
     }
 
     /// **D57 clause (6), the user-file half of "any user file the open would refuse"**: the
-    /// layer-value bounds are applied by `load_user_config` itself — a `search_cap` of `0` or above
-    /// `i64::MAX`, a blank actor and an over-long actor are each `InvalidValue` (`CONFIG_ERROR`)
-    /// naming the key — so `unblock init`'s pre-check refuses them before it writes anything.
+    /// layer-value bounds are applied by `load_user_config` itself — a `search_cap` of `0` and an
+    /// over-long actor are each `InvalidValue` (`CONFIG_ERROR`) naming the key — so `unblock init`'s
+    /// pre-check refuses them before it writes anything. `i64::MAX` (the largest TOML integer) is in
+    /// bounds, and a BLANK actor is UNSET (the rule every actor tier shares), never refused.
     ///
     /// MUTANT KILLED: dropping `check_layer_bounds` (the open would then refuse a file `init`'s
-    /// pre-check accepted, leaving a half-made scaffold).
+    /// pre-check accepted, leaving a half-made scaffold); bounding a blank actor.
     #[test]
     fn out_of_bound_layer_values_are_refused() {
         let long_actor = format!("actor = \"{}\"\n", "a".repeat(201));
         for (contents, key) in [
             ("search_cap = 0\n", "search_cap"),
-            ("search_cap = 9223372036854775807\n", ""),
-            ("actor = \"   \"\n", "actor"),
             (long_actor.as_str(), "actor"),
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let env = user_file(tmp.path(), contents);
-            let loaded = load_user_config(&env);
-            if key.is_empty() {
-                // i64::MAX itself is IN bounds.
-                assert!(loaded.is_ok(), "{contents}: {loaded:?}");
-                continue;
-            }
-            let err = loaded.expect_err(contents);
+            let err = load_user_config(&env).expect_err(contents);
             assert!(
                 matches!(&err, ConfigError::InvalidValue { key: k, .. } if k == key),
                 "{contents}: {err:?}"
             );
             assert_eq!(err.code(), ErrorCode::ConfigError);
+        }
+        for contents in ["search_cap = 9223372036854775807\n", "actor = \"   \"\n"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = user_file(tmp.path(), contents);
+            assert!(load_user_config(&env).is_ok(), "{contents} loads");
         }
     }
 
