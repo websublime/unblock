@@ -287,6 +287,12 @@ pub async fn run(_args: &McpArgs, overrides: &CliOverrides) -> Result<Option<u8>
         &workspace_binding_line(&ctx.paths.unblock_dir, ctx.source),
         &mut std::io::stderr().lock(),
     );
+    // D57 clause (2a): a blocking database config fault fail-closes the `Session`, but the server
+    // STARTS anyway so the repair tool (`issue action: config`) stays reachable. ONE stderr line
+    // names the blocking keys and the recovery call (spine §4 startup visibility; no `error[`).
+    if let Some(line) = config_fault_line(&ctx.config.runtime) {
+        emit_workspace_binding(&line, &mut std::io::stderr().lock());
+    }
     tracing::debug!("mcp: workspace opened");
     let cfg = session_config();
 
@@ -369,15 +375,33 @@ fn emit_workspace_binding(line: &str, out: &mut impl std::io::Write) {
     let _ignored = writeln!(out, "{line}");
 }
 
+/// The D57 startup line for a fail-closed workspace (PRD §4 D57 clause (2a)): `None` when the
+/// runtime snapshot holds no BLOCKING database config fault (`ConfigFaultKind::is_blocking`), else
+/// ONE line naming every blocking key and its exact `issue {"action":"config",…}` recovery call —
+/// the `FaultyDbConfig` message and hint every gated call returns, folded onto one line. PURE, so a
+/// unit test pins it; it never contains `error[`, because the server still starts.
+fn config_fault_line(runtime: &unblock_config::RuntimeConfig) -> Option<String> {
+    use unblock_error::CodedError as _;
+    let err = runtime.blocking_fault_error()?;
+    let hint = err.hint().unwrap_or_default();
+    let recovery: Vec<&str> = hint.lines().collect();
+    Some(format!(
+        "unblock: {err}; every call except issue action config returns CONFIG_ERROR until it is \
+         repaired: {}",
+        recovery.join("; ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagnosticRoute, McpExit, diagnostic_route, emit_workspace_binding, instructions,
-        resolve_mcp_exit, workspace_binding_line,
+        DiagnosticRoute, McpExit, config_fault_line, diagnostic_route, emit_workspace_binding,
+        instructions, resolve_mcp_exit, workspace_binding_line,
     };
     use crate::exit::CliError;
-    use unblock_config::WorkspaceSource;
+    use unblock_config::{RuntimeConfig, WorkspaceSource};
     use unblock_error::ErrorCode;
+    use unblock_model::{ConfigFault, ConfigFaultKind, DbConfigFault};
 
     #[test]
     fn instructions_mention_the_contract_version() {
@@ -418,6 +442,48 @@ mod tests {
         );
         assert!(workspace_binding_line(dir, WorkspaceSource::ExplicitDb).contains("--db"));
         assert!(workspace_binding_line(dir, WorkspaceSource::WalkUp).contains("walk-up from cwd"));
+    }
+
+    /// D57 clause (2a)/(d): a blocking fault yields ONE line naming every blocking key and the
+    /// `issue config unset` recovery, never `error[`; a non-blocking `unknown_key` row, or no fault,
+    /// yields no line.
+    #[test]
+    fn config_fault_line_names_each_blocking_key_and_its_unset_recovery() {
+        let fault = |key: &str, kind| DbConfigFault {
+            key: key.to_string(),
+            value: "x".to_string(),
+            fault: ConfigFault {
+                kind,
+                reason: "a reason".to_string(),
+            },
+        };
+        let mut runtime = RuntimeConfig::default();
+        assert_eq!(config_fault_line(&runtime), None, "no fault, no line");
+        runtime.db_faults = vec![fault("future_key", ConfigFaultKind::UnknownKey)];
+        assert_eq!(
+            config_fault_line(&runtime),
+            None,
+            "unknown_key never blocks"
+        );
+
+        runtime.db_faults = vec![
+            fault("db_filename", ConfigFaultKind::StartupKey),
+            fault("search_cap", ConfigFaultKind::InvalidValue),
+            fault("future_key", ConfigFaultKind::UnknownKey),
+        ];
+        let line = config_fault_line(&runtime).expect("a blocking fault prints a line");
+        assert_eq!(line.lines().count(), 1, "exactly one line: {line}");
+        assert!(!line.contains("error["), "{line}");
+        for call in [
+            r#"issue {"action":"config","op":"unset","key":"db_filename"}"#,
+            r#"issue {"action":"config","op":"unset","key":"search_cap"}"#,
+        ] {
+            assert!(line.contains(call), "names `{call}`: {line}");
+        }
+        assert!(
+            !line.contains("future_key"),
+            "a non-blocking row is not named: {line}"
+        );
     }
 
     /// The emitter actually WRITES the line to its sink (D39 visibility is only real if the bytes hit

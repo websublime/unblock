@@ -117,6 +117,50 @@ fn startup_reports_the_bound_workspace_on_stderr() {
     );
 }
 
+/// **D57 criterion (d), the `unblock mcp` half — a blocking DB row never stops the server.** Over a
+/// workspace whose `config` table holds a startup-key row, `unblock mcp` STARTS and prints ONE stderr
+/// line naming the key and its `issue config unset` recovery (no `error[`); a non-`config` tool call
+/// answers `CONFIG_ERROR` in-band, the hinted `config unset` repairs it, and the very next
+/// non-`config` call on the SAME session succeeds.
+#[test]
+fn config_mcp_starts_over_a_blocking_row_with_one_stderr_line_and_repairs_in_band() {
+    let ws = Workspace::init();
+    common::plant_config_row(&ws.db_path(), "db_filename", "x.db");
+    let mut client = McpClient::spawn(ws.root());
+    let stderr = client.wait_for_stderr("fail-closed", Duration::from_secs(20));
+    let fault_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("fail-closed"))
+        .collect();
+    assert_eq!(fault_lines.len(), 1, "exactly one fault line: {stderr}");
+    assert!(
+        fault_lines[0].contains("`db_filename`")
+            && fault_lines[0]
+                .contains(r#"issue {"action":"config","op":"unset","key":"db_filename"}"#),
+        "the line names the key and its recovery: {stderr}"
+    );
+    assert!(!stderr.contains("error["), "the server starts: {stderr}");
+
+    client.initialize();
+    let (err, gated) = client.call_tool("query", &json!({"kind": "list"}));
+    assert!(err, "a gated call is an in-band error: {gated}");
+    assert_eq!(gated["code"], "CONFIG_ERROR", "{gated}");
+    let (err, repaired) = client.call_tool(
+        "issue",
+        &json!({"action": "config", "op": "unset", "key": "db_filename"}),
+    );
+    assert!(!err, "the hinted repair succeeds: {repaired}");
+    let (err, listed) = client.call_tool("query", &json!({"kind": "list"}));
+    assert!(
+        !err,
+        "the very next call on the same session succeeds: {listed}"
+    );
+
+    client.close_stdin();
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(status.code(), Some(0), "EOF drives a clean exit 0");
+}
+
 #[test]
 fn ready_claim_close_smoke_over_stdio() {
     let ws = Workspace::init();

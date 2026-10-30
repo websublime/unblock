@@ -770,7 +770,7 @@ fn doctor_reports_the_observed_and_expected_schema_versions_and_still_exits_0() 
 /// Create one real issue through the engine (the same `Session` the CLI opens), so the only
 /// fabricated thing in the workspace is the edge planted next.
 fn seed_issue(ws: &Workspace, id: &str) {
-    use unblock_config::{CliOverrides, open_with_storage_with_cli};
+    use unblock_config::{CliOverrides, open_with_storage_with_env};
     use unblock_engine::{Session, SessionConfig};
     use unblock_model::{Issue, Status};
 
@@ -780,7 +780,7 @@ fn seed_issue(ws: &Workspace, id: &str) {
         .expect("build a current-thread runtime");
     rt.block_on(async {
         let overrides = CliOverrides::new().with_dir(ws.unblock_dir());
-        let ctx = open_with_storage_with_cli(&overrides)
+        let ctx = open_with_storage_with_env(None, &overrides, &common::MapEnv::empty())
             .await
             .expect("open the workspace via the config facade");
         let session = Session::open(ctx, SessionConfig::default())
@@ -799,14 +799,15 @@ fn seed_issue(ws: &Workspace, id: &str) {
     });
 }
 
-/// Open a `Session` over `ws` through the SAME config facade the CLI dispatches through. The caller
-/// drops it before spawning any CLI child, so no connection outlives the call.
+/// Open a `Session` over `ws` through the SAME config facade body the CLI dispatches through (its
+/// `open_with_storage_with_env` test entry over an EMPTY environment, D57/NFR-16). The caller drops
+/// it before spawning any CLI child, so no connection outlives the call.
 async fn open_session(ws: &Workspace) -> unblock_engine::Session {
-    use unblock_config::{CliOverrides, open_with_storage_with_cli};
+    use unblock_config::{CliOverrides, open_with_storage_with_env};
     use unblock_engine::{Session, SessionConfig};
 
     let overrides = CliOverrides::new().with_dir(ws.unblock_dir());
-    let ctx = open_with_storage_with_cli(&overrides)
+    let ctx = open_with_storage_with_env(None, &overrides, &common::MapEnv::empty())
         .await
         .expect("open the workspace via the config facade");
     Session::open(ctx, SessionConfig::default())

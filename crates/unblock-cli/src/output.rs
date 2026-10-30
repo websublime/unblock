@@ -14,6 +14,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use serde::Serialize;
+use unblock_config::EnvSource;
 use unblock_engine::{DiagnosticFinding, DiagnosticKind, DiagnosticReport};
 use unblock_render::{OutputFormat, RenderOptions, parse_env_value, renderer_for};
 
@@ -172,21 +173,74 @@ pub fn emit_report(report: &DiagnosticReport, fmt: OutputFormat) -> Result<(), C
     Ok(())
 }
 
-/// Resolve the output format for the NO-workspace path (`version`, top-level parse errors) — config
-/// is never opened there, so read `UNBLOCK_OUTPUT_FORMAT` LENIENTLY (via render's `parse_env_value`)
-/// so FR-13 precedence still holds uniformly: `--output > UNBLOCK_OUTPUT_FORMAT > Json` (SF-1). An
-/// unknown env value falls through to `Json` (never a hard error on this path).
+/// Which pass of [`pick_cli_format`] is running (PRD §4 D57 clause (6)) — a named type, deliberately
+/// NOT a "role", which in this crate already means [`StdoutRole`](crate::exit::StdoutRole).
+///
+/// Only one pass may warn about a user file that fails to load, so the failure is reported exactly
+/// once on every path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FormatPass {
+    /// The pre-pass `run_with` (`lib.rs`) runs before dispatching EVERY command, to pick the format
+    /// its structured error would use. It skips a failing user tier SILENTLY, always: a workspace
+    /// command then fails on the same file with exit 7 and the full error.
+    ErrorPrePass,
+    /// A command's pass for its OWN report — today only `unblock version`, which never fails on the
+    /// user file. It prints ONE stderr warning and skips the tier.
+    OwnReport,
+}
+
+/// Resolve the output format for the NO-workspace path (`version`, the error pre-pass) — no
+/// workspace is opened there, so FR-13 precedence is applied here: `--output` >
+/// `UNBLOCK_OUTPUT_FORMAT` (read LENIENTLY via render's `parse_env_value`, SF-1) > the user file's
+/// `output_format` (through `unblock_config::user_output_format`, so the cli never parses TOML) >
+/// `Json` (PRD §4 D57 clause (6)). An unknown env value falls through to the next tier (never a hard
+/// error on this path). A user file that fails to load is skipped, silently under
+/// [`FormatPass::ErrorPrePass`] and with ONE stderr warning under [`FormatPass::OwnReport`].
 #[must_use]
-pub fn pick_cli_format(global: &GlobalArgs) -> OutputFormat {
-    global
-        .output
-        .or_else(|| {
-            std::env::var(OUTPUT_FORMAT_ENV)
-                .ok()
-                .as_deref()
-                .and_then(parse_env_value)
-        })
-        .unwrap_or(OutputFormat::Json)
+pub(crate) fn pick_cli_format(
+    global: &GlobalArgs,
+    env: &dyn EnvSource,
+    pass: FormatPass,
+) -> OutputFormat {
+    pick_cli_format_to(global, env, pass, &mut std::io::stderr().lock())
+}
+
+/// [`pick_cli_format`] with the warning writer injected, so a unit test can read the warning.
+fn pick_cli_format_to(
+    global: &GlobalArgs,
+    env: &dyn EnvSource,
+    pass: FormatPass,
+    warn_out: &mut impl Write,
+) -> OutputFormat {
+    if let Some(fmt) = global.output.or_else(|| {
+        env.get(OUTPUT_FORMAT_ENV)
+            .as_deref()
+            .and_then(parse_env_value)
+    }) {
+        return fmt;
+    }
+    match unblock_config::user_output_format(env) {
+        Ok(user) => user,
+        Err(err) => {
+            if pass == FormatPass::OwnReport {
+                diag_to(&user_file_warning(&err), warn_out);
+            }
+            None
+        }
+    }
+    .unwrap_or(OutputFormat::Json)
+}
+
+/// The ONE stderr line the [`FormatPass::OwnReport`] pass prints for a user file that fails to load.
+/// The error's message is folded onto that line (a TOML parse error spans several), and it never
+/// carries `error[`, because the command it accompanies succeeds.
+fn user_file_warning(err: &unblock_config::ConfigError) -> String {
+    let message = err.to_string();
+    let folded: Vec<&str> = message.split_whitespace().collect();
+    format!(
+        "warning: the user config file was ignored for the output format: {}",
+        folded.join(" ")
+    )
 }
 
 /// Write a terse human note to STDERR (NFR-14). A failing stderr is ignored, so a note never
@@ -206,13 +260,16 @@ fn diag_to(message: &str, out: &mut impl Write) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fmt::Write as _;
     use std::path::PathBuf;
 
     use super::{
-        InitReport, MigrateReport, ToDiagnosticReport, VersionReport, diag_to, pick_cli_format,
+        FormatPass, InitReport, MigrateReport, ToDiagnosticReport, VersionReport, diag_to,
+        pick_cli_format, pick_cli_format_to,
     };
     use crate::cli::GlobalArgs;
+    use unblock_config::EnvSource;
     use unblock_engine::{DiagnosticFinding, DiagnosticKind, DiagnosticReport};
     use unblock_render::{OutputFormat, RenderOptions, renderer_for};
 
@@ -353,22 +410,131 @@ mod tests {
         assert_eq!(prefix.detail, "ub");
     }
 
+    /// An injected environment (NFR-16): the format resolver never reads the process env here.
+    struct MapEnv(HashMap<String, String>);
+
+    impl MapEnv {
+        fn new(pairs: &[(&str, &str)]) -> Self {
+            Self(
+                pairs
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                    .collect(),
+            )
+        }
+    }
+
+    impl EnvSource for MapEnv {
+        fn get(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+    }
+
+    /// A config home holding `unblock/config.toml` with `contents`.
+    fn config_home(contents: &str) -> tempfile::TempDir {
+        let home = tempfile::tempdir().expect("tempdir");
+        let dir = home.path().join("unblock");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("config.toml"), contents).expect("write user file");
+        home
+    }
+
+    /// Runs both passes over `env` and returns each pass's format and stderr.
+    fn both_passes(global: &GlobalArgs, env: &MapEnv) -> [(OutputFormat, String); 2] {
+        [FormatPass::ErrorPrePass, FormatPass::OwnReport].map(|pass| {
+            let mut warn = Vec::new();
+            let fmt = pick_cli_format_to(global, env, pass, &mut warn);
+            (fmt, String::from_utf8(warn).expect("utf-8"))
+        })
+    }
+
+    /// D57 clause (6): `--output` > `UNBLOCK_OUTPUT_FORMAT` > the user file's `output_format` >
+    /// `Json`, each tier read from an injected environment.
     #[test]
-    fn pick_cli_format_prefers_flag_then_env_then_json() {
-        // Flag wins.
+    fn pick_cli_format_prefers_flag_then_env_then_user_then_json() {
+        let home = config_home("output_format = \"markdown\"\n");
+        let xdg = home.path().to_str().expect("utf-8 path");
         let with_flag = GlobalArgs {
             output: Some(OutputFormat::Csv),
             ..GlobalArgs::default()
         };
-        assert_eq!(pick_cli_format(&with_flag), OutputFormat::Csv);
-
-        // No flag, no env → Json default. (We avoid mutating process env in a parallel test run; the
-        // env branch is covered by the render crate's `pick_format` precedence tests.)
         let bare = GlobalArgs::default();
-        // SAFETY of test: only assert the flag-absent + env-absent default deterministically.
-        if std::env::var("UNBLOCK_OUTPUT_FORMAT").is_err() {
-            assert_eq!(pick_cli_format(&bare), OutputFormat::Json);
+        let everything =
+            MapEnv::new(&[("XDG_CONFIG_HOME", xdg), ("UNBLOCK_OUTPUT_FORMAT", "plain")]);
+        let user_only = MapEnv::new(&[("XDG_CONFIG_HOME", xdg)]);
+        // An unknown env value falls through to the next tier, never a hard error.
+        let bad_env = MapEnv::new(&[("XDG_CONFIG_HOME", xdg), ("UNBLOCK_OUTPUT_FORMAT", "nope")]);
+
+        for pass in [FormatPass::ErrorPrePass, FormatPass::OwnReport] {
+            assert_eq!(
+                pick_cli_format(&with_flag, &everything, pass),
+                OutputFormat::Csv
+            );
+            assert_eq!(
+                pick_cli_format(&bare, &everything, pass),
+                OutputFormat::Plain
+            );
+            assert_eq!(
+                pick_cli_format(&bare, &user_only, pass),
+                OutputFormat::Markdown
+            );
+            assert_eq!(
+                pick_cli_format(&bare, &bad_env, pass),
+                OutputFormat::Markdown
+            );
+            assert_eq!(
+                pick_cli_format(&bare, &MapEnv::new(&[]), pass),
+                OutputFormat::Json
+            );
         }
+    }
+
+    /// D57 clause (6): a user file that fails to load is skipped by both passes; the error pre-pass
+    /// is SILENT and the own-report pass prints EXACTLY one `warning:` line with no `error[`. Every
+    /// `load_user_config` refusal is covered: malformed, a startup key, a credential, `jsonl_export`.
+    #[test]
+    fn a_failing_user_file_warns_once_under_own_report_and_never_under_the_pre_pass() {
+        for contents in [
+            "output_format = [unclosed\n",
+            "db_filename = \"x.db\"\n",
+            "auth_token = \"secret\"\n",
+            "jsonl_export = true\n",
+        ] {
+            let home = config_home(contents);
+            let env = MapEnv::new(&[("XDG_CONFIG_HOME", home.path().to_str().expect("utf-8"))]);
+            let [(pre_fmt, pre_err), (own_fmt, own_err)] =
+                both_passes(&GlobalArgs::default(), &env);
+            assert_eq!(pre_fmt, OutputFormat::Json, "{contents}");
+            assert_eq!(own_fmt, OutputFormat::Json, "{contents}");
+            assert_eq!(pre_err, "", "the pre-pass is silent: {contents}");
+            assert_eq!(own_err.lines().count(), 1, "exactly one line: {own_err:?}");
+            assert!(own_err.starts_with("warning: "), "{own_err:?}");
+            assert!(!own_err.contains("error["), "{own_err:?}");
+        }
+    }
+
+    /// A higher tier short-circuits the user file: with `--output` or a valid env value set, even
+    /// the own-report pass never reads (or warns about) a broken user file.
+    #[test]
+    fn a_higher_tier_never_reads_the_user_file() {
+        let home = config_home("output_format = [unclosed\n");
+        let xdg = home.path().to_str().expect("utf-8");
+        let with_flag = GlobalArgs {
+            output: Some(OutputFormat::Csv),
+            ..GlobalArgs::default()
+        };
+        let env = MapEnv::new(&[("XDG_CONFIG_HOME", xdg)]);
+        let [(_, pre), (fmt, own)] = both_passes(&with_flag, &env);
+        assert_eq!(
+            (fmt, pre.as_str(), own.as_str()),
+            (OutputFormat::Csv, "", "")
+        );
+        let env = MapEnv::new(&[("XDG_CONFIG_HOME", xdg), ("UNBLOCK_OUTPUT_FORMAT", "robot")]);
+        let [(_, pre), (fmt, own)] = both_passes(&GlobalArgs::default(), &env);
+        assert_eq!(
+            (fmt, pre.as_str(), own.as_str()),
+            (OutputFormat::Robot, "", "")
+        );
     }
 
     /// Renders `report` in all five formats, one payload under each `--- <format>` delimiter, and

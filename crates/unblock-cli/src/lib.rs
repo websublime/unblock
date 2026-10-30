@@ -71,9 +71,15 @@ where
     // Initialize logging AFTER parse so `-v`/`-q` are known; stderr-only (NFR-14). Idempotent.
     logging::init_logging(cli.global.verbose, cli.global.quiet);
 
-    // Resolve the error-render format up front from CLI+env only (config default is unknown before a
-    // workspace opens; FR-13 precedence for the no-workspace error path — spine §5b, output.rs SF-1).
-    let fmt = output::pick_cli_format(&cli.global);
+    // Resolve the error-render format up front, before any workspace opens: `--output` > env > the
+    // user file's `output_format` > Json (FR-13 for the no-workspace error path — spine §5b,
+    // output.rs SF-1). This is the ERROR PRE-PASS, which skips a failing user file SILENTLY: a
+    // workspace command then reports that file once, by failing on it (PRD §4 D57 clause (6)).
+    let fmt = output::pick_cli_format(
+        &cli.global,
+        &unblock_config::ProcessEnv,
+        output::FormatPass::ErrorPrePass,
+    );
     // D48: which CHANNEL that error render lands on, read HERE because `dispatch` consumes `cli`
     // and the fact is unrecoverable afterwards. `fmt` is deliberately untouched — degrading the
     // format for `mcp` would silently break FR-13 precedence (`-o json`, `UNBLOCK_OUTPUT_FORMAT`),

@@ -34,7 +34,7 @@
 
 #![allow(dead_code)] // each test binary uses a subset of the harness.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, BufRead, BufReader, PipeReader, PipeWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 use assert_cmd::cargo::CommandCargoExt as _;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use unblock_config::{CliOverrides, open_with_storage_with_cli};
+use unblock_config::{CliOverrides, EnvSource, open_with_storage_with_env};
 use unblock_engine::{Session, SessionConfig};
 use unblock_model::ListFilters;
 
@@ -132,6 +132,12 @@ impl Workspace {
 /// frame-only assertion pass VACUOUSLY (the human arm writes nothing to stdout in any case) while
 /// turning the shipped `mcp_lifecycle.rs` payload assertion RED for a reason having nothing to do
 /// with the code under test.
+///
+/// `XDG_CONFIG_HOME` and `HOME` (D57, NFR-16) are POINTED at [`empty_user_home`], an EMPTY
+/// directory, so no developer's or runner's user `config.toml` can change an actor, a format or a
+/// snapshot. They are set rather than removed because a removed `HOME` falls back to
+/// `USERPROFILE`, and an empty home is the one value that is hermetic on every OS. A case that wants
+/// a user file sets `XDG_CONFIG_HOME` back with `Command::env` (which wins over this one).
 #[must_use]
 pub fn unblock() -> Command {
     let mut cmd = Command::cargo_bin("unblock").expect("locate the `unblock` binary");
@@ -140,7 +146,41 @@ pub fn unblock() -> Command {
     cmd.env_remove("UNBLOCK_ACTOR");
     // FR-13/D48: see the paragraph above — inherited, it makes the frame-only cells vacuous.
     cmd.env_remove("UNBLOCK_OUTPUT_FORMAT");
+    // D57: see the paragraph above — no host user file reaches a spawn.
+    let home = empty_user_home();
+    cmd.env("XDG_CONFIG_HOME", &home);
+    cmd.env("HOME", &home);
     cmd
+}
+
+/// The EMPTY directory every spawn gets as `XDG_CONFIG_HOME` and `HOME` (D57, NFR-16): a fixed
+/// directory under this crate's `CARGO_TARGET_TMPDIR`, created on first use and never written, so
+/// the user layer is always empty unless a case points `XDG_CONFIG_HOME` elsewhere itself.
+#[must_use]
+pub fn empty_user_home() -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("unblock-cli-empty-user-home");
+    std::fs::create_dir_all(&dir).expect("create the empty user home");
+    dir
+}
+
+/// An injected environment for the IN-PROCESS facade callers (D57, NFR-16): they open through
+/// `unblock_config::open_with_storage_with_env` over it, so no developer's or runner's `$HOME`,
+/// `XDG_CONFIG_HOME` (the user `config.toml`) or `UNBLOCK_*` reaches the open.
+#[derive(Debug, Default)]
+pub struct MapEnv(HashMap<String, String>);
+
+impl MapEnv {
+    /// The empty environment: no user file, no `UNBLOCK_*`, no `$USER`.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+impl EnvSource for MapEnv {
+    fn get(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
 }
 
 /// The ONE process-wide spawn lock (ub-vcp) — see the module doc.
@@ -336,6 +376,33 @@ pub fn stamp_user_version(db: &Path, version: i64) {
             .await
             .expect("stamp user_version");
     });
+}
+
+/// Write one row into the workspace database's `config` table DIRECTLY (D57 schema step 3),
+/// bypassing the `config` action's validation — the only way to plant the faulty row (a startup
+/// key, an undecodable value) the D57 clause (2a) gate exists for. The connection is dropped before
+/// the CLI child opens the file, so there is no writer contention.
+pub fn plant_config_row(db: &Path, key: &str, value: &str) {
+    runtime().block_on(async {
+        let conn = raw_connection(db).await;
+        conn.execute(
+            "INSERT INTO config (key, value) VALUES (?1, ?2)",
+            libsql::params![key, value],
+        )
+        .await
+        .expect("plant the config row");
+    });
+}
+
+/// A user config home holding `unblock/config.toml` with `contents` (D57 clause (3)): a case points
+/// a child's `XDG_CONFIG_HOME` at it with `Command::env`, which wins over the harness's empty home.
+#[must_use]
+pub fn user_config_home(contents: &str) -> TempDir {
+    let home = tempfile::tempdir().expect("tempdir");
+    let dir = home.path().join("unblock");
+    std::fs::create_dir_all(&dir).expect("create the user config dir");
+    std::fs::write(dir.join("config.toml"), contents).expect("write the user config file");
+    home
 }
 
 /// Corrupt the `SQLite` SCHEMA region (from byte 100 — after the file header, over `sqlite_master`)
@@ -1171,7 +1238,7 @@ pub fn csv_labels(records: &[(String, String)]) -> Vec<&str> {
 /// If the workspace cannot be reopened / read (a harness precondition, not the SUT under test).
 pub async fn reopen_and_check(root: &Path) -> (Vec<String>, usize) {
     let overrides = CliOverrides::new().with_dir(root.join(".unblock"));
-    let ctx = open_with_storage_with_cli(&overrides)
+    let ctx = open_with_storage_with_env(None, &overrides, &MapEnv::empty())
         .await
         .expect("reopen workspace via the config facade");
     let session = Session::open(ctx, SessionConfig::default())
