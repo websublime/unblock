@@ -34,8 +34,9 @@ use std::sync::Arc;
 use unblock_config::keys::{KeyClass, LAYER_KEYS, RuntimeKey, classify};
 use unblock_config::{
     RuntimeConfig, canonicalize_runtime_value, classify_runtime_key, decode_db_rows,
+    output_format_name,
 };
-use unblock_model::{ConfigEntry, ConfigSource, DbConfigFault, OutputFormat};
+use unblock_model::{ConfigEntry, ConfigSource, DbConfigFault};
 
 use crate::error::{EngineError, Result};
 use crate::permit::MutationGuard;
@@ -254,16 +255,5 @@ fn effective(key: &str, runtime: &RuntimeConfig) -> Option<(String, ConfigSource
             Some((runtime.search_cap.to_string(), runtime.sources.search_cap))
         }
         Some(KeyClass::Runtime(RuntimeKey::JsonlExport) | KeyClass::Startup(_)) | None => None,
-    }
-}
-
-/// The wire name of an [`OutputFormat`] — its serde `snake_case` spelling, the one string table
-/// the canonical `output_format` row value is produced from.
-fn output_format_name(format: OutputFormat) -> String {
-    match serde_json::to_value(format) {
-        Ok(serde_json::Value::String(name)) => name,
-        // A unit-variant `rename_all = "snake_case"` enum always serializes to a string; the debug
-        // spelling is an unreachable, still-deterministic fallback.
-        _ => format!("{format:?}").to_ascii_lowercase(),
     }
 }

@@ -282,8 +282,9 @@ async fn config_startup_key_row_fail_closes_and_unset_repairs_the_same_session()
 }
 
 /// (d)+(d2): an UNDECODABLE layer-key row (`search_cap = 0`) is a blocking `invalid_value` fault
-/// whose hint reads the row first; `config set` with a valid value REPLACES it and re-opens the
-/// session, and `shutdown` closes a gated session cleanly.
+/// whose hint reads the row first; `config list` reports the row with its fault; `config set` with
+/// a valid value REPLACES it and re-opens the session; the same fault repaired by `config unset`
+/// instead re-opens the very next call too; and `shutdown` closes a gated session cleanly.
 #[tokio::test]
 async fn config_undecodable_layer_row_fail_closes_and_set_replaces_it() {
     let ws = workspace();
@@ -300,6 +301,17 @@ async fn config_undecodable_layer_row_fail_closes_and_set_replaces_it() {
     assert!(
         hint.contains(r#"issue {"action":"config","op":"get","key":"search_cap"}"#),
         "a LAYER key's hint reads the row first: {hint}"
+    );
+
+    let listed = session.config_list().await.expect("list under the gate");
+    let row = listed
+        .iter()
+        .find(|e| e.key == "search_cap")
+        .expect("list reports the faulty row");
+    assert_eq!(row.value.as_deref(), Some("0"));
+    assert_eq!(
+        row.fault.as_ref().map(|f| f.kind),
+        Some(ConfigFaultKind::InvalidValue)
     );
 
     let got = session.config_get("search_cap").await.expect("get");
@@ -325,14 +337,91 @@ async fn config_undecodable_layer_row_fail_closes_and_set_replaces_it() {
         .await
         .expect("un-gated after the replace");
 
+    // The UNSET repair path of the same fault: the row is deleted and the very next call succeeds.
+    seed_rows(ws.path(), &[("search_cap", "0")]).await;
+    let unset_repair = open(ws.path(), &MapEnv::default()).await;
+    assert_gated(
+        &unset_repair
+            .list(&ListFilters::default())
+            .await
+            .expect_err("gated"),
+        &["search_cap"],
+        "before the unset repair",
+    );
+    let entry = unset_repair
+        .config_unset("search_cap")
+        .await
+        .expect("unset repairs");
+    assert_eq!(entry.value, None);
+    assert_eq!(entry.fault, None);
+    assert_eq!(entry.source, Some(ConfigSource::Default));
+    assert!(table(ws.path()).await.is_empty(), "the row is gone");
+    unset_repair
+        .list(&ListFilters::default())
+        .await
+        .expect("un-gated after the unset");
+
     // A gated session still shuts down cleanly.
     seed_rows(ws.path(), &[("id_prefix", "zz")]).await;
     let gated = open(ws.path(), &MapEnv::default()).await;
-    assert!(gated.list(&ListFilters::default()).await.is_err());
+    assert_gated(
+        &gated
+            .list(&ListFilters::default())
+            .await
+            .expect_err("gated"),
+        &["id_prefix"],
+        "the startup-key row",
+    );
     gated
         .shutdown()
         .await
         .expect("a gated session closes cleanly");
+}
+
+/// D57 clause (2a), "never a silent skip": a hand-written row whose value is a BLOB is listed with
+/// a BLOCKING `invalid_value` fault naming its storage class, gates the session, and the hinted
+/// `config unset` of its key removes it and un-gates the very next call.
+#[tokio::test]
+async fn config_a_non_text_row_is_listed_gated_and_removable() {
+    let ws = workspace();
+    seed_rows(ws.path(), &[]).await;
+    {
+        let db = ws.path().join(".unblock").join("unblock.db");
+        let database = libsql::Builder::new_local(&db)
+            .build()
+            .await
+            .expect("raw open");
+        let conn = database.connect().expect("connect");
+        conn.execute(
+            "INSERT INTO config (key, value) VALUES ('actor', x'00FF')",
+            (),
+        )
+        .await
+        .expect("plant a BLOB value");
+    }
+    let session = open(ws.path(), &MapEnv::default()).await;
+    let listed = session.config_list().await.expect("list");
+    let row = listed
+        .iter()
+        .find(|e| e.key == "actor")
+        .expect("the row is listed");
+    let fault = row.fault.as_ref().expect("with its fault");
+    assert_eq!(fault.kind, ConfigFaultKind::InvalidValue);
+    assert!(fault.reason.contains("stored as blob"), "{fault:?}");
+    assert_gated(
+        &session
+            .list(&ListFilters::default())
+            .await
+            .expect_err("gated"),
+        &["actor"],
+        "the BLOB row",
+    );
+    session.config_unset("actor").await.expect("unset repairs");
+    assert!(table(ws.path()).await.is_empty(), "the BLOB row is gone");
+    session
+        .list(&ListFilters::default())
+        .await
+        .expect("un-gated");
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -383,16 +472,22 @@ async fn config_cross_process_unset_of_a_stale_fault_succeeds_without_a_write() 
 }
 
 /// (d3): after A's repair, a `config set` of ANY layer key on B re-resolves from the rows read
-/// under its guard and clears B's stale gate.
+/// under its guard and clears B's stale gate — over the AC's own STARTUP-KEY row.
 #[tokio::test]
 async fn config_cross_process_set_of_any_layer_key_clears_a_stale_gate() {
     let ws = workspace();
-    seed_rows(ws.path(), &[("jsonl_export", "true")]).await;
+    seed_rows(ws.path(), &[("db_filename", "other.db")]).await;
     let a = open(ws.path(), &MapEnv::default()).await;
     let b = open(ws.path(), &MapEnv::default()).await;
 
-    a.config_unset("jsonl_export").await.expect("A repairs");
-    assert!(b.list(&ListFilters::default()).await.is_err(), "B is stale");
+    a.config_unset("db_filename").await.expect("A repairs");
+    assert_gated(
+        &b.list(&ListFilters::default())
+            .await
+            .expect_err("B is stale"),
+        &["db_filename"],
+        "B before its own config call",
+    );
     b.config_set("output_format", "markdown")
         .await
         .expect("B sets");
@@ -847,6 +942,68 @@ async fn config_set_holds_permit_and_write_lock_while_get_and_list_do_not() {
     setter.await.expect("join").expect("set");
     writer.await.expect("join").expect("the writer proceeds");
     assert_eq!(session.runtime().search_cap, 4);
+}
+
+/// (k), the `unset` twin: `unset` holds the write permit AND the `.write.lock` across its commit (a
+/// concurrent writer and a second process's lock attempt both wait), while `get` and `list` run.
+#[tokio::test]
+async fn config_unset_holds_permit_and_write_lock_while_get_and_list_do_not() {
+    let ws = workspace();
+    let unblock_dir = ws.path().join(".unblock");
+    let db = unblock_dir.join("unblock.db");
+    let inner = LibsqlStorage::open_local(&db, 5_000).await.expect("open");
+    inner.migrate().await.expect("migrate");
+    inner.set_config("search_cap", "9").await.expect("seed");
+    let parked = ParkedStorage::new_gated_config(Arc::new(inner));
+    let storage: Arc<dyn Storage> = Arc::clone(&parked) as Arc<dyn Storage>;
+    let session = Arc::new(
+        session_over_in_dir(
+            storage,
+            SessionConfig::default(),
+            ws.path().to_path_buf(),
+            unblock_dir,
+        )
+        .await,
+    );
+
+    let unsetter = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move { session.config_unset("search_cap").await })
+    };
+    parked.wait_until_parked().await;
+
+    let got = tokio::time::timeout(Duration::from_secs(5), session.config_get("search_cap"))
+        .await
+        .expect("get takes no guard")
+        .expect("get");
+    assert_eq!(got.value, None, "the delete is committed");
+    tokio::time::timeout(Duration::from_secs(5), session.config_list())
+        .await
+        .expect("list takes no guard")
+        .expect("list");
+
+    let writer = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move { session.create_issue(new_issue("waits")).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !writer.is_finished(),
+        "the in-process writer waits for the permit"
+    );
+    let other = LibsqlStorage::open_local(&db, 100)
+        .await
+        .expect("second handle");
+    let locked = other
+        .acquire_write_lock()
+        .await
+        .expect_err("the lock is held");
+    assert_eq!(locked.code(), ErrorCode::DatabaseLocked);
+
+    parked.release();
+    unsetter.await.expect("join").expect("unset");
+    writer.await.expect("join").expect("the writer proceeds");
+    assert_eq!(session.runtime().sources.search_cap, ConfigSource::Default);
 }
 
 /// (k): a `config set` future DROPPED after its commit still leaves the snapshot equal to the
