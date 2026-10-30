@@ -116,7 +116,7 @@ pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, Cli
     };
 
     // 9. Report exactly what was scaffolded.
-    let fmt = ctx.config.output_format;
+    let fmt = ctx.config.runtime.output_format;
     let report = InitReport {
         workspace_dir: ctx.workspace_dir,
         unblock_dir: ctx.paths.unblock_dir,

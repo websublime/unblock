@@ -74,7 +74,7 @@ impl Session {
         // Storage honours `filters.limit`; the engine fills the default cap (FR-4) when unset.
         let mut filters = filters.clone();
         if filters.limit.is_none() {
-            filters.limit = Some(self.config.search_cap);
+            filters.limit = Some(self.config.runtime.search_cap);
         }
         Ok(self.storage.search_issues(query, &filters).await?)
     }

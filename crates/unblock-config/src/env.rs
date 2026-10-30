@@ -117,8 +117,9 @@ fn parse_bool(key: &str, raw: &str) -> Result<bool, ConfigError> {
     }
 }
 
-/// Parse an [`OutputFormat`] via serde (SF-2 — the enum has no `FromStr`).
-fn parse_output_format(key: &str, raw: &str) -> Result<OutputFormat, ConfigError> {
+/// Parse an [`OutputFormat`] via serde (SF-2 — the enum has no `FromStr`). Shared with the D57
+/// user/DB-layer value parser, so a `config` row decodes exactly as `UNBLOCK_OUTPUT_FORMAT` does.
+pub(crate) fn parse_output_format(key: &str, raw: &str) -> Result<OutputFormat, ConfigError> {
     // Route through serde so the snake_case wire strings are the single source of truth (no second
     // string table). A bare string deserializes as a unit-variant enum via the value deserializer.
     serde::Deserialize::deserialize(

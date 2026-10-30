@@ -47,17 +47,27 @@ pub async fn session_over_in_dir(
     workspace_dir: PathBuf,
     unblock_dir: PathBuf,
 ) -> Session {
-    let config = ResolvedConfig::default();
+    // D57: the actor lives in `config.runtime`, at the `$USER` (`os_user`) tier, and the reloader
+    // reproduces it — so a `config_set` keeps "tester" while a DB `actor` row still overrides it.
+    let mut config = ResolvedConfig::default();
+    config.runtime.actor = "tester".to_string();
+    config.runtime.sources.actor = unblock_model::ConfigSource::OsUser;
     let paths = ConfigPaths {
-        db_path: unblock_dir.join(&config.db_filename),
-        jsonl_path: unblock_dir.join(&config.jsonl_filename),
+        db_path: unblock_dir.join(&config.startup.db_filename),
+        jsonl_path: unblock_dir.join(&config.startup.jsonl_filename),
         unblock_dir,
     };
     let ctx = WorkspaceContext {
         storage,
         workspace_dir,
-        actor: "tester".to_string(),
         config,
+        reloader: unblock_config::ConfigReloader::new(
+            unblock_config::CliOverrides::default(),
+            unblock_config::EnvOverrides::default(),
+            Some("tester".to_string()),
+            None,
+            None,
+        ),
         paths,
         source: WorkspaceSource::WalkUp,
         schema_version_before_migrate: 0,

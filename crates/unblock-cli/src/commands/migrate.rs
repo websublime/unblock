@@ -35,9 +35,9 @@ use crate::output::{self, MigrateReport, ToDiagnosticReport};
 pub async fn run(_args: &MigrateArgs, overrides: &CliOverrides) -> Result<Option<u8>, CliError> {
     let ctx = open_with_storage_with_cli(overrides).await?;
     let database = ctx.paths.db_path.clone();
-    let fmt = ctx.config.output_format;
+    let fmt = ctx.config.runtime.output_format;
     // D46 clause (10): copy the PRE-OPEN stamp out before `Session::open` consumes the context —
-    // exactly as `paths.db_path` and `config.output_format` are copied above.
+    // exactly as `paths.db_path` and `config.runtime.output_format` are copied above.
     let schema_from = ctx.schema_version_before_migrate;
 
     let session = Session::open(

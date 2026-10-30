@@ -50,17 +50,26 @@
 //!
 //!     let workspace_dir = std::path::PathBuf::from("/tmp/ws");
 //!     let unblock_dir = workspace_dir.join(".unblock");
-//!     let config = ResolvedConfig::default();
+//!     // D57: the actor lives in `config.runtime`; the reloader reproduces it at the `$USER` tier.
+//!     let mut config = ResolvedConfig::default();
+//!     config.runtime.actor = "doctest".to_string();
+//!     config.runtime.sources.actor = unblock_model::ConfigSource::OsUser;
 //!     let paths = ConfigPaths {
-//!         db_path: unblock_dir.join(&config.db_filename),
-//!         jsonl_path: unblock_dir.join(&config.jsonl_filename),
+//!         db_path: unblock_dir.join(&config.startup.db_filename),
+//!         jsonl_path: unblock_dir.join(&config.startup.jsonl_filename),
 //!         unblock_dir,
 //!     };
 //!     let ctx = WorkspaceContext {
 //!         storage,
 //!         workspace_dir,
-//!         actor: "doctest".to_string(),
 //!         config,
+//!         reloader: unblock_config::ConfigReloader::new(
+//!             unblock_config::CliOverrides::default(),
+//!             unblock_config::EnvOverrides::default(),
+//!             Some("doctest".to_string()),
+//!             None,
+//!             None,
+//!         ),
 //!         paths,
 //!         source: WorkspaceSource::WalkUp,
 //!         // D46: this context is hand-built, not facade-opened.

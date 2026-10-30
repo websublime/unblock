@@ -2985,6 +2985,7 @@ dependencies = [
  "insta",
  "proptest",
  "serde",
+ "serde_json",
  "snafu",
  "tempfile",
  "tokio",

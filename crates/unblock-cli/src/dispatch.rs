@@ -46,7 +46,7 @@ pub async fn dispatch(cli: Cli) -> Result<Option<u8>, CliError> {
 #[must_use]
 pub fn session_config(ctx: &WorkspaceContext) -> SessionConfig {
     SessionConfig {
-        jsonl_export: ctx.config.jsonl_export,
+        jsonl_export: ctx.config.runtime.jsonl_export,
         import_on_open: false,
         remote: false,
     }
@@ -65,15 +65,21 @@ mod tests {
             LibsqlStorage::open_local(&db_path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
                 .await
                 .expect("open db");
-        let config = ResolvedConfig {
-            jsonl_export,
-            ..ResolvedConfig::default()
-        };
+        let mut config = ResolvedConfig::default();
+        config.runtime.jsonl_export = jsonl_export;
+        config.runtime.actor = "tester".to_string();
+        config.runtime.sources.actor = unblock_model::ConfigSource::OsUser;
         WorkspaceContext {
             storage: std::sync::Arc::new(storage),
             workspace_dir: tmp.path().to_path_buf(),
-            actor: "tester".to_string(),
             config,
+            reloader: unblock_config::ConfigReloader::new(
+                unblock_config::CliOverrides::default(),
+                unblock_config::EnvOverrides::default(),
+                Some("tester".to_string()),
+                None,
+                None,
+            ),
             paths: ConfigPaths {
                 unblock_dir: tmp.path().to_path_buf(),
                 db_path,

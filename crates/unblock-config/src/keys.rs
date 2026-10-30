@@ -65,16 +65,45 @@ pub const STARTUP_KEYS: &[&str] = &[
 /// The runtime key names (wire spelling), in `WorkspaceConfig` field order.
 pub const RUNTIME_KEYS: &[&str] = &["actor", "output_format", "jsonl_export", "search_cap"];
 
+/// The LAYER keys (PRD §4 D57 clause (2)) — the runtime keys the user file, the database `config`
+/// table and the `issue` tool's `config` action carry, in key order. `jsonl_export` is a runtime key
+/// but NOT a layer key: nothing reads it, so it resolves over CLI > env > project > defaults only
+/// until its consumer (`ub-p1h`) lands.
+pub const LAYER_KEYS: &[&str] = &["actor", "output_format", "search_cap"];
+
+impl RuntimeKey {
+    /// The key's wire spelling.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Actor => "actor",
+            Self::OutputFormat => "output_format",
+            Self::JsonlExport => "jsonl_export",
+            Self::SearchCap => "search_cap",
+        }
+    }
+
+    /// Whether the key is a D57 LAYER key ([`LAYER_KEYS`]) — every runtime key but `jsonl_export`.
+    #[must_use]
+    pub const fn is_layer_key(self) -> bool {
+        !matches!(self, Self::JsonlExport)
+    }
+}
+
 /// Classify a config key into its [`KeyClass`], or `None` for an unknown key.
 ///
 /// The classification is total over the merged [`crate::WorkspaceConfig`] field set: every field is
 /// classified into exactly one class (asserted in the unit tests). An unknown key returns `None` —
-/// the resolver treats it as a warn-only forward-compat key (SF-4), never an error.
+/// the resolver treats it as a warn-only forward-compat key (SF-4), never an error. `jsonl_filename`
+/// is spelled `jsonl_export_filename` in TOML; BOTH spellings classify as the same startup key (PRD
+/// §4 D57 clause (2)), so neither can slip into a runtime layer as an "unknown" key.
 #[must_use]
 pub fn classify(key: &str) -> Option<KeyClass> {
     match key {
         "db_filename" => Some(KeyClass::Startup(StartupKey::DbFilename)),
-        "jsonl_filename" => Some(KeyClass::Startup(StartupKey::JsonlFilename)),
+        "jsonl_filename" | "jsonl_export_filename" => {
+            Some(KeyClass::Startup(StartupKey::JsonlFilename))
+        }
         "backend" => Some(KeyClass::Startup(StartupKey::Backend)),
         "deletions_retention_days" => Some(KeyClass::Startup(StartupKey::DeletionsRetentionDays)),
         "id_prefix" => Some(KeyClass::Startup(StartupKey::IdPrefix)),

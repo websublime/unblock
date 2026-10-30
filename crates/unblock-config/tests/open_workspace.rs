@@ -58,7 +58,7 @@ async fn open_workspace_resolves_paths_without_creating_the_db() {
         "open_workspace must not create the db file"
     );
     // actor always resolves (UNBLOCK_ACTOR / $USER / "unblock").
-    assert!(!ctx.actor.is_empty());
+    assert!(!ctx.config.runtime.actor.is_empty());
 }
 
 #[tokio::test]
@@ -80,7 +80,7 @@ async fn open_with_storage_opens_migrates_and_yields_a_usable_storage() {
     let issue = sample_issue("ub-abc123", "Resolve the workspace");
     let id = ctx
         .storage
-        .create_issue(&issue, &ctx.actor)
+        .create_issue(&issue, &ctx.config.runtime.actor)
         .await
         .expect("create");
     assert_eq!(id, "ub-abc123");
@@ -217,7 +217,7 @@ async fn open_with_storage_reopen_is_idempotent_and_preserves_data() {
         let issue = sample_issue("ub-reopen1", "Survive a reopen");
         let id = ctx
             .storage
-            .create_issue(&issue, &ctx.actor)
+            .create_issue(&issue, &ctx.config.runtime.actor)
             .await
             .expect("create on first open");
         assert_eq!(id, "ub-reopen1");
@@ -281,7 +281,11 @@ async fn open_with_storage_with_cli_threads_actor_override() {
     let ctx = open_with_storage_with_cli(&cli)
         .await
         .expect("open via cli");
-    assert_eq!(ctx.actor, "alice-cli");
+    assert_eq!(ctx.config.runtime.actor, "alice-cli");
+    assert_eq!(
+        ctx.config.runtime.sources.actor,
+        unblock_model::ConfigSource::Cli
+    );
     assert!(ctx.paths.db_path.exists(), "open_local must create the db");
 }
 

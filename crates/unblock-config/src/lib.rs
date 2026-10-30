@@ -1,14 +1,16 @@
 //! `unblock-config` (L4) — the layered configuration resolver, `.unblock/` workspace discovery,
 //! config-owned value/path types, and the two workspace-open facades (CF-D, spine §4).
 //!
-//! This crate is the **full T1.3 layered resolver**. It merges configuration across four layers in
-//! strict precedence — **CLI ([`CliOverrides`]) > env `UNBLOCK_*` ([`EnvOverrides`]) > project
-//! `.unblock/config.toml` ([`ProjectConfig`]) > defaults** (highest wins per field) — and partitions
-//! keys into startup-only vs runtime-reloadable ([`keys`]: [`STARTUP_KEYS`] / [`RUNTIME_KEYS`],
-//! [`classify`]). It delivers the config-owned value type [`ResolvedConfig`] and path type
-//! [`ConfigPaths`] (resolved for real, not defaulted), the two contexts [`ResolvedContext`]
-//! (resolve-only, no storage) and [`WorkspaceContext`] (storage-bearing), and the per-crate
-//! [`ConfigError`].
+//! This crate is the **full layered resolver**. Since D57 (v1.1) it merges configuration across SIX
+//! layers in ONE strict precedence order — **CLI ([`CliOverrides`]) > env `UNBLOCK_*`
+//! ([`EnvOverrides`]) > project `.unblock/config.toml` ([`ProjectConfig`]) > user `config.toml`
+//! ([`load_user_config`]) > the database `config` table ([`decode_db_rows`]) > defaults** (highest
+//! wins per field) — and ENFORCES the startup/runtime partition ([`keys`]: [`STARTUP_KEYS`] /
+//! [`RUNTIME_KEYS`] / [`LAYER_KEYS`], [`classify`]): the user and DB layers carry the three LAYER
+//! keys only. It delivers the config-owned value type [`ResolvedConfig`] (partitioned into
+//! [`StartupConfig`] and [`RuntimeConfig`]) and path type [`ConfigPaths`], the two contexts
+//! [`ResolvedContext`] (resolve-only, no storage) and [`WorkspaceContext`] (storage-bearing), the
+//! live-session [`ConfigReloader`], and the per-crate [`ConfigError`].
 //!
 //! **Discovery** walks up for the nearest dir named `.unblock` **or** `_unblock` (the monorepo alias,
 //! FORK-2/D8); the discovered dir is **canonicalized** so artifacts are confined to the canonical
@@ -31,22 +33,33 @@
 //!
 //! # Example
 //!
-//! Resolve a workspace without opening the database (the resolve-only facade):
+//! Resolve a workspace without opening the database (the resolve-only facade; the injected
+//! environment keeps the example independent of the caller's own `$HOME`/`UNBLOCK_*`, NFR-16):
 //!
 //! ```
-//! use unblock_config::open_workspace;
+//! use unblock_config::{CliOverrides, EnvSource, open_workspace_with_env};
+//!
+//! struct NoEnv;
+//! impl EnvSource for NoEnv {
+//!     fn get(&self, _key: &str) -> Option<String> {
+//!         None
+//!     }
+//! }
 //!
 //! let rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
 //!     let workspace = tempfile::tempdir().unwrap();
 //!     std::fs::create_dir(workspace.path().join(".unblock")).unwrap();
 //!
-//!     let ctx = open_workspace(workspace.path()).await.expect("resolve");
+//!     let ctx = open_workspace_with_env(Some(workspace.path()), &CliOverrides::default(), &NoEnv)
+//!         .await
+//!         .expect("resolve");
 //!     // The discovered dir is canonicalized (FORK-3), so compare against the canonical tempdir.
 //!     let canon = workspace.path().canonicalize().unwrap();
 //!     assert_eq!(ctx.paths.unblock_dir, canon.join(".unblock"));
 //!     // resolve-only never opens or creates the database file:
 //!     assert!(!ctx.paths.db_path.exists());
+//!     assert_eq!(ctx.config.runtime.actor, "unblock");
 //! });
 //! ```
 
@@ -57,30 +70,38 @@ mod actor;
 mod cli;
 mod config;
 mod context;
+mod db_layer;
 mod discovery;
 mod env;
 mod error;
 pub mod keys;
 mod merge;
 mod paths;
+mod reload;
 mod schema;
+mod user_config;
 
 pub use cli::CliOverrides;
-pub use config::{ResolvedConfig, WorkspaceConfig};
+pub use config::{ResolvedConfig, RuntimeConfig, RuntimeSources, StartupConfig, WorkspaceConfig};
 pub use context::{
     ResolvedContext, WorkspaceContext, open_with_storage, open_with_storage_with_cli,
-    open_workspace, open_workspace_with_cli,
+    open_with_storage_with_env, open_workspace, open_workspace_with_cli, open_workspace_with_env,
 };
+pub use db_layer::decode_db_rows;
 pub use discovery::{
     UNBLOCK_DIR_NAMES, WorkspaceSource, discover_optional_unblock_dir, discover_unblock_dir,
     has_unblock_dir_name, probe_workspace_root,
 };
-pub use env::{EnvOverrides, EnvSource};
+pub use env::{EnvOverrides, EnvSource, ProcessEnv};
 pub use error::ConfigError;
-pub use keys::{KeyClass, RUNTIME_KEYS, RuntimeKey, STARTUP_KEYS, StartupKey, classify};
+pub use keys::{
+    KeyClass, LAYER_KEYS, RUNTIME_KEYS, RuntimeKey, STARTUP_KEYS, StartupKey, classify,
+};
 pub use paths::ConfigPaths;
+pub use reload::{ConfigReloader, canonicalize_runtime_value, classify_runtime_key};
 pub use schema::{ProjectConfig, RemoteTable};
+pub use user_config::{load_user_config, user_config_path, user_output_format};
 
 // `OutputFormat` is owned once in `unblock-model` (G-7/CF-J) and re-exported here so consumers of
-// `ResolvedConfig.output_format` reach it through config without a second definition.
+// `RuntimeConfig.output_format` reach it through config without a second definition.
 pub use unblock_model::OutputFormat;
