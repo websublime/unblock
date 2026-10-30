@@ -2128,21 +2128,25 @@ is tested against.
   permit, no `.write.lock` (FR-10). On a database below stamp 3 it is never reached, because every open path migrates
   first (§3.2 clause (iv)); a missing table on a stamp-3 database is the sentinel's `SchemaMismatch`, never an empty
   result. **[D57] Verify round 1 — never a silent skip (PRD §4 D57 clause (2a)):** a cell NOT stored as `TEXT` (a
-  hand-written `BLOB`; the columns' `TEXT` affinity converts a number) is returned as
-  `unblock_storage::NON_TEXT_CELL_MARKER` (`U+0001`) followed by `<storage class>:<HEX>`, rows ordered by that returned
-  key; `unblock-config` decodes such a cell as a BLOCKING `invalid_value` fault naming the storage class.
+  hand-written `BLOB`; the columns' `TEXT` affinity converts a number) — and, Verify round 2, a `TEXT` cell that itself
+  BEGINS with the marker — is returned as `unblock_storage::NON_TEXT_CELL_MARKER` (`U+0001`) followed by
+  `<storage class>:<HEX>`, rows ordered by that returned key. The spelling is INJECTIVE (no row reads back as another
+  row's spelling); `unblock-config` decodes a marked cell as a BLOCKING `invalid_value` fault naming the storage class
+  (or the reserved marker).
 - **`set_config(key, value)`** — ONE `BEGIN IMMEDIATE` running `INSERT INTO config (key, value) VALUES (?1, ?2) ON
   CONFLICT(key) DO UPDATE SET value = excluded.value` — an UPSERT, deliberately NOT `INSERT OR REPLACE` (which deletes
   and re-inserts) and NOT ignore-on-conflict (which would drop the write silently). It binds exactly two parameters and
   writes no `Event`.
 - **`unset_config(key)`** — ONE `BEGIN IMMEDIATE` running `DELETE FROM config WHERE key = ?1`; returns
   `changes() == 1`. Deleting an absent key is `Ok(false)`, never an error. No `Event`. **[D57] Verify round 1:** the
-  `WHERE` matches the key's `read_config` spelling (a `TEXT` key itself, a non-`TEXT` key its marked spelling), so
-  the hinted `config unset` removes a hand-written non-`TEXT` row; it returns whether any row was deleted.
+  `WHERE` matches the key's `read_config` spelling (a `TEXT` key itself, a marked key its marked spelling), so the
+  hinted `config unset` removes a hand-written non-`TEXT` row; because the spelling is injective (round 2) it matches
+  at most ONE row, and it returns whether that row was deleted.
 - **What storage does NOT do.** It never classifies a key (startup vs runtime vs unknown) and never parses a value:
   `unblock-config` owns both (D57 clause (2)), and the engine validates BEFORE it calls `set_config` (§4.1
-  `config_set`). The table's primary key makes a duplicate key impossible, so the FR-16-full "duplicate config rows"
-  probe (unblock-health plan) has nothing to find in this table.
+  `config_set`). The table's primary key makes a duplicate key impossible, and the injective read spelling keeps two
+  distinct keys (e.g. a `BLOB` and a `TEXT` key) from ever reading back alike, so the FR-16-full "duplicate config
+  rows" probe (unblock-health plan) has nothing to find in this table.
 
 **EventType-per-mutation (the T0.7 oracle).** Model `EventType` = 17 named (Created, Updated,
 StatusChanged, PriorityChanged, AssigneeChanged, Commented, Closed, Reopened, DependencyAdded,
@@ -2523,8 +2527,10 @@ pub async fn open_with_storage_with_cli(cli: &CliOverrides) -> Result<WorkspaceC
 > accept a user file another path refuses. `unblock init` calls it BEFORE it creates `.unblock/` or writes any file (a
 > failure exits 7 with nothing written). **[D57] Verify round 1:** so that "ANY user file the open would refuse fails
 > `init` with NOTHING written" (PRD §4 D57 clause (6)) holds literally, `load_user_config` ALSO applies the LAYER-VALUE
-> bounds the open applies — a blank or `validate_actor`-failing `actor` (after trimming) and a `search_cap` outside
-> `1..=i64::MAX` are `InvalidValue`, by the same per-key parser a `config set` value and a DB row pass — and it stats
+> bounds the open applies — a non-blank `actor` failing `validate_actor` (after trimming; a BLANK actor is UNSET, the
+> rule every actor tier shares, never a refusal) and a `search_cap` outside `1..=i64::MAX` are `InvalidValue`, by the
+> same per-key parser a `config set` value and a DB row pass, applied to the user file's OWN value whether or not a
+> higher layer shadows it (as a DB row's fault is) — and it stats
 > the file with `try_exists`, so a stat error is `ConfigError::Io`, never a silently empty layer. A `Parse` message
 > carries the parser's message and byte offset only, never the offending source line. `pub fn user_output_format(env:
 > &dyn EnvSource) ->
