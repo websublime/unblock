@@ -19,6 +19,9 @@ workspace = true
 unblock-model = { workspace = true }
 unblock-error = { workspace = true }
 unblock-storage = { workspace = true, features = ["testkit"] }
+# D57 (v1.1) — the `config_toml` core parses its bytes as BOTH TOML layers (project + user file)
+# through the config crate's own loaders and resolve-only open (PRD §8.1, fuzz plan).
+unblock-config = { workspace = true }
 
 # D43 — REQUIRED by the `dup_scan` differential core, not incidental. Its over-rejection oracle must
 # parse the SAME bytes with rmcp's own `RxJsonRpcMessage<RoleServer>`: `serde_json` failing is

@@ -3050,6 +3050,7 @@ dependencies = [
  "snafu",
  "tempfile",
  "tokio",
+ "unblock-config",
  "unblock-error",
  "unblock-model",
  "unblock-storage",

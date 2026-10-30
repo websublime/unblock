@@ -90,6 +90,14 @@ test = false
 doc = false
 bench = false
 
+# --- config targets (D57, v1.1) ---
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
 # --- storage targets ---
 [[bin]]
 name = "query_filters"

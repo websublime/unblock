@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use proptest::prelude::*;
 
 use unblock_fuzz::{
-    run_content_hash_case, run_cycle_detect_case, run_dup_scan_case, run_enum_deserialize_case,
-    run_id_alloc_case, run_issue_ingest_case, run_parse_id_case, run_query_filters_case,
-    run_sanitize_case,
+    ConfigCorpus, run_config_toml_case, run_content_hash_case, run_cycle_detect_case,
+    run_dup_scan_case, run_enum_deserialize_case, run_id_alloc_case, run_issue_ingest_case,
+    run_parse_id_case, run_query_filters_case, run_sanitize_case,
 };
 
 /// The nested cargo-fuzz package's corpus root (sibling of the member crate's `src/`).
@@ -101,6 +101,11 @@ fn replay_id_alloc() {
     replay_corpus("id_alloc", run_id_alloc_case);
 }
 
+#[test]
+fn replay_config_toml() {
+    replay_corpus("config_toml", run_config_toml_case);
+}
+
 // --- randomized smoke (one proptest per target) ---
 
 proptest! {
@@ -173,5 +178,33 @@ proptest! {
     #[test]
     fn smoke_id_alloc(bytes in prop::collection::vec(any::<u8>(), 0..128)) {
         prop_assert!(run_id_alloc_case(&bytes).is_ok());
+    }
+}
+
+// Config smoke (D57): each case writes two temp files and runs four resolve-only opens.
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// Random BYTES almost never parse as TOML, so this leg mostly drives the refusal paths.
+    #[test]
+    fn smoke_config_toml(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
+        prop_assert!(run_config_toml_case(&bytes).is_ok());
+    }
+
+    /// A grammar-shaped generator over `ConfigCorpus`'s key and value vocabularies (startup, layer,
+    /// `jsonl_export` and unknown keys; well- and ill-typed values), so the accept, precedence and
+    /// startup-refusal arms are genuinely reached rather than left to chance.
+    #[test]
+    fn smoke_config_toml_wellformed(
+        entries in prop::collection::vec(
+            (
+                prop::sample::select(ConfigCorpus::KEYS.to_vec()),
+                prop::sample::select(ConfigCorpus::VALUES.to_vec()),
+            ),
+            0..4,
+        ),
+    ) {
+        let document = ConfigCorpus::document(&entries);
+        prop_assert!(run_config_toml_case(document.as_bytes()).is_ok());
     }
 }

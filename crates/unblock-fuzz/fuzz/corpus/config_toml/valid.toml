@@ -1,0 +1,3 @@
+actor = "ann"
+output_format = "markdown"
+search_cap = 25

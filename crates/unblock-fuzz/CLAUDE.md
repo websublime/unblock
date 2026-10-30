@@ -20,3 +20,5 @@ CI `fuzz-smoke` is a scheduled nightly job.
   the crate's one EXTERNAL `rmcp` edge: its over-rejection oracle must parse the same bytes with
   rmcp's own frame type (`serde_json` failing is necessary but not sufficient), and keeping both
   halves of the differential in one core is why the edge lives here.
+  Config `{config_toml}` (D57, v1.1) — the same bytes as BOTH TOML layers (project + user file)
+  through `unblock-config`, the crate's one v1.1 internal edge (PRD §8.1, `check-layering`).
