@@ -155,8 +155,11 @@ impl Session {
     pub async fn config_unset(&self, key: &str) -> Result<ConfigEntry> {
         let guard = self.acquire().await?;
         let mut rows = self.storage.read_config().await?;
-        let write = if let Some(at) = rows.iter().position(|(row_key, _)| row_key == key) {
-            rows.remove(at);
+        // Every row whose spelling is `key` leaves the prospective set (the storage spelling is
+        // injective, so at most one), so the swapped snapshot is exactly what the DELETE leaves.
+        let before = rows.len();
+        rows.retain(|(row_key, _)| row_key != key);
+        let write = if rows.len() < before {
             Some(ConfigWrite::Unset {
                 key: key.to_string(),
             })
