@@ -1727,16 +1727,20 @@ pub(super) async fn row_exists(
 // --- config table (FR-13 full, D57; spine §3.2.1 "Config table (D57)") ---
 
 /// The SQL spelling of one `config` cell as [`read_config`] returns it: a `TEXT` cell verbatim, any
-/// other storage class (a hand-written `BLOB`, `INTEGER`, `REAL` or `NULL`) as
-/// [`NON_TEXT_CELL_MARKER`](crate::NON_TEXT_CELL_MARKER) followed by `<typeof>:<HEX>` — so such a
-/// row is never silently skipped (PRD §4 D57 clause (2a)): `unblock-config` decodes it as a fault and
-/// `unset_config` can address it by that same spelling. The column is a crate literal, never input.
+/// other storage class (a hand-written `BLOB`, `INTEGER`, `REAL` or `NULL`) — and a `TEXT` cell that
+/// itself BEGINS with the marker character — as [`NON_TEXT_CELL_MARKER`](crate::NON_TEXT_CELL_MARKER)
+/// followed by `<typeof>:<HEX>`. The spelling is therefore INJECTIVE: no `TEXT` cell can read back
+/// as another row's marked spelling, so one `unset_config` addresses at most one row. Such a row is
+/// never silently skipped (PRD §4 D57 clause (2a)): `unblock-config` decodes it as a fault and
+/// `unset_config` addresses it by that same spelling. The column is a crate literal, never input.
 macro_rules! config_cell_sql {
     ($col:literal) => {
         concat!(
-            "CASE typeof(",
+            "CASE WHEN typeof(",
             $col,
-            ") WHEN 'text' THEN ",
+            ") = 'text' AND substr(",
+            $col,
+            ", 1, 1) <> char(1) THEN ",
             $col,
             " ELSE char(1) || typeof(",
             $col,

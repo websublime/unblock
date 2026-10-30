@@ -730,9 +730,10 @@ pub trait Storage: Send + Sync {
     /// Every `config` row as `(key, value)`, ordered by key ascending (`SQLite` `BINARY` collation)
     /// — a PURE READ: no permit, no lock (FR-10). Every open path migrates first, so a missing
     /// table on a stamp-3 database is the sentinel's `SchemaMismatch`, never an empty result. A cell
-    /// not stored as `TEXT` (a hand-written row) is NEVER skipped (D57 clause (2a)): it is returned
-    /// as [`crate::NON_TEXT_CELL_MARKER`] followed by `<storage class>:<HEX>`, and the row is
-    /// ordered by that spelling.
+    /// not stored as plain `TEXT` (a hand-written row of another storage class, or a `TEXT` cell
+    /// that itself begins with the marker) is NEVER skipped (D57 clause (2a)): it is returned as
+    /// [`crate::NON_TEXT_CELL_MARKER`] followed by `<storage class>:<HEX>` — an INJECTIVE spelling —
+    /// and the row is ordered by that spelling.
     async fn read_config(&self) -> Result<Vec<(String, String)>, StorageError>;
 
     /// UPSERT the `config` row `key` to `value` in ONE `BEGIN IMMEDIATE` (`INSERT … ON
@@ -741,9 +742,9 @@ pub trait Storage: Send + Sync {
     /// first (the engine's `config_set`); storage does not.
     async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError>;
 
-    /// DELETE the `config` row whose [`Storage::read_config`] key spelling is `key` (a non-`TEXT` key
-    /// included) in ONE `BEGIN IMMEDIATE`, returning whether a row was deleted (an absent key is
-    /// `Ok(false)`, never an error). Writes no `Event`.
+    /// DELETE the `config` row whose [`Storage::read_config`] key spelling is `key` (a marked key
+    /// included — the spelling is injective, so at most ONE row) in ONE `BEGIN IMMEDIATE`, returning
+    /// whether a row was deleted (an absent key is `Ok(false)`, never an error). Writes no `Event`.
     async fn unset_config(&self, key: &str) -> Result<bool, StorageError>;
 
     // ---------------------------------------------------------------------------------------------

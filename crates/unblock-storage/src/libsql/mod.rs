@@ -1352,21 +1352,32 @@ mod tests {
         }
         let marker = crate::NON_TEXT_CELL_MARKER;
         let blob_key = format!("{marker}blob:6B");
+        // A TEXT key that literally spells the BLOB row's marked key: injectivity spells it
+        // `\u{1}text:<HEX>`, so the two can never be confused or deleted together.
+        storage.set_config(&blob_key, "impostor").await.unwrap();
+        let text_key = format!("{marker}text:01626C6F623A3642");
         assert_eq!(
             storage.read_config().await.unwrap(),
             vec![
                 // TEXT affinity converts the INTEGER 5 to the TEXT "5"; only a BLOB (or a NULL in
                 // a hand-built table) keeps another storage class.
                 (blob_key.clone(), "5".to_string()),
+                (text_key.clone(), "impostor".to_string()),
                 ("actor".to_string(), "alice".to_string()),
                 ("search_cap".to_string(), format!("{marker}blob:00FF")),
             ],
-            "no row is dropped; a non-TEXT cell is marked and spelled <class>:<HEX>"
+            "no row is dropped; a non-TEXT or marker-led cell is marked and spelled <class>:<HEX>"
         );
         assert!(
             storage.unset_config(&blob_key).await.unwrap(),
             "the marked spelling addresses the BLOB-keyed row"
         );
+        assert_eq!(
+            storage.read_config().await.unwrap().len(),
+            3,
+            "…and ONLY that row: the marker-led TEXT key survives"
+        );
+        assert!(storage.unset_config(&text_key).await.unwrap());
         assert!(storage.unset_config("search_cap").await.unwrap());
         assert_eq!(
             storage.read_config().await.unwrap(),
