@@ -11,9 +11,15 @@ use std::collections::HashMap;
 use std::fs;
 
 use unblock_config::{
-    CliOverrides, ConfigError, EnvSource, discover_optional_unblock_dir, discover_unblock_dir,
-    open_workspace_with_cli,
+    CliOverrides, ConfigError, EnvSource, ResolvedContext, discover_optional_unblock_dir,
+    discover_unblock_dir, open_workspace_with_env,
 };
+
+/// D57 / NFR-16: the resolve-only facade over an EMPTY environment (no host `$HOME`, user file or
+/// `UNBLOCK_*`), keeping the production facade's name and shape.
+async fn open_workspace_with_cli(cli: &CliOverrides) -> Result<ResolvedContext, ConfigError> {
+    open_workspace_with_env(None, cli, &empty_env()).await
+}
 
 /// An injected [`EnvSource`] for the discovery integration suite — NEVER the process-global env
 /// (NFR-16: a host `$HOME` could otherwise bound a tempdir walk — the macOS-masks-Linux landmine).

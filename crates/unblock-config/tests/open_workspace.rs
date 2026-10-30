@@ -5,10 +5,40 @@
 use std::fs;
 
 use chrono::{TimeZone, Utc};
+use std::path::Path;
+
 use unblock_config::{
-    CliOverrides, ConfigError, open_with_storage, open_with_storage_with_cli, open_workspace,
-    open_workspace_with_cli,
+    CliOverrides, ConfigError, EnvSource, ResolvedContext, WorkspaceContext,
+    open_with_storage_with_env, open_workspace_with_env,
 };
+
+// D57 / NFR-16: every cell opens through the `#[doc(hidden)]` `_with_env` entries over an EMPTY
+// environment, so no developer's or runner's own user file (`$HOME`/`XDG_CONFIG_HOME`) or
+// `UNBLOCK_*` can change a cell's actor, format or snapshot. The helpers below keep the production
+// facades' names and argument shapes (`start` is the walk-up seed; the `_with_cli` forms walk up
+// from the CWD unless `cli.dir`/`cli.db` is explicit).
+struct NoEnv;
+impl EnvSource for NoEnv {
+    fn get(&self, _key: &str) -> Option<String> {
+        None
+    }
+}
+
+async fn open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError> {
+    open_workspace_with_env(Some(start), &CliOverrides::default(), &NoEnv).await
+}
+
+async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError> {
+    open_with_storage_with_env(Some(start), &CliOverrides::default(), &NoEnv).await
+}
+
+async fn open_workspace_with_cli(cli: &CliOverrides) -> Result<ResolvedContext, ConfigError> {
+    open_workspace_with_env(None, cli, &NoEnv).await
+}
+
+async fn open_with_storage_with_cli(cli: &CliOverrides) -> Result<WorkspaceContext, ConfigError> {
+    open_with_storage_with_env(None, cli, &NoEnv).await
+}
 use unblock_error::{CodedError, ErrorCode};
 use unblock_model::Issue;
 
