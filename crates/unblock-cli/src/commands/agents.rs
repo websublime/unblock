@@ -301,9 +301,11 @@ mod tests {
             "reopen",
             "delete",
             "restore",
-            // D56 (FR-6 remainder): the two organization actions are appended last.
+            // D56 (FR-6 remainder): the two organization actions are appended.
             "relabel",
             "close_eligible",
+            // D57 (FR-13 full): the runtime-configuration action is appended last.
+            "config",
         ] {
             assert!(
                 block.contains(&format!("| `issue` | `action: {action}` |")),

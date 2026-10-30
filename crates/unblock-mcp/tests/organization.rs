@@ -260,8 +260,9 @@ fn d56_arms_are_appended_last_and_the_tool_count_stays_eight() {
         .iter()
         .map(|arm| arm_discriminant(arm, "action"))
         .collect();
+    // D57 appends `config` after the two D56 arms, so they now sit immediately before it.
     assert_eq!(
-        issue_arms[issue_arms.len() - 2..],
+        issue_arms[issue_arms.len() - 3..issue_arms.len() - 1],
         ["relabel".to_string(), "close_eligible".to_string()]
     );
     let query_arms: Vec<String> = bundle.query.input["oneOf"]
@@ -277,5 +278,5 @@ fn d56_arms_are_appended_last_and_the_tool_count_stays_eight() {
         ]
     );
     assert_eq!(unblock_mcp::capabilities().tools.len(), 8);
-    assert_eq!(unblock_mcp::CONTRACT_VERSION, "unblock.mcp.v1.11");
+    assert_eq!(unblock_mcp::CONTRACT_VERSION, "unblock.mcp.v1.12");
 }

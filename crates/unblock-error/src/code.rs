@@ -357,9 +357,11 @@ impl ErrorCode {
     /// - [`Self::StaticText`] — [`Self::InvalidStatus`] / [`Self::InvalidType`] /
     ///   [`Self::InvalidPriority`] (the `ModelError::hint` fixed constants; see [`Self::static_hint`]).
     /// - [`Self::ContextualText`] — [`Self::ValidationFailed`] (the mcp over-quota + bulk-markdown-parse
-    ///   site-composed hints; the `ModelError::ValidationFailed` aggregate itself carries none) and,
-    ///   since D46 (v1.0.1), [`Self::SchemaMismatch`] (the STALE-SCHEMA self-correction hint).
-    /// - [`Self::None`] — every other code (the remaining 30 of 36).
+    ///   site-composed hints; the `ModelError::ValidationFailed` aggregate itself carries none),
+    ///   since D46 (v1.0.1), [`Self::SchemaMismatch`] (the STALE-SCHEMA self-correction hint), and,
+    ///   since D57 (v1.1), [`Self::ConfigError`] (the `ConfigError::FaultyDbConfig` recovery hint naming
+    ///   the exact `issue {"action":"config",…}` call per blocking key — composed in `unblock-config`).
+    /// - [`Self::None`] — every other code (the remaining 29 of 36).
     ///
     /// **D46 — why `SchemaMismatch` is `ContextualText` and not `StaticText`**, which is a FACT about
     /// this code rather than a preference: ONE code serves TWO OPPOSITE directions. A database BELOW
@@ -387,8 +389,12 @@ impl ErrorCode {
                 HintShape::StaticText
             }
             // D46 (v1.0.1): `SchemaMismatch` joins `ValidationFailed` — the stale-schema failure
-            // carries a self-correction hint composed at the storage failure site.
-            Self::ValidationFailed | Self::SchemaMismatch => HintShape::ContextualText,
+            // carries a self-correction hint composed at the storage failure site. D57 (v1.1):
+            // `ConfigError` joins them — the fail-closed gate's recovery hint is composed per
+            // blocking key in `unblock-config` (its first production hint site).
+            Self::ValidationFailed | Self::SchemaMismatch | Self::ConfigError => {
+                HintShape::ContextualText
+            }
             _ => HintShape::None,
         }
     }

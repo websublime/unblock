@@ -31,8 +31,8 @@ use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use unblock_engine::DeleteMode;
 use unblock_model::{
-    CloseEligibleOutcome, CloseOutcome, Comment, CountBucket, DepTree, Dependency, EpicStatus,
-    ExportReport, ImportReport, Issue, LabelCount, LabelRename,
+    CloseEligibleOutcome, CloseOutcome, Comment, ConfigEntry, CountBucket, DepTree, Dependency,
+    EpicStatus, ExportReport, ImportReport, Issue, LabelCount, LabelRename,
 };
 
 /// The quick-create output: the minted id only (spine §5.3).
@@ -42,8 +42,8 @@ pub(crate) struct IdOnly {
     pub id: String,
 }
 
-/// The `issue` tool success union — the 7 success shapes across the 10 actions (spine §5.3, D25;
-/// D56 appends `Relabel` and `CloseEligible`).
+/// The `issue` tool success union — the 8 success shapes across the 11 actions (spine §5.3, D25;
+/// D56 appends `Relabel` and `CloseEligible`; D57 appends `Config`).
 ///
 /// `#[serde(untagged)]` ⇒ each arm serializes as its inner value directly (wire-identical to the
 /// pre-D25 ad-hoc values). The large arms are boxed to keep `clippy::large_enum_variant` clean.
@@ -71,6 +71,11 @@ pub(crate) enum IssueOutput {
     // D56 clause (4): its list key is `epic_ids`, never `close`'s `closed` (an `Issue`), so this
     // untagged union never carries one key with two types.
     CloseEligible(CloseEligibleOutcome),
+    /// The `config` outcome (every op): the runtime configuration entries.
+    //
+    // D57 — APPENDED LAST (declaration order is hash-visible). The key `config` appears in no other
+    // arm, so the untagged union stays unambiguous.
+    Config(ConfigList),
 }
 
 /// The CD-2 object-wrap for a list of issues: `{"issues":[…]}` (spine §5.3). Shared by
@@ -80,6 +85,14 @@ pub(crate) enum IssueOutput {
 pub(crate) struct IssueList {
     /// The issues in the result set.
     pub issues: Vec<Issue>,
+}
+
+/// The CD-2 object-wrap for the `config` action's entries: `{"config":[ConfigEntry…]}` (spine §5.3,
+/// D57) — one entry for `get`/`set`/`unset`, the layer keys plus every other row for `list`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub(crate) struct ConfigList {
+    /// The configuration entries, in key order.
+    pub config: Vec<ConfigEntry>,
 }
 
 /// The resolved `delete` plan output (spine §5.3, D25) — was the ad-hoc `delete_plan_json`.

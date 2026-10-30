@@ -5,7 +5,7 @@ This workspace is tracked by **unblock**. Issue-data operations are exposed over
 `unblock` CLI is lifecycle/ops only.
 
 - Start the server: `unblock mcp` (MCP over stdio).
-- Contract: `unblock.mcp.v1.11`.
+- Contract: `unblock.mcp.v1.12`.
 - Machine-readable discovery: read `unblock://capabilities` (the source of these tables) and
 `unblock://schema` (the full JsonSchema bundle for every tool I/O).
 
@@ -15,7 +15,7 @@ Descriptors (from `unblock://capabilities`):
 
 | Tool | Description |
 |---|---|
-| `issue` | Create, show, update, close, reopen, delete, restore, relabel, or close_eligible issues. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
+| `issue` | Create, show, update, close, reopen, delete, restore, relabel, or close_eligible issues, or get, set, unset and list runtime configuration with config. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
 | `claim` | Atomically claim an issue for an assignee; the loser of a race is reported. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
 | `defer` | Defer an issue until a future timestamp, or undefer it. Where an action accepts the optional agent_name, harness and model fields, unblock currently discards them. |
 | `query` | Query issues: list, ready, blocked, search, count, stale, labels, or epics. |
@@ -42,6 +42,7 @@ Discriminant keys: `action` — `issue`, `defer`, `dep`, `sync`, `comment`; `kin
 | `issue` | `action: restore` | `id` | `agent_name`, `harness`, `model` |
 | `issue` | `action: relabel` | `new_name`, `old_name` | `agent_name`, `harness`, `model` |
 | `issue` | `action: close_eligible` | — | `agent_name`, `dry_run`, `harness`, `model` |
+| `issue` | `action: config` | `op` | `agent_name`, `harness`, `key`, `model`, `value` |
 | `claim` | — | `assignee`, `id` | `agent_name`, `harness`, `model` |
 | `defer` | `action: defer` | `id`, `until` | `agent_name`, `harness`, `model` |
 | `defer` | `action: undefer` | `id` | `agent_name`, `harness`, `model` |
