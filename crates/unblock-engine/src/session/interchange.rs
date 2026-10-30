@@ -9,6 +9,11 @@
 //! conflict-marker preflight / path confinement / tombstone-no-resurrect / the bd import-normalize
 //! repair pass all live in `unblock-sync` at L3. `import_jsonl`/`import_bd` acquire the D14 write
 //! permit (MF-4) across the sync call; `export_jsonl` is read-only and takes NO permit.
+//!
+//! D57 clause (2a): all three apply the fail-closed gate first — the two imports on the snapshot
+//! taken after the permit and the `.write.lock`, whose actor they then import with (spine §4.1
+//! actor discipline) — including the `--no-default-features` bodies, so the gate does not depend on
+//! the feature set.
 
 use std::path::Path;
 
@@ -29,6 +34,7 @@ impl Session {
     /// - [`EngineError::FeatureNotWired`] (`feature: "sync"`) under `--no-default-features`.
     #[cfg(feature = "sync")]
     pub async fn export_jsonl(&self, path: &Path) -> Result<ExportReport> {
+        self.gated_runtime()?;
         let report = unblock_sync::export_jsonl(
             &*self.storage,
             path,
@@ -50,6 +56,7 @@ impl Session {
     #[cfg(not(feature = "sync"))]
     #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the sync body awaits.
     pub async fn export_jsonl(&self, _path: &Path) -> Result<ExportReport> {
+        self.gated_runtime()?;
         Err(EngineError::FeatureNotWired { feature: "sync" })
     }
 
@@ -72,6 +79,8 @@ impl Session {
         // the atomic `create_issues` tx) so a concurrent MCP server on another process cannot interleave.
         // Declared AFTER the permit, so it drops FIRST (release-inner-first, spine §4.2).
         let _lock = self.storage.acquire_write_lock().await?;
+        // D57: the gate and the actor come from ONE snapshot taken under both guards.
+        let runtime = self.gated_runtime()?;
         let sync_opts = unblock_sync::ImportOptions {
             dry_run: opts.dry_run,
             allow_external: false,
@@ -83,7 +92,7 @@ impl Session {
             &*self.storage,
             path,
             &self.unblock_dir,
-            self.actor(),
+            &runtime.actor,
             &sync_opts,
         )
         .await?;
@@ -97,6 +106,7 @@ impl Session {
     #[cfg(not(feature = "sync"))]
     #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the sync body awaits.
     pub async fn import_jsonl(&self, _path: &Path, _opts: ImportOptions) -> Result<ImportReport> {
+        self.gated_runtime()?;
         Err(EngineError::FeatureNotWired { feature: "sync" })
     }
 
@@ -119,8 +129,11 @@ impl Session {
         // D31: also hold the cross-process `.write.lock` across the whole bd import (declared after
         // the permit so it drops first — release-inner-first, spine §4.2).
         let _lock = self.storage.acquire_write_lock().await?;
+        // D57: the gate and the actor come from ONE snapshot taken under both guards.
+        let runtime = self.gated_runtime()?;
         let report =
-            unblock_sync::import_bd(&*self.storage, path, &self.unblock_dir, self.actor()).await?;
+            unblock_sync::import_bd(&*self.storage, path, &self.unblock_dir, &runtime.actor)
+                .await?;
         Ok(report)
     }
 
@@ -131,6 +144,7 @@ impl Session {
     #[cfg(not(feature = "sync"))]
     #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the sync body awaits.
     pub async fn import_bd(&self, _path: &Path) -> Result<ImportReport> {
+        self.gated_runtime()?;
         Err(EngineError::FeatureNotWired { feature: "sync" })
     }
 }

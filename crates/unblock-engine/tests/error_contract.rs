@@ -1,13 +1,39 @@
 //! The `EngineError → ErrorCode → exit_code` golden contract (FR-11), insta-pinned.
 //!
-//! Mirrors the spine §2.3 discipline at L5: every constructible `EngineError` shape (the three
-//! transparent sources + the engine-local variants, incl. `FeatureNotWired`) maps to a stable
-//! `(code, exit_code)`; a change forces a deliberate re-bless.
+//! Mirrors the spine §2.3 discipline at L5: every constructible `EngineError` shape (the transparent
+//! sources — `Config` since D57 — + the engine-local variants, incl. `FeatureNotWired`) maps to a
+//! stable `(code, exit_code)`; a change forces a deliberate re-bless.
 
 use unblock_engine::EngineError;
 use unblock_error::{CodedError, ErrorCode, FieldError, ModelError};
 use unblock_policy::PolicyError;
 use unblock_storage::StorageError;
+
+/// D57: the `config` action's `UnknownKey` refusal through the transparent `Config` source.
+fn config_case_unknown_key() -> (&'static str, EngineError) {
+    (
+        "Config::UnknownKey",
+        unblock_config::ConfigError::UnknownKey { key: "nope".into() }.into(),
+    )
+}
+
+/// D57 clause (2a): the fail-closed gate's `FaultyDbConfig` through the transparent `Config` source.
+fn config_case_faulty_db_config() -> (&'static str, EngineError) {
+    (
+        "Config::FaultyDbConfig",
+        unblock_config::ConfigError::FaultyDbConfig {
+            faults: vec![unblock_model::DbConfigFault {
+                key: "db_filename".into(),
+                value: "x.db".into(),
+                fault: unblock_model::ConfigFault {
+                    kind: unblock_model::ConfigFaultKind::StartupKey,
+                    reason: "startup key".into(),
+                },
+            }],
+        }
+        .into(),
+    )
+}
 
 /// Build the full `(variant-label -> (code, exit_code, retryable))` table.
 fn contract_rows() -> Vec<(&'static str, String, u8, bool)> {
@@ -64,6 +90,9 @@ fn contract_rows() -> Vec<(&'static str, String, u8, bool)> {
             "Model::InvalidPriority",
             ModelError::InvalidPriority { value: "9".into() }.into(),
         ),
+        // --- transparent config source (D57): the action's refusals and the fail-closed gate ---
+        config_case_unknown_key(),
+        config_case_faulty_db_config(),
         // --- engine-local variants ---
         ("WorkspaceNotOpen", EngineError::WorkspaceNotOpen),
         ("ShutdownInProgress", EngineError::ShutdownInProgress),
