@@ -163,9 +163,7 @@ fn init_csv_reports_the_scaffold() {
 }
 
 /// `--actor` reaches `init`'s open, so an actor over the length bound fails there with exit 7.
-/// `config.toml` is already written. Since D57 the open is TWO-PHASE (PRD §4 D57 clause (6)): the
-/// runtime keys, the actor among them, resolve only after the database is opened and migrated and
-/// its `config` rows are read, so `unblock.db` exists too. A plain re-run then meets the clobber
+/// `config.toml` is already written and `unblock.db` is not. A plain re-run then meets the clobber
 /// guard, and `init --force` without the bad actor recovers.
 #[test]
 fn init_rejects_an_invalid_actor_after_writing_config_and_force_recovers() {
@@ -197,8 +195,8 @@ fn init_rejects_an_invalid_actor_after_writing_config_and_force_recovers() {
         "config.toml is written before the open"
     );
     assert!(
-        unblock_dir.join("unblock.db").exists(),
-        "the two-phase open creates and migrates the database before it resolves the actor (D57)"
+        !unblock_dir.join("unblock.db").exists(),
+        "the open fails before it creates the database"
     );
     assert!(
         !stderr.lines().any(|line| line.starts_with("hint: ")),
