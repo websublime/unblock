@@ -178,6 +178,8 @@ N1@*Cargo.toml@$DIRECTORIES_RE@NEGATIVE: no manifest in the tree names the direc
 # Q151..Q166 are the SIBLING ROWS the D57 spec commit retargeted to this script: d53's Q53, d54's Q67
 #      and Q72, d55's Q78, Q80, Q81 and Q82, and d56's Q101, Q102 (reworded so it stops calling d56
 #      the newest) and Q103..Q109.
+# Q167 (Verify round 1) pins the run_storage_contract_suite CALL of the config-cell runner, so the
+#      four contract_config_ cells cannot be orphaned with their registrations intact.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@crates/unblock-model/src/results.rs@^    pub const fn is_blocking\(@pub const fn is_blocking\(self\) -> bool \{@ConfigFaultKind still declares the ONE blocking predicate, by value — file-scoped because dependency.rs declares an is_blocking(&self) a crate-wide row would match
@@ -346,6 +348,7 @@ Q163@scripts/checks/d56-organization-claims.sh@^Q106[^0-9]@d57-config-layers-cla
 Q164@scripts/checks/d56-organization-claims.sh@^Q107[^0-9]@d57-config-layers-claims@the D56 sibling's row pinning d55's Q80 follows the retarget
 Q165@scripts/checks/d56-organization-claims.sh@^Q108[^0-9]@d57-config-layers-claims@the D56 sibling's row pinning d55's Q81 follows the retarget
 Q166@scripts/checks/d56-organization-claims.sh@^Q109[^0-9]@d57-config-layers-claims@the D56 sibling's row pinning d55's Q82 follows the retarget
+Q167@crates/unblock-storage/src/testkit.rs@^    run_config_contract_cells\(@run_config_contract_cells\(&factory\)\.await;@run_storage_contract_suite still CALLS the config-cell runner, so every backend runs the four contract_config_ cells
 "
 
 blocked=0
@@ -452,7 +455,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # it counts moving somewhere another floor counts them — never because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 1 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 166 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 167 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the model types and the one blocking predicate, the three Storage config methods, schema step 3 with its columns, the sentinel's union and subject assertion, the SchemaGap carrier and the version constant, the config user/DB/reload entries with the three ConfigError variants and the two ConfigLayer arms, the four Session config methods with the snapshot cell and the Config source, the mcp arms, corpus cell and both description twins, the cli user tier and init pre-check, the hint_shape arm and the config_toml fuzz bin are in the tree, no manifest names directories, every contract_config_ and config_ cell and the six-layer golden are present with every contract cell registered, the tracker names ub-lp9.2, the PRD row and its notes, the spine, the crate plans, both roadmaps, README and the task carry D57, the re-pointed and retargeted sibling rows are in place, this gate is both specified and wired, the contract reads the live id, and the live D-range is current at every prose site and every sibling script's knob"
