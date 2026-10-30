@@ -6,8 +6,9 @@
 //!
 //! Maps `CommentToolInput{action}` to `Session::{add_comment, list_comments, update_comment,
 //! delete_comment}`:
-//! - `add` → `Session::add_comment(issue_id, body)`; the author is `self.session.actor()` — there
-//!   is no per-comment author on the wire (FORK-M1b).
+//! - `add` → `Session::add_comment(issue_id, body)`; the author is the actor of the session's
+//!   runtime snapshot taken INSIDE `add_comment` after it acquires the write guard (PRD §4 D57
+//!   clause (5)) — there is no per-comment author on the wire (FORK-M1b).
 //! - `list` → `Session::list_comments(issue_id)`, CD-2 object-wrapped as `{"comments":[…]}`.
 //! - `update` → `Session::update_comment(comment_id, body)`; provenance-preserving (D-D).
 //! - `delete` → `Session::delete_comment(comment_id)`; a SOFT-REDACT (D-E), never a hard delete:

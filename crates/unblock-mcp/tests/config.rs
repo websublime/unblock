@@ -107,7 +107,13 @@ async fn config_action_round_trips_every_op() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_field_rule_rejects_in_band_with_zero_writes() {
     let (session, spy) = session_recording().await;
-    let (client, server, _cancel) = connect(session).await;
+    spy.set_config("search_cap", "9")
+        .await
+        .expect("a row the rejections must leave byte-identical");
+    let table_before = spy.read_config().await.expect("read");
+    let snapshot_before = format!("{:?}", session.runtime());
+    let mutations_before = spy.mutation_count();
+    let (client, server, _cancel) = connect(Arc::clone(&session)).await;
 
     for (args, field) in [
         (json!({"action":"config","op":"get"}), "key"),
@@ -172,13 +178,51 @@ async fn config_field_rule_rejects_in_band_with_zero_writes() {
     .await;
     assert_eq!(payload["context"]["layer"], json!("db"));
 
-    assert_eq!(spy.mutation_count(), 0, "no rejected call wrote anything");
+    assert_eq!(
+        spy.mutation_count(),
+        mutations_before,
+        "no rejected call wrote anything"
+    );
+    assert_eq!(
+        spy.read_config().await.expect("read"),
+        table_before,
+        "D57 (i): the config table is byte-identical after every rejection"
+    );
+    assert_eq!(
+        format!("{:?}", session.runtime()),
+        snapshot_before,
+        "D57 (i): the live snapshot is unchanged after every rejection"
+    );
     let _ = client.cancel().await;
     let _ = server.cancel().await;
 }
 
+/// The discovery surface that never touches the `Session`: `unblock://capabilities`,
+/// `unblock://schema` and ALL THREE prompts, each rendered as JSON for comparison.
+async fn discovery_surface(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+) -> Vec<(String, Value)> {
+    let mut served = Vec::new();
+    for uri in ["unblock://capabilities", "unblock://schema"] {
+        let read = client
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await
+            .unwrap_or_else(|e| panic!("{uri} is served: {e:?}"));
+        served.push((uri.to_string(), serde_json::to_value(read).expect("json")));
+    }
+    for prompt in ["triage", "plan_next_work", "close_with_suggestions"] {
+        let got = client
+            .get_prompt(GetPromptRequestParams::new(prompt))
+            .await
+            .unwrap_or_else(|e| panic!("prompt {prompt} is served: {e:?}"));
+        served.push((prompt.to_string(), serde_json::to_value(got).expect("json")));
+    }
+    served
+}
+
 /// D57 (d)/(d2): the three Session-backed resources answer `-32603` with `data.code:
-/// CONFIG_ERROR` and the hint; `capabilities`, `schema` and the prompts stay served.
+/// CONFIG_ERROR` and the hint; `capabilities`, `schema` and every prompt stay served UNCHANGED —
+/// byte-identical to what an UNFAULTED session serves.
 async fn assert_resources_gated_and_discovery_served(
     client: &rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
     hint_call: &str,
@@ -207,18 +251,18 @@ async fn assert_resources_gated_and_discovery_served(
         );
     }
 
-    for uri in ["unblock://capabilities", "unblock://schema"] {
-        client
-            .read_resource(ReadResourceRequestParams::new(uri))
-            .await
-            .unwrap_or_else(|e| panic!("{uri} stays served under the gate: {e:?}"));
+    let gated = discovery_surface(client).await;
+    let (clean_session, _spy) = session_recording().await;
+    let (clean, clean_server, _cancel) = connect(clean_session).await;
+    let baseline = discovery_surface(&clean).await;
+    for ((name, under_gate), (_, unfaulted)) in gated.iter().zip(&baseline) {
+        assert_eq!(
+            under_gate, unfaulted,
+            "{name} is served UNCHANGED under the gate"
+        );
     }
-    for prompt in ["triage", "plan_next_work"] {
-        client
-            .get_prompt(GetPromptRequestParams::new(prompt))
-            .await
-            .unwrap_or_else(|e| panic!("prompt {prompt} stays served under the gate: {e:?}"));
-    }
+    let _ = clean.cancel().await;
+    let _ = clean_server.cancel().await;
 }
 
 /// D57 (d)/(d2) over MCP: with a blocking startup-key row, every non-`config` tool call answers
@@ -238,9 +282,16 @@ async fn config_fault_gate_over_tools_resources_and_prompts() {
         ("query", json!({"kind":"ready"})),
         ("query", json!({"kind":"labels"})),
         ("claim", json!({"id":"ub-x","assignee":"me"})),
+        (
+            "defer",
+            json!({"action":"defer","id":"ub-x","until":"2099-01-01T00:00:00Z"}),
+        ),
+        ("defer", json!({"action":"undefer","id":"ub-x"})),
         ("dep", json!({"action":"list","id":"ub-x"})),
         ("comment", json!({"action":"list","issue_id":"ub-x"})),
         ("diagnostics", json!({"kind":"stats"})),
+        ("sync", json!({"action":"export"})),
+        ("sync", json!({"action":"import","path":"issues.jsonl"})),
     ] {
         let (is_error, payload) = call_tool(&client, tool, args.clone()).await;
         assert!(is_error, "{tool} {args}: {payload}");
