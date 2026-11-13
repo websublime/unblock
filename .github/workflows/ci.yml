@@ -447,6 +447,16 @@ jobs:
       # — including `d56`'s two. Positive-only by design, save one negative row (no manifest names
       # `directories`). Specified in ci-cd-and-distribution.md §2.1 (the D57 sub-check).
       - run: scripts/checks/d57-config-layers-claims.sh
+      # D58 (`ub-lp9.3`) required landings: FR-16 full — the health levels defined by repair path,
+      # `doctor --repair` with its pre-open exclusive window and online `recover()`, the
+      # `.unblock/.recovery/` evidence, the lost-database refusal and `init`'s database-only mode. Minted in the SPEC commit, so
+      # it asserts the positive spec landings: the PRD row and its notes, the spine, the crate plans,
+      # both roadmaps, the task, the retargeted sibling rows, this gate's own wiring, the UNMOVED
+      # contract id, and the live D-range at every prose site and every SIBLING script's knob —
+      # including `d57`'s two; the implementation and test commits extend it with code and cell rows.
+      # Positive-only by design, save two negative rows (no storage edge in unblock-health, no VACUUM
+      # statement in production source). Specified in ci-cd-and-distribution.md §2.1 (the D58 sub-check).
+      - run: scripts/checks/d58-health-full-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.

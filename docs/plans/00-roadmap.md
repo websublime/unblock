@@ -541,7 +541,7 @@ shape (only additive `contract_version` bumps).
 | FR-18 | **Swarm coordination diagnostics:** `scheduler` (ranked, explainable `unblock.scheduler.v1`); `coordination status` (`unblock.coordination.v1`, read-only stale-claim diagnosis). Purely DB-state-derived (Agent Mail dropped, PRD §12) | policy, engine, mcp |
 | FR-19 | **Workflow gates:** policy-driven (`.unblock/policy.toml`) transition gates (ci_green / min_reviewers / security_sign_off) | policy, config, engine, mcp |
 | FR-13 (full) | DB config-table + user-config layers; full startup/runtime partitioning. **[D57]** Specified by PRD §4 D57 (`ub-lp9.2`, implementation-plan T4.2): six layers in ONE order, CLI > env > project > user (`$XDG_CONFIG_HOME/unblock/config.toml` else `~/.config/unblock/config.toml`, every OS) > DB `config` table (schema step 3, `CURRENT_SCHEMA_VERSION` `2` → `3`) > defaults; the user and DB layers carry the runtime keys `actor`, `output_format` and `search_cap` only (`jsonl_export` stays CLI/env/project-only and inert until `ub-p1h`) — a startup key in the user file is refused (`CONFIG_ERROR`), and a bad DB row fail-closes every command but the `config` action, which repairs it in-product (`config unset`); the DB layer's writer is the `issue` action `config` (`get`/`set`/`unset`/`list`) — no new tool, no CLI verb — with one contract bump `unblock.mcp.v1.11` → `unblock.mcp.v1.12`; a successful `config set`/`unset` reloads the live session's runtime keys | model, storage, config, engine, mcp, cli |
-| FR-16 (full) | Full Healthy/Drifted/Recoverable/Unsafe taxonomy redefined for a libsql-authoritative world; evidence under `.unblock/.recovery/` | health, engine, cli |
+| FR-16 (full) | Full Healthy/Drifted/Recoverable/Unsafe taxonomy redefined for a libsql-authoritative world; evidence under `.unblock/.recovery/`. **[D58]** Specified by PRD §4 D58 (`ub-lp9.3`, implementation-plan T4.3): the levels are defined by repair path (`Drifted` = derived-state drift inside the database — no JSONL export needed, `ub-p1h` is not a prerequisite; `Recoverable` = an in-product repair exists; `Unsafe` = none does); plain `doctor` lists the planned repairs and exits 0 on `Healthy`/`Drifted`, 2 on `Recoverable`/`Unsafe`, from ONE `integrity_check`; `doctor --repair` runs file and sidecar repairs in a pre-open exclusive window that refuses unless it proves no other connection holds the database, and `REINDEX`, child-counter, `metadata` and export repairs online through `Session::recover()`, after evidence under `.unblock/.recovery/`; plain `doctor` opens the database read-only without migrating and writes nothing; a LOST database (absent or empty while the D31 `.write.lock` marker exists) is refused (`DATABASE_NOT_FOUND`) instead of recreated — its recovery is plain `unblock init`, whose database-only mode creates only the database under the configured `db_filename` (refusing while an orphan `-wal`/`-shm`/`-journal` remains) — while a fresh clone without the marker is created as before. CLI only, local mode only, contract unchanged (`unblock.mcp.v1.12`). | health, engine, cli, storage, config, sync |
 | FR-21 | Saved queries (named reusable `list` filter sets) | policy, storage, engine, mcp |
 | FR-22 | Audit / flight recorder: append-only `interactions.jsonl`, Tier-1 attribution (capture-only) | engine, sync, mcp |
 | FR-23 | Shell completions (bash/zsh/fish/powershell/elvish) | cli |
@@ -555,7 +555,10 @@ ninth (RK-3, spine §6.6) — scheduler, coordination, gates, saved-queries (pla
 rollups are the `issue` actions `relabel`/`close_eligible` and the `query` kinds `labels`/`epics`; comments
 already shipped in v1 as the 8th tool (D37). `unblock-render` needs no FR-6 work (D56 clause (8)). **[D57]** The FR-13
 DB config layer's writer is the `issue` action `config`; `unblock-storage` takes the schema-step-3 `config` table and
-three trait methods, and `unblock-sync` only forwards them in its three test doubles.
+three trait methods, and `unblock-sync` only forwards them in its three test doubles. **[D58]** FR-16 full adds NO MCP surface
+(`doctor --repair` is a CLI flag, D3): `unblock-storage` takes two trait methods (`health_facts`, `repair`) and four
+local-file primitives, `unblock-health` becomes a pure classifier over engine-gathered facts, `unblock-config` refuses a
+LOST database and gives `no_db` its reader, `unblock-cli`'s `init` gains a database-only mode, and `unblock-sync`'s scanner gets its health consumer.
 
 ---
 
@@ -995,7 +998,7 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 | Layered config (FR-13) | ● subset | | ● full | | ◐ remote keys + config split | | | |
 | Workspace bootstrap (FR-14) | ● | | ◐ `init --agents` opt-in + next-step hint | | ◐ multi-ws + join-remote onboarding | | | |
 | Pure-DB diagnostics (FR-15) | ● | ◐ D45 `dangling` action | | ◐ milestone filters/counters | | | | |
-| Workspace health (FR-16) | ● lite | ◐ D45 dangling findings folded into doctor-lite | ● full | | ◐ remote-mode health | | ◐ scale | |
+| Workspace health (FR-16) | ● lite | ◐ D45 dangling findings folded into doctor-lite | ● full (D58) | | ◐ remote-mode health | | ◐ scale | |
 | Cooperative shutdown (FR-17) | ● | | | | | | | |
 | Swarm coordination / scheduler (FR-18) | | | ● diagnostics | | ◐ actor attribution | | ◐ active + v2 | |
 | Workflow gates (FR-19) | | | ● | ◐ milestone-close gate (candidate) | | | | |

@@ -710,6 +710,89 @@
   crate — no `directories`) and every `scripts/checks/*.sh`, on EVERY commit of the branch, the spec commit included.
   Both gates >=3 agents; Claude opens the PR, a human merges.)*
 
+- **T4.3 — FR-16 full: the four health levels defined by repair path, `unblock doctor --repair`, the `Session::recover()`
+  body and the `.unblock/.recovery/` evidence. Implements D58 (v1.1, CLI only, LOCAL mode only; contract UNCHANGED at
+  `unblock.mcp.v1.12`, no schema step, no `ErrorCode`).** The design is normative in the **D58 PRD §4 row**, FR-16's
+  `[D58]` notes and AC, the D14, D27, D29, D31 and D46 `[D58]` notes, PRD §7, §8.1, §8.2, §12.4 and §12.5, spine §2.3's
+  `[D58]` note, spine §3.1 "Health facts and repair requests", spine §3.2's workspace-health block and its CF-E
+  withdrawal, spine §3.3's pre-open primitives bullet, spine §4's `open_with_cli`/`StorageOpenMode` block, spine §4.1's
+  workspace-health block with the `doctor`/`recover` declarations, spine §5b "doctor — FR-16 full", the REWRITTEN
+  unblock-health plan, the engine, cli, storage, config and sync crate plans, `docs/plans/README.md`'s CF-E note, and
+  ci-cd §2's `exclusivity-macos` row and §2.1's D58 paragraph — **read those before implementing; this bullet is a
+  checklist of touched sites and never the spec.** Tracked as `ub-lp9.3`. OUT of scope: `ub-2vp` (the shipped v1
+  header probe that reads the database file inside a live session — a v1.0.x candidate, measured first; D58 only
+  requires that no NEW probe or evidence copy repeats it), `ub-p1h` (not a prerequisite — `Drifted` is
+  database-internal), dangling-edge repair (D45 stands), `VACUUM`, salvage, MCP exposure, REMOTE-mode health (the v1.3
+  lock). `unblock init`'s DATABASE-ONLY mode (D58 clause (7), Miguel's ruling 2026-11-13) is IN scope. ONE PR. **DAG:** depends on T3.3 (the lite seam), T3.4 (the NFR-5
+  failure-replay fixtures), D46's ladder and T4.2 (the D57 fail-closed gate `recover()` stays behind, and the
+  `unblock.mcp.v1.12` baseline that must NOT move); blocks nothing inside v1.1. The SPEC commit first (D58, the
+  D-range bump `D1..D57` → `D1..D58`, ci-cd §2's `exclusivity-macos` row and §2.1(a) with its D58 paragraph,
+  `docs/PROCESS.md` §3's list entry and NEWEST pointer, this repository's `.gitignore` line ignoring
+  `.unblock/.recovery/`, the NEW `scripts/checks/d58-health-full-claims.sh` wired into the `doc-lint` job — minted HERE
+  by Miguel's ruling, pinning the spec landings — with `d53` `Q53`, `d54` `Q67`/`Q72`, `d55` `Q78`/`Q80`/`Q81`/`Q82`,
+  `d56` `Q101`/`Q103`–`Q109` and `d57` `Q149`/`Q151`–`Q166` retargeted and `d57` `Q150` reworded, this task), then the
+  IMPLEMENTATION commit (code, doc comments, README's `doctor` and `init` rows, its advice that anyone committing `.unblock/`
+  ignores `.unblock/.write.lock`, `*.db`, `*.db-wal`, `*.db-shm` and `.unblock/.recovery/`, and its recovery path through
+  `unblock init`'s database-only mode, the
+  commented CF-E declarations deleted from `crates/unblock-storage/src/trait_def.rs`, `help_doctor` re-blessed, and the
+  `d58` script EXTENDED with the mechanism rows ci-cd §2.1's D58 paragraph lists and its THIRD negative row — no
+  `integrity_check(` call in `crates/unblock-cli/src/commands/doctor.rs` — its floors raised in the same commit), then
+  the TEST commit (the new cells and goldens, the `storage-testkit` job's added `--test exclusive_window` step, the NEW
+  `exclusivity-macos` job (runner `macos-15`, SHA-pinned `actions/checkout`, `dtolnay/rust-toolchain` and
+  `Swatinem/rust-cache`, only the filtered exclusivity cells) — made a REQUIRED check on `main` by Miguel immediately AFTER
+  the T4.3 PR merges (the ci-cd §2.3.3 flip precedent) — and the `d58` cell rows), then the tracker commit (Track step: the
+  run-report, the `.unblock/issues.jsonl` re-export and the `ub-lp9.3` comment thread). Every commit of the branch
+  passes the workspace suite in CI (locally only targeted tests, `docs/PROCESS.md` §4). Scope: (1) `unblock-health` —
+  the REWRITE its plan describes: `facts.rs`, `anomaly.rs`, `export.rs` (the one `unblock-sync` scanner call),
+  `integrity.rs`, `classify.rs`, `recovery.rs` (run-id with an attempt counter), `audit.rs`,
+  `HealthError::RecoveryEvidenceWrite`; DELETE `file_state.rs`, `doctor.rs`, `jsonl_has_conflict_markers`,
+  `is_orphaned_lock_file` and their tests/snapshots; `sha2`/`serde_json`/`tracing` deps; (2) `unblock-storage` —
+  spine §3.1 types re-exported at the crate root, `health_facts`/`repair` (with the in-guard migrate step) on the trait, in
+  libsql and in ALL TWELVE `impl Storage` blocks (`RecordingStorage`'s `repair` calls `record()`), the bounded drift
+  query, `StorageError::{RecoveryPathOutsideWorkspace, RecoveryIo, ReadOnlyStore}`, `src/libsql/health.rs` with
+  `lost_database`, `live_connections_to` (a per-file registry `CloseOnceConnection::connect(db, path)` joins and
+  leaves after its close guard; canonical path on Windows), `probe_write_lock` (no `create`) and `exclusive_window`
+  (private-field `ExclusiveRequest` with the testkit-only `with_after_raw_copies` setter, raw-code `SQLITE_NOTADB`,
+  the Windows size/`last_write_time`/`creation_time` + re-hash evidence check), `StorageError::ReadOnlyRollback`, the in-repair migrate on the held
+  write connection,
+  `LibsqlStorage::open_local_read_only`, the testkit `health_facts`/`integrity_check` call counters on
+  `StorageInstrument`, the `contract_health_facts_…`/`contract_repair_…` cells registered in
+  `run_storage_contract_suite`, and `tests/exclusive_window.rs`; (3) `unblock-config` — `ConfigError::DatabaseMissing`
+  (→ `DatabaseNotFound`) checked after config parsing on every storage-bearing open, `CliOverrides::{storage_open,
+  create_db}`, `StorageOpenMode`, `open_with_cli`/`OpenedContext` reading `no_db`, the non-migrating modes' stamp-gated
+  `config` read, `ConfigError::is_read_only_rollback()` with its unit cell, the error golden; (4) `unblock-engine` — `health = ["dep:unblock-health", "sync"]`, under that
+  feature `src/preopen.rs` (`gather_preopen`, `classify_preopen`, `repair_preopen`, `PreOpenRepairOutcome`),
+  `EngineError::PreOpenWithLiveConnection`, `HealthReport` and the engine-root re-exports, the new `doctor` signature,
+  the `recover()` body in the D58 order, `tests/health.rs`, the replaced `recover_returns_health_seam_and_writes_nothing`
+  cell, `tests/dangling.rs:324` moved to the new signature, the `scale.rs` seed (hierarchical children with
+  `child_counters`, duplicated `metadata`) and timing line, and every other `doctor()` caller (`tests/lifecycle.rs`,
+  `scale.rs`, `config.rs`, `failure_replay.rs`) moved to `doctor(&gather_preopen(..)?)` before any open; (5)
+  `unblock-cli` — `DoctorArgs { repair }`, the phased `commands/doctor.rs` (resolve-only → `ReadOnly` or `NoMigrate`
+  opens, the session-less report for a present `-journal` or a `SQLITE_READONLY_ROLLBACK` open, the session and
+  `WorkspaceContext` dropped before the final pass), the deleted auxiliary `integrity_check()` and
+  `doctor_exit(&[String])`, `init`'s DATABASE-ONLY mode setting `create_db` (the spine §5b ten-step order, `CliError::OrphanSidecars` on
+  `ErrorCode::DatabaseError`, `InitReport.mode` before `agents_path` with the config's `id_prefix`, the `Init` doc
+  comment, `help_init` and the `init` report snapshots re-blessed), the SHIPPED cells that go red — the
+  `tests/migrate_doctor.rs:140` fixture (and its `migrate_report_never_migrated` snapshot) and
+  `tests/cli_engine_parity.rs:136`, which delete the database but must now delete `.write.lock` too (else the LOST
+  state refuses), and `tests/init_agents.rs:1205`, whose refusal now comes from the sibling guard naming `_unblock/` — `tests/migrate_doctor.rs` (the conflict-marker cell flips
+  from exit 0 to 2; the lost, fresh-clone, unreadable and malformed-config cells), `cli_engine_parity.rs`, the
+  `lifecycle_doctor` and `help_doctor` snapshots; (6) `unblock-sync`, `unblock-mcp` and the engine — their test doubles
+  forward `health_facts`/`repair` (tests only; NO mcp production change); no `unblock-fuzz` change (the health fuzz
+  target the v1 health plan named was never built; `classify_integrity_row` is covered by a proptest). *(AC: PRD §4 D58
+  clause (12)
+  (a) CLASS TABLE, (b) INTEGRITY ROWS, (c) DRIFT, (d) EXIT AND ONE SCAN, (e) REPORT ORDER, (f) EXCLUSIVITY, MEASURED,
+  (g) PRE-OPEN REPAIRS, (h) LOST, FRESH, UNREADABLE AND NOT-SQLITE, (i) EVIDENCE, (j) EXPORT, (k) RECOVER, (l) STORAGE
+  CONTRACT, (m) PURITY, (n) NO SECOND DESCRIPTOR, (o) SCALE, (p) CONTRACT UNMOVED, each by at least one named cell; plus
+  (q) GATE — the script is executable, wired, carries the live range, pins every older sibling's knobs with `d57`'s two
+  included and none of its own, and names every row ci-cd §2.1's D58 paragraph lists, and the (f) cells run in both
+  `storage-testkit` (Linux) and `exclusivity-macos`; and (r) PROBE — `cargo fmt --check`, clippy pedantic,
+  `cargo test --workspace` (CI), `cargo insta test --check`, `cargo xtask doc-lint`, `cargo xtask check-layering`,
+  `cargo xtask no-network`, `cargo xtask knowledge-lint`, `cargo deny check` and every `scripts/checks/*.sh`, on EVERY
+  commit of the branch, the spec commit included. If criterion (f) measures that the exclusive locking mode does NOT
+  refuse while another connection is open, implementation STOPS and the decision returns to Miguel. Both gates >=3
+  agents; Claude opens the PR, a human merges.)*
+
 ## 6. MCP surface — concrete v1 taxonomy (closes PRD §12.2)
 
 Consolidated to keep the client tool list small (target **≤ 8 tools**); read-heavy state is exposed as resources.
@@ -757,4 +840,4 @@ M2 → {T3.1 cli, T3.2 shutdown, T3.3 health-lite, T3.4 reliability, T3.5 perf} 
 
 ## 9. Definition of done (v1)
 
-All M0–M3 exit gates green; every v1-tier FR meets its AC (PRD §5); NFR ship-gates (NFR-1/2/3/4/5/6/9/10/11/12/13/14/15/16/17/18) pass; the dogfood gate met (unblock manages its own issues, imported from `bd` via FR-26). v1.1 backlog: FR-6 (remainder — T4.1, D56), FR-13(full — T4.2, D57), FR-16(full), FR-18, FR-19, FR-21, FR-22, FR-23, TOON. (FR-25 self-update moved to v1 via dist/axoupdater, D17.)
+All M0–M3 exit gates green; every v1-tier FR meets its AC (PRD §5); NFR ship-gates (NFR-1/2/3/4/5/6/9/10/11/12/13/14/15/16/17/18) pass; the dogfood gate met (unblock manages its own issues, imported from `bd` via FR-26). v1.1 backlog: FR-6 (remainder — T4.1, D56), FR-13(full — T4.2, D57), FR-16(full — T4.3, D58), FR-18, FR-19, FR-21, FR-22, FR-23, TOON. (FR-25 self-update moved to v1 via dist/axoupdater, D17.)
