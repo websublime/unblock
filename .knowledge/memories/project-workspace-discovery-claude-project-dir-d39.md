@@ -12,12 +12,14 @@ absolute `--dir` path in a committed config (every dev rewrites it → git clobb
   (Claude Desktop, `~/Library/Application Support/Claude/...`, per-user, never committed). A
   PROJECT-SCOPED committed config (`.mcp.json` at repo root, `.vscode/mcp.json`, `.cursor/mcp.json`)
   must NOT hardcode an absolute path. The repo's own committed `mcp.json` already passes NO `--dir`
-  (relies on walk-up) — proving the README's "recommended" advice wrong.
+  (relies on walk-up; since ub-tgw it execs a wrapper that computes `--dir` at runtime — see the dogfood memory) — proving the README's "recommended" advice wrong.
 - **MCP `roots` capability is DEPRECATED** (SEP-2577, Final, protocol 2026-07-28) — new impls SHOULD NOT
   adopt. Rejected as the mechanism (an initial instinct, wrong).
 - **The real seam: `CLAUDE_PROJECT_DIR`.** Claude Code injects it into the spawned stdio child's ENV
-  = project root. `unblock` currently discards it. Trap: a literal `${CLAUDE_PROJECT_DIR}` in `.mcp.json`
-  args does NOT expand (it's in the child env, not Claude Code's) → `unblock` must read it from its OWN
+  = project root. `unblock` currently discards it. Trap: Claude Code DOES expand `${VAR}` / `${VAR:-default}`
+  in `.mcp.json` — but from its OWN environment, where `CLAUDE_PROJECT_DIR` is normally absent (only the spawned
+  child's env carries it), so the token cannot be relied on to yield the project root (a user export or a
+  `claude` launched from another shell makes it expand to that value) → `unblock` must read it from its OWN
   process env at startup. VS Code has `${workspaceFolder}`+`cwd` field; Cursor `${workspaceFolder}`.
 - **Integrity bug: walk-up is UNGUARDED to `/`** (`crates/unblock-config/src/discovery.rs:129-156`, no
   git-root/$HOME/depth stop). Claude Code desktop app spawns child with `cwd=$HOME`; a `$HOME/.unblock`
