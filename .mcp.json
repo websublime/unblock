@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "unblock": {
-      "command": "cargo",
-      "args": ["run", "--bin", "unblock", "mcp"]
+      "command": "sh",
+      "args": ["-c", "root=$(cd \"$(git rev-parse --path-format=absolute --git-common-dir)/..\" && pwd) && exec \"$root/target/debug/unblock\" --dir \"$root/.unblock\" mcp"]
     },
     "codebase-memory": {
       "command": "codebase-memory-mcp",

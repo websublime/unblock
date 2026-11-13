@@ -145,10 +145,10 @@ unblock's product surface is MCP, so the goal is to get an MCP client spawning t
    }
    ```
 
-   Do **not** write `"args": ["mcp", "--dir", "${CLAUDE_PROJECT_DIR}"]`: the `${…}` form is **not**
-   expanded inside `.mcp.json` (the variable lives in the spawned child's env, not a token Claude Code
-   substitutes into `args`), so it would reach `unblock` verbatim and fail. Omitting `--dir` is the
-   correct, committable form.
+   Do **not** write `"args": ["mcp", "--dir", "${CLAUDE_PROJECT_DIR}"]`: Claude Code expands `${VAR}` /
+   `${VAR:-default}` in `.mcp.json` from its **own** environment, where `CLAUDE_PROJECT_DIR` is normally absent
+   (it is only injected into the spawned child's env), so the token cannot be relied on to yield the project root.
+   Omitting `--dir` is the correct, committable form: `unblock` reads `CLAUDE_PROJECT_DIR` from its own env.
 
    VS Code — `.vscode/mcp.json`, pinning the working directory to the workspace folder:
 

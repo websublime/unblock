@@ -83,7 +83,8 @@ tool. **Never simplify the solution to make progress; if you reach that point, s
   "worktree"`) when writers run in parallel, or via a **single implementer agent** when the artifact must stay
   coherent (e.g. one scaffold); it returns the diff + a short summary. The orchestrator reviews that diff and runs
   the Verify gate — it does **not** hand-write the artifact. **Never run file-mutating agents in the shared working
-  tree** (they can switch branches or clobber state); isolate them.
+  tree** (they can switch branches or clobber state); isolate them. A team builds in its worktree's own `target/` —
+  never point a worktree build at the main checkout's target dir (that binary is the tracker, §6).
 - **Local machine load (MANDATORY — no exceptions, binds the orchestrator and every agent).** Unbounded cargo
   runs freeze Miguel's machine. Every local cargo invocation runs **capped at 4 cores** (enforced machine-wide by
   `~/.cargo/config.toml`: `[build] jobs = 4`, `[env] RUST_TEST_THREADS = "4"`): `CARGO_BUILD_JOBS=4`
@@ -151,6 +152,10 @@ outcome, not a process violation. The Understand comment on the task's issue (§
   updated to match the spine, but the drift may reveal a *spine* bug. **Never silently overwrite a plan or the spine.**
 
 ## 6. Tracking, commits & PRs
+- **Tracker binary is prebuilt — build first.** `.mcp.json` execs the main checkout's prebuilt
+  `target/debug/unblock` (never `cargo run`). Build it with `cargo build -j 4 --bin unblock` in the main checkout,
+  alone, before a session and after pulling or switching branches there; a rebuild applies at the next server start
+  (`/mcp` → reconnect). Mechanism and symptoms: `.knowledge/memories/project-dogfood-unblock-is-the-tracker.md`.
 - **unblock (MCP) is the durable, cross-session system of record** for tasks — configured in `.mcp.json` + `AGENTS.md`;
   in a fresh session use the native `mcp__unblock__*` tools and read `unblock://capabilities` / `unblock://schema`
   for the surface. Its **git-backed record is `.unblock/issues.jsonl`** (the D5 committed JSONL export; the local
