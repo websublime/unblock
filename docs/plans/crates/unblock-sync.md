@@ -49,7 +49,10 @@ pub async fn import_bd(
     storage: &dyn Storage, path: &Path, confine_root: &Path, actor: &str,
 ) -> Result<ImportReport, SyncError>;   // FR-26/D16; bd-export jsonl already produced upstream
 
-// ---- preflight + scanning primitives (also used by unblock-health lite + fuzz) ----
+// ---- preflight + scanning primitives (also used by unblock-health + fuzz) ----
+// [D58] (v1.1) `scan_conflict_markers` is the ONE conflict-marker scanner: unblock-health's `scan_export` calls it on
+//   the export path and returns `ExportFacts` (health's own `jsonl_has_conflict_markers` is deleted); its
+//   I/O, file-size and line-length guard errors become the `jsonl_unscannable` class. No signature change here.
 pub fn validate_sync_path(path: &Path, confine_root: &Path, allow_external: bool) -> Result<PathBuf, SyncError>; // returns canonicalized confined path
 pub fn scan_conflict_markers(path: &Path) -> Result<Vec<ConflictMarker>, SyncError>;
 pub fn ensure_no_conflict_markers(path: &Path) -> Result<(), SyncError>; // -> ErrorCode::ConflictMarkers

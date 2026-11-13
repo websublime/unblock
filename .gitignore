@@ -11,6 +11,8 @@ target/
 *.db-shm
 # Runtime cross-process advisory write lock (D31) — crash-released, never committed
 .unblock/.write.lock
+# `doctor --repair` evidence (D58) — raw database copies, snapshots and conflicted exports; never committed
+.unblock/.recovery/
 
 # Local environment
 .env
