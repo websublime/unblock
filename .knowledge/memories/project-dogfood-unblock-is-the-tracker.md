@@ -19,16 +19,27 @@ merge, reconcile by hand until the v1.2 shared remote.
 - **Native (fresh session):** the project MCP config MUST be **`.mcp.json`** (WITH the leading dot — Claude
   Code silently IGNORES a no-dot `mcp.json`; this was the reason tools didn't load, fixed 2026-07-20 by
   renaming `mcp.json`→`.mcp.json`, commit `21d40db`, confirmed via claude-code-guide + code.claude.com/docs/mcp).
-  It registers server key **`unblock`** → tools `mcp__unblock__*` (via `cargo run --bin unblock mcp`, which
-  compiles the LATEST source). **Fresh-session flow:** startup reads `.mcp.json` → a one-time APPROVAL prompt
-  (accept, or `/mcp` → approve) → first tool call COMPILES (~30s) → tools live. `AGENTS.md` (managed block from
+  It registers server key **`unblock`** → tools `mcp__unblock__*` via a `sh -c` dev wrapper (no `cargo run`,
+  whose cold compile overran the client's startup timeout): it resolves the MAIN checkout from the git common dir
+  (so it works from any subdirectory or worktree), then execs that checkout's PREBUILT `target/debug/unblock` with
+  `--dir` set to the main checkout's `.unblock` — every session binds the main tracker DB. It has no `${` token
+  because Claude Code expands those from its own env. git is used only by this wrapper, never by the product.
+  **Fresh-session flow:** `cargo build -j 4 --bin unblock` in the main checkout → startup reads `.mcp.json` → a
+  one-time APPROVAL prompt (accept, or `/mcp` → approve) → server starts instantly → tools live. A rebuild applies
+  at the next server start (`/mcp` → reconnect). Missing binary: Claude Code shows "Failed to connect —
+  CONNECTION_CLOSED"; run by hand, macOS `/bin/sh` exits 126 "cannot execute: No such file or directory"
+  (dash/Linux: 127 "not found"). Outside a git repo the error names `//target/debug/unblock`; git's `fatal:` line
+  above it is the real cause. Inbound reference: `docs/PROCESS.md` §6 points here. Stale binary: compare the contract
+  id in the handshake instructions (or the diagnostics `version` kind: `{"kind":"version"}` returns
+  `mcp_contract_version`) with `AGENTS.md` — this catches contract changes only; the server version string does
+  not change per commit. `AGENTS.md` (managed block from
   `unblock agents`) carries the wiring + the 8-tool/actions capability table. NB: `.vscode/mcp.json` /
   `.cursor/mcp.json` are those editors' OWN (different) config files — correct as-is, not the Claude Code one.
 - **Fallback (session WITHOUT native tools, like the one that set this up):** drive `target/debug/unblock
   mcp` via a **line-delimited JSON-RPC-over-stdio** harness (scratchpad `ub_*.py`): initialize →
   notifications/initialized → tools/call; close stdin → server exits 0. **First rebuild** the binary
   (`cargo build --bin unblock`) — the prebuilt `target/debug/unblock` can be a STALE rc (reported `rc.3`
-  when main was `1.0.0`); `cargo run`/a rebuild gives the real version.
+  when main was `1.0.0`); a rebuild gives the real version.
 
 **Fresh workspace recipe (what to do — an earlier attempt got it wrong):** `cargo build --bin unblock` (→ v1.0.0)
 → `rm -rf .unblock/` (clean wipe, NOT just the .db) → `unblock init --prefix ub` (config + migrated v1 DB)
