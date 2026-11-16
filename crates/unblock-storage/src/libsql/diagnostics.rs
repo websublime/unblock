@@ -9,6 +9,7 @@ use libsql::{Connection, Value};
 use unblock_model::{GraphEdge, Issue};
 
 use crate::error::{StorageError, map_libsql_err};
+use crate::health_types::{ChildCounterDrift, DbHealthFacts, DuplicateKey};
 
 use super::crud::get_issue;
 use super::deps::parse_dep_type;
@@ -31,6 +32,170 @@ pub(super) async fn integrity_check(conn: &Connection) -> Result<Vec<String>, St
         }
     }
     Ok(problems)
+}
+
+/// Gather the D58 health facts on `conn` — a pure read (spine §3.2 `Storage::health_facts`).
+///
+/// Every read runs in ONE `BEGIN DEFERRED` read transaction, so a writer committing between two
+/// reads cannot make them disagree (a spurious `child_counter_drift` under WAL). `conn` must be
+/// opened for this call alone: the transaction is connection state, and on an error it stays open
+/// until `conn` closes.
+///
+/// Runs `PRAGMA integrity_check` once, then reads the stamp, the index names, the child-counter
+/// drift and the duplicated `metadata` keys. A table an old stamp lacks contributes no rows.
+pub(super) async fn health_facts(conn: &Connection) -> Result<DbHealthFacts, StorageError> {
+    health_facts_observed(conn, async || {}).await
+}
+
+/// [`health_facts`], running `after_counters` between the `child_counters` read and the
+/// per-parent child reads, the gap a concurrent writer could otherwise land in.
+async fn health_facts_observed(
+    conn: &Connection,
+    after_counters: impl AsyncFnOnce(),
+) -> Result<DbHealthFacts, StorageError> {
+    conn.execute("BEGIN DEFERRED", ())
+        .await
+        .map_err(map_libsql_err)?;
+    let facts = gather_health_facts(conn, after_counters).await?;
+    conn.execute("COMMIT", ()).await.map_err(map_libsql_err)?;
+    Ok(facts)
+}
+
+/// The reads of [`health_facts`], inside its transaction.
+async fn gather_health_facts(
+    conn: &Connection,
+    after_counters: impl AsyncFnOnce(),
+) -> Result<DbHealthFacts, StorageError> {
+    let integrity_rows = integrity_check(conn).await?;
+    let schema_version = i64::from(super::migrations::current_user_version(conn).await?);
+    let index_names = text_column(
+        conn,
+        "SELECT name FROM sqlite_schema WHERE type = 'index' ORDER BY name",
+    )
+    .await?;
+    let tables = text_column(
+        conn,
+        "SELECT name FROM sqlite_schema WHERE type = 'table' \
+         AND name IN ('child_counters', 'issues', 'metadata')",
+    )
+    .await?;
+    let has = |name: &str| tables.iter().any(|t| t == name);
+    let child_counter_drift = if has("child_counters") && has("issues") {
+        child_counter_drift(conn, after_counters).await?
+    } else {
+        Vec::new()
+    };
+    let duplicate_metadata_keys = if has("metadata") {
+        duplicate_metadata_keys(conn).await?
+    } else {
+        Vec::new()
+    };
+    Ok(DbHealthFacts {
+        integrity_rows,
+        schema_version,
+        index_names,
+        child_counter_drift,
+        duplicate_metadata_keys,
+    })
+}
+
+/// The first column of every row `sql` returns, as text, in the query's order.
+async fn text_column(conn: &Connection, sql: &str) -> Result<Vec<String>, StorageError> {
+    let mut rows = conn.query(sql, ()).await.map_err(map_libsql_err)?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+        if let Value::Text(text) = row.get_value(0).map_err(map_libsql_err)? {
+            out.push(text);
+        }
+    }
+    Ok(out)
+}
+
+/// Every `child_counters` row below its parent's greatest direct child, ordered by `parent_id`.
+///
+/// BOUNDED: per counter row the children come from the primary-key range `id > parent || '.' AND
+/// id < parent || '/'` (`'/'` is the byte after `'.'`, BINARY collation), then the direct-child
+/// segment is parsed with the predicate `ids::next_child_number`'s legacy scan uses. Tombstones
+/// are rows like any other, so they count.
+async fn child_counter_drift(
+    conn: &Connection,
+    after_counters: impl AsyncFnOnce(),
+) -> Result<Vec<ChildCounterDrift>, StorageError> {
+    let mut counters = Vec::new();
+    let mut rows = conn
+        .query(
+            "SELECT parent_id, last_child FROM child_counters ORDER BY parent_id",
+            (),
+        )
+        .await
+        .map_err(map_libsql_err)?;
+    while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+        let Value::Text(parent_id) = row.get_value(0).map_err(map_libsql_err)? else {
+            continue;
+        };
+        let stored = match row.get_value(1).map_err(map_libsql_err)? {
+            Value::Integer(last) => {
+                u32::try_from(last.clamp(0, i64::from(u32::MAX))).unwrap_or(u32::MAX)
+            }
+            _ => 0,
+        };
+        counters.push((parent_id, stored));
+    }
+    drop(rows);
+    after_counters().await;
+
+    let mut drift = Vec::new();
+    for (parent_id, stored) in counters {
+        let mut children = conn
+            .query(
+                "SELECT id FROM issues WHERE id > ?1 || '.' AND id < ?1 || '/'",
+                libsql::params![parent_id.as_str()],
+            )
+            .await
+            .map_err(map_libsql_err)?;
+        let prefix_with_dot = format!("{parent_id}.");
+        let mut observed_max: u32 = 0;
+        while let Some(row) = children.next().await.map_err(map_libsql_err)? {
+            if let Value::Text(id) = row.get_value(0).map_err(map_libsql_err)?
+                && let Some(suffix) = id.strip_prefix(&prefix_with_dot)
+                && let Some(num) = suffix.split('.').next().and_then(|s| s.parse::<u32>().ok())
+            {
+                observed_max = observed_max.max(num);
+            }
+        }
+        if stored < observed_max {
+            drift.push(ChildCounterDrift {
+                parent_id,
+                stored,
+                observed_max,
+            });
+        }
+    }
+    Ok(drift)
+}
+
+/// Every `metadata` key held by two or more rows, ordered by key.
+async fn duplicate_metadata_keys(conn: &Connection) -> Result<Vec<DuplicateKey>, StorageError> {
+    let mut rows = conn
+        .query(
+            "SELECT CAST(key AS TEXT), COUNT(*) FROM metadata GROUP BY key HAVING COUNT(*) > 1 \
+             ORDER BY key",
+            (),
+        )
+        .await
+        .map_err(map_libsql_err)?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+        let Value::Text(key) = row.get_value(0).map_err(map_libsql_err)? else {
+            continue;
+        };
+        let rows = match row.get_value(1).map_err(map_libsql_err)? {
+            Value::Integer(count) => u32::try_from(count).unwrap_or(u32::MAX),
+            _ => 0,
+        };
+        out.push(DuplicateKey { key, rows });
+    }
+    Ok(out)
 }
 
 /// Per-epic `parent-child` child rollup — bd's `get_epic_counts` ported 1:1 (`sqlite.rs:6978-7006`),
@@ -236,7 +401,64 @@ fn looks_like_commit_hash(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_commit_hash;
+    use chrono::{TimeZone as _, Utc};
+    use libsql::Builder;
+    use unblock_model::{Issue, Status};
+
+    use super::{health_facts, health_facts_observed, looks_like_commit_hash};
+    use crate::Storage as _;
+    use crate::libsql::LibsqlStorage;
+    use crate::libsql::close_once::CloseOnceConnection;
+
+    fn issue(id: &str) -> Issue {
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        Issue {
+            id: id.to_string(),
+            title: format!("issue {id}"),
+            status: Status::Open,
+            created_at: ts,
+            updated_at: ts,
+            ..Issue::default()
+        }
+    }
+
+    /// A child committed between the `child_counters` read and the per-parent child reads is
+    /// invisible to both, because every read shares one snapshot. Without the transaction the
+    /// second read sees `ub-p.2` against a stored counter of 1 and reports drift.
+    #[tokio::test]
+    async fn health_facts_reads_one_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unblock.db");
+        let storage = LibsqlStorage::open_local(&path, crate::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+            .await
+            .unwrap();
+        storage.migrate().await.unwrap();
+        for id in ["ub-p", "ub-p.1"] {
+            storage.create_issue(&issue(id), "seed").await.unwrap();
+        }
+        let db = Builder::new_local(&path).build().await.unwrap();
+        let conn = CloseOnceConnection::connect(&db, Some(&path))
+            .await
+            .unwrap();
+
+        let facts = health_facts_observed(&conn, async || {
+            storage
+                .create_issue(&issue("ub-p.2"), "concurrent")
+                .await
+                .unwrap();
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            facts.child_counter_drift.is_empty(),
+            "one snapshot: {:?}",
+            facts.child_counter_drift
+        );
+        assert!(storage.get_issue("ub-p.2").await.unwrap().is_some());
+        let after = health_facts(&conn).await.unwrap();
+        assert!(after.child_counter_drift.is_empty(), "the counter rose too");
+    }
 
     #[test]
     fn commit_hash_pattern() {

@@ -352,4 +352,15 @@ impl Storage for FakeStorage {
     async fn unset_config(&self, _key: &str) -> Result<bool, StorageError> {
         unimplemented!("FakeStorage::unset_config")
     }
+
+    async fn health_facts(&self) -> Result<unblock_storage::DbHealthFacts, StorageError> {
+        unimplemented!("FakeStorage::health_facts")
+    }
+
+    async fn repair(
+        &self,
+        _request: &unblock_storage::RepairRequest,
+    ) -> Result<unblock_storage::RepairOutcome, StorageError> {
+        unimplemented!("FakeStorage::repair")
+    }
 }

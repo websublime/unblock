@@ -33,6 +33,7 @@
 // module exists to panic on failure — so the pedantic `missing_panics_doc` lint is scoped off here.
 #![allow(clippy::missing_panics_doc)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -45,6 +46,9 @@ use unblock_model::{
 
 use crate::error::StorageError;
 use crate::filters::{DeleteMode, DeletePlan, IssuePatch};
+use crate::health_types::{
+    ChildCounterDrift, DuplicateKey, RepairAction, RepairOutcome, RepairRequest,
+};
 use crate::trait_def::Storage;
 
 /// The two backend-independent **testkit seams** a backend must provide so the NFR-16 contract suite
@@ -124,6 +128,24 @@ pub trait StorageTestkit: Storage {
     /// write then proceeds with the real (blocking) begin — the blocking semantics the gate measures
     /// are unchanged. Off in production.
     async fn testkit_set_busy_witness(&self, on: bool);
+
+    // --- D58 health seams (criteria (d), (l), (o)) ------------------------------------------------
+
+    /// The number of [`Storage::health_facts`] calls on this store since open (criterion (d)).
+    async fn testkit_health_facts_calls(&self) -> u64;
+
+    /// The number of [`Storage::integrity_check`] calls on this store since open (criterion (d)).
+    /// The one integrity check inside [`Storage::health_facts`] is not counted here.
+    async fn testkit_integrity_check_calls(&self) -> u64;
+
+    /// The directory every [`Storage::repair`] snapshot must lie under: `Some(<db dir>/.recovery)`
+    /// for a file-backed store, `None` for an in-memory one (which refuses every snapshot).
+    async fn testkit_recovery_root(&self) -> Option<PathBuf>;
+
+    /// Run raw SQL on the store, bypassing every guard and writing no event — the seeding seam for
+    /// the drift and duplicate fixtures (`child_counters`, `metadata`, the stamp) no public method
+    /// writes. Use it only from tests.
+    async fn testkit_execute_batch(&self, sql: &str) -> Result<(), StorageError>;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -233,6 +255,8 @@ where
     contract_close_issues_missing_id_rolls_back(factory().await).await;
     // Config table (FR-13 full, D57 — spine §3.2.1 "Config table (D57)").
     run_config_contract_cells(&factory).await;
+    // Workspace health (FR-16 full, D58 — spine §3.2, criterion (l)).
+    run_health_contract_cells(&factory).await;
 
     // Cross-cutting invariants.
     contract_noop_update_writes_no_event(factory().await).await;
@@ -3848,6 +3872,582 @@ pub async fn contract_config_writes_no_event<S: Storage>(storage: S) {
         before,
         "config writes touch no issue row"
     );
+}
+
+// --------------------------------------------------------------------------------------------------
+// Workspace health (FR-16 full, D58 — spine §3.1/§3.2, PRD §4 D58 criterion (l))
+// --------------------------------------------------------------------------------------------------
+
+/// The health cells, registered in [`run_storage_contract_suite`] (D58 criterion (l)).
+///
+/// The repair cells run their real path on a store with a recovery root; on an in-memory store
+/// (`testkit_recovery_root() == None`) each asserts the `RecoveryPathOutsideWorkspace` refusal and
+/// that nothing was applied.
+async fn run_health_contract_cells<S, F, Fut>(factory: &F)
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = S>,
+    S: Storage + StorageTestkit,
+{
+    contract_health_facts_clean_store_is_empty(factory().await).await;
+    contract_health_facts_reports_drift_and_duplicates_in_key_order(factory().await).await;
+    contract_repair_refuses_a_snapshot_outside_recovery(factory().await).await;
+    contract_repair_refuses_an_existing_snapshot(factory().await).await;
+    contract_repair_never_lowers_a_counter(factory().await).await;
+    contract_repair_keeps_the_greatest_rowid_metadata_row(factory().await).await;
+    contract_repair_actions_share_one_transaction(factory().await).await;
+    contract_repair_migrates_under_the_held_guard(factory().await).await;
+}
+
+/// The seeded drift: `ub-a` and `ub-b` stored below their greatest direct child.
+fn seeded_drift() -> Vec<ChildCounterDrift> {
+    vec![
+        ChildCounterDrift {
+            parent_id: "ub-a".to_string(),
+            stored: 1,
+            observed_max: 10,
+        },
+        ChildCounterDrift {
+            parent_id: "ub-b".to_string(),
+            stored: 1,
+            observed_max: 3,
+        },
+    ]
+}
+
+/// The seeded duplicate `metadata` keys, in key order.
+fn seeded_duplicates() -> Vec<DuplicateKey> {
+    vec![
+        DuplicateKey {
+            key: "alpha".to_string(),
+            rows: 2,
+        },
+        DuplicateKey {
+            key: "zeta".to_string(),
+            rows: 3,
+        },
+    ]
+}
+
+/// Seed the drift and duplicate fixture.
+///
+/// Children: `ub-b.1` and `ub-b.3` (tombstoned — tombstones count), `ub-c.1`, `ub-ab.7` (a prefix
+/// decoy outside `ub-a`'s range), then `ub-a.2`, `ub-a.10` (numeric, not lexical, max) and the
+/// grandchild `ub-a.10.5` (direct segment 10). Parents and children are created OUT of key order,
+/// so the `child_counters` and `metadata` rowid orders differ from the key order the facts must
+/// follow. Then the `ub-a` and `ub-b` counters are LOWERED to 1 and `ub-c`'s RAISED to 9 (above
+/// its greatest child: not drift). `metadata` gets `zeta` (`1`), `alpha` twice (`b-first`, then
+/// `a-last`), `zeta` twice more (`2`, `3`) and `solo` once.
+async fn seed_drift_fixture<S: Storage + StorageTestkit>(storage: &S) {
+    for id in ["ub-c", "ub-b", "ub-ab", "ub-a"] {
+        storage.create_issue(&issue(id, id), "seed").await.unwrap();
+    }
+    for id in [
+        "ub-b.1",
+        "ub-b.3",
+        "ub-c.1",
+        "ub-ab.7",
+        "ub-a.2",
+        "ub-a.10",
+        "ub-a.10.5",
+    ] {
+        storage.create_issue(&issue(id, id), "seed").await.unwrap();
+    }
+    tombstone(storage, "ub-b.3").await;
+    storage
+        .testkit_execute_batch(
+            "UPDATE child_counters SET last_child = 1 WHERE parent_id IN ('ub-a', 'ub-b'); \
+             UPDATE child_counters SET last_child = 9 WHERE parent_id = 'ub-c'; \
+             INSERT INTO metadata (key, value) VALUES ('zeta', '1'), ('alpha', 'b-first'), \
+             ('alpha', 'a-last'), ('zeta', '2'), ('zeta', '3'), ('solo', 'x');",
+        )
+        .await
+        .unwrap();
+}
+
+/// A NEW snapshot target `<recovery root>/<run>/snapshot.db`, its run directory created, or — on a
+/// store without a recovery root — a path the store must refuse.
+async fn snapshot_target<S: StorageTestkit>(storage: &S, run: &str) -> PathBuf {
+    if let Some(root) = storage.testkit_recovery_root().await {
+        let run_dir = root.join(run);
+        std::fs::create_dir_all(&run_dir).expect("create the run directory");
+        run_dir.join("snapshot.db")
+    } else {
+        std::env::temp_dir()
+            .join(".recovery")
+            .join(format!("in-memory-{run}"))
+            .join("snapshot.db")
+    }
+}
+
+/// Assert `result` is the `RecoveryPathOutsideWorkspace` refusal.
+fn assert_refused_outside(result: &Result<RepairOutcome, StorageError>, what: &str) {
+    assert!(
+        matches!(
+            result,
+            Err(StorageError::RecoveryPathOutsideWorkspace { .. })
+        ),
+        "{what}: expected RecoveryPathOutsideWorkspace, got {result:?}"
+    );
+}
+
+/// Assert the seeded fixture is untouched: the drift, the duplicates and every counter.
+async fn assert_fixture_untouched<S: Storage + StorageTestkit>(storage: &S, what: &str) {
+    let facts = storage.health_facts().await.unwrap();
+    assert_eq!(facts.child_counter_drift, seeded_drift(), "{what}: drift");
+    assert_eq!(
+        facts.duplicate_metadata_keys,
+        seeded_duplicates(),
+        "{what}: duplicates"
+    );
+    assert_eq!(
+        storage.testkit_child_high_water("ub-c").await.unwrap(),
+        Some(9),
+        "{what}: ub-c counter"
+    );
+}
+
+/// A clean store yields EMPTY facts: no integrity row, no drift, no duplicate key, the current
+/// stamp, and every index name in byte order. Ordinary hierarchical creates are not drift. One call
+/// bumps the `health_facts` counter by one and the `integrity_check` counter by none; a direct
+/// `integrity_check` bumps only its own (criterion (d)).
+pub async fn contract_health_facts_clean_store_is_empty<S: Storage + StorageTestkit>(storage: S) {
+    for id in ["ub-p", "ub-p.1", "ub-p.2", "ub-p.2.1"] {
+        storage.create_issue(&issue(id, id), "a").await.unwrap();
+    }
+    let health_before = storage.testkit_health_facts_calls().await;
+    let integrity_before = storage.testkit_integrity_check_calls().await;
+
+    let facts = storage.health_facts().await.unwrap();
+    assert!(facts.integrity_rows.is_empty(), "{facts:?}");
+    assert_eq!(facts.schema_version, crate::CURRENT_SCHEMA_VERSION);
+    assert!(facts.child_counter_drift.is_empty(), "{facts:?}");
+    assert!(facts.duplicate_metadata_keys.is_empty(), "{facts:?}");
+    assert!(
+        facts
+            .index_names
+            .iter()
+            .any(|name| name == "idx_metadata_key"),
+        "every sqlite_schema index is listed: {:?}",
+        facts.index_names
+    );
+    let mut sorted = facts.index_names.clone();
+    sorted.sort();
+    assert_eq!(facts.index_names, sorted, "index names in byte order");
+
+    assert_eq!(
+        storage.testkit_health_facts_calls().await,
+        health_before + 1
+    );
+    assert_eq!(
+        storage.testkit_integrity_check_calls().await,
+        integrity_before,
+        "health_facts runs its own integrity check, not Storage::integrity_check"
+    );
+    storage.integrity_check().await.unwrap();
+    assert_eq!(
+        storage.testkit_integrity_check_calls().await,
+        integrity_before + 1
+    );
+    assert_eq!(
+        storage.testkit_health_facts_calls().await,
+        health_before + 1
+    );
+}
+
+/// Seeded drift and duplicates are reported EXACTLY, each list in key order: only counters below
+/// their greatest direct child (numeric max, grandchildren by their direct segment, tombstones
+/// included, a prefix decoy excluded), and only keys held by two or more rows.
+pub async fn contract_health_facts_reports_drift_and_duplicates_in_key_order<
+    S: Storage + StorageTestkit,
+>(
+    storage: S,
+) {
+    seed_drift_fixture(&storage).await;
+    let facts = storage.health_facts().await.unwrap();
+    assert_eq!(facts.child_counter_drift, seeded_drift());
+    assert_eq!(facts.duplicate_metadata_keys, seeded_duplicates());
+    assert!(facts.integrity_rows.is_empty(), "{facts:?}");
+}
+
+/// A snapshot target outside `<db dir>/.recovery/` — a sibling of the database, the recovery root
+/// itself, a `..` escape, a prefix-sharing sibling directory, a path outside the workspace — fails
+/// with `RecoveryPathOutsideWorkspace`, creates no file, and applies NOTHING: not the actions, not
+/// the requested migrate.
+pub async fn contract_repair_refuses_a_snapshot_outside_recovery<S: Storage + StorageTestkit>(
+    storage: S,
+) {
+    seed_drift_fixture(&storage).await;
+    let behind = crate::CURRENT_SCHEMA_VERSION - 1;
+    storage
+        .testkit_execute_batch(&format!("PRAGMA user_version = {behind};"))
+        .await
+        .unwrap();
+    let targets = match storage.testkit_recovery_root().await {
+        Some(root) => {
+            let db_dir = root
+                .parent()
+                .expect("the root sits in the db dir")
+                .to_path_buf();
+            std::fs::create_dir_all(root.join("run")).expect("create a run directory");
+            vec![
+                db_dir.join("snapshot.db"),
+                root.clone(),
+                root.join("run").join("..").join("..").join("escape.db"),
+                db_dir.join(".recovery-x").join("snapshot.db"),
+                db_dir
+                    .parent()
+                    .expect("the db dir has a parent")
+                    .join("elsewhere.db"),
+            ]
+        }
+        None => vec![snapshot_target(&storage, "outside").await],
+    };
+    for target in targets {
+        let request = RepairRequest {
+            snapshot: target.clone(),
+            migrate: true,
+            actions: vec![
+                RepairAction::RaiseChildCounter {
+                    parent_id: "ub-a".to_string(),
+                    to: 10,
+                },
+                RepairAction::DedupeMetadataKey {
+                    key: "alpha".to_string(),
+                },
+            ],
+        };
+        let result = storage.repair(&request).await;
+        assert_refused_outside(&result, &target.display().to_string());
+        assert!(
+            !target.is_file(),
+            "no snapshot written at {}",
+            target.display()
+        );
+    }
+    assert_fixture_untouched(&storage, "after the refusals").await;
+    assert_eq!(
+        storage.schema_version().await.unwrap(),
+        behind,
+        "a refused repair runs no migrate"
+    );
+}
+
+/// An EXISTING snapshot target is refused with `RecoveryPathOutsideWorkspace`: the file keeps its
+/// bytes and nothing is applied.
+pub async fn contract_repair_refuses_an_existing_snapshot<S: Storage + StorageTestkit>(storage: S) {
+    seed_drift_fixture(&storage).await;
+    let target = snapshot_target(&storage, "existing").await;
+    let on_disk = storage.testkit_recovery_root().await.is_some();
+    if on_disk {
+        std::fs::write(&target, b"earlier evidence").expect("plant the existing target");
+    }
+    let request = RepairRequest {
+        snapshot: target.clone(),
+        migrate: false,
+        actions: vec![RepairAction::RaiseChildCounter {
+            parent_id: "ub-a".to_string(),
+            to: 10,
+        }],
+    };
+    let result = storage.repair(&request).await;
+    assert_refused_outside(&result, "an existing target");
+    if on_disk {
+        assert_eq!(
+            std::fs::read(&target).expect("the target survives"),
+            b"earlier evidence",
+            "the existing target is never overwritten"
+        );
+    }
+    assert_fixture_untouched(&storage, "after the refusal").await;
+}
+
+/// `RaiseChildCounter` sets `MAX(last_child, to)`: it raises a drifted counter, raises a counter
+/// only as far as `to` asks, and NEVER lowers one (a lower mark would re-mint a deleted child's id,
+/// D21). The snapshot exists with the reported size, and no migrate ran.
+pub async fn contract_repair_never_lowers_a_counter<S: Storage + StorageTestkit>(storage: S) {
+    seed_drift_fixture(&storage).await;
+    let target = snapshot_target(&storage, "raise").await;
+    let actions = vec![
+        RepairAction::RaiseChildCounter {
+            parent_id: "ub-a".to_string(),
+            to: 10,
+        },
+        RepairAction::RaiseChildCounter {
+            parent_id: "ub-c".to_string(),
+            to: 1,
+        },
+        RepairAction::RaiseChildCounter {
+            parent_id: "ub-b".to_string(),
+            to: 2,
+        },
+    ];
+    let request = RepairRequest {
+        snapshot: target.clone(),
+        migrate: false,
+        actions: actions.clone(),
+    };
+    let result = storage.repair(&request).await;
+    if storage.testkit_recovery_root().await.is_none() {
+        assert_refused_outside(&result, "in-memory store");
+        assert_fixture_untouched(&storage, "in-memory refusal").await;
+        return;
+    }
+    let outcome = result.unwrap();
+    assert_eq!(outcome.applied, actions);
+    assert_eq!(outcome.migrated, None);
+    assert_eq!(outcome.snapshot, target);
+    let bytes = std::fs::metadata(&target)
+        .expect("the snapshot exists")
+        .len();
+    assert!(bytes > 0);
+    assert_eq!(outcome.snapshot_bytes, bytes);
+
+    let high = |id: &'static str| storage.testkit_child_high_water(id);
+    assert_eq!(high("ub-a").await.unwrap(), Some(10), "raised to its child");
+    assert_eq!(high("ub-c").await.unwrap(), Some(9), "never lowered");
+    assert_eq!(high("ub-b").await.unwrap(), Some(2), "raised only to `to`");
+    let facts = storage.health_facts().await.unwrap();
+    assert_eq!(
+        facts.child_counter_drift,
+        vec![ChildCounterDrift {
+            parent_id: "ub-b".to_string(),
+            stored: 2,
+            observed_max: 3,
+        }]
+    );
+}
+
+/// `DedupeMetadataKey` keeps the row with the GREATEST rowid — the last insertion, here the
+/// lexically SMALLER value — and deletes every other row of that key only.
+pub async fn contract_repair_keeps_the_greatest_rowid_metadata_row<S: Storage + StorageTestkit>(
+    storage: S,
+) {
+    seed_drift_fixture(&storage).await;
+    let target = snapshot_target(&storage, "dedupe").await;
+    let request = RepairRequest {
+        snapshot: target,
+        migrate: false,
+        actions: vec![
+            RepairAction::DedupeMetadataKey {
+                key: "alpha".to_string(),
+            },
+            RepairAction::DedupeMetadataKey {
+                key: "zeta".to_string(),
+            },
+        ],
+    };
+    let result = storage.repair(&request).await;
+    if storage.testkit_recovery_root().await.is_none() {
+        assert_refused_outside(&result, "in-memory store");
+        assert_fixture_untouched(&storage, "in-memory refusal").await;
+        return;
+    }
+    result.unwrap();
+    assert!(
+        storage
+            .health_facts()
+            .await
+            .unwrap()
+            .duplicate_metadata_keys
+            .is_empty()
+    );
+    // Mirror the surviving rows into `config` (keyed, so a second survivor of one key would fail
+    // the primary key) and read them back through the public surface.
+    storage
+        .testkit_execute_batch(
+            "INSERT INTO config (key, value) SELECT 'mirror.' || key, value FROM metadata;",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.read_config().await.unwrap(),
+        vec![
+            ("mirror.alpha".to_string(), "a-last".to_string()),
+            ("mirror.solo".to_string(), "x".to_string()),
+            ("mirror.zeta".to_string(), "3".to_string()),
+        ]
+    );
+}
+
+/// Every action runs in ONE transaction: an unknown `Reindex` target after a counter raise and a
+/// dedupe fails the call and leaves BOTH unapplied (the snapshot, step (1), was still taken). A
+/// valid run then applies every action, `REINDEX` included for a name carrying a `"`.
+pub async fn contract_repair_actions_share_one_transaction<S: Storage + StorageTestkit>(
+    storage: S,
+) {
+    seed_drift_fixture(&storage).await;
+    let target = snapshot_target(&storage, "one-tx").await;
+    let failing = RepairRequest {
+        snapshot: target.clone(),
+        migrate: false,
+        actions: vec![
+            RepairAction::RaiseChildCounter {
+                parent_id: "ub-a".to_string(),
+                to: 10,
+            },
+            RepairAction::DedupeMetadataKey {
+                key: "zeta".to_string(),
+            },
+            RepairAction::Reindex {
+                index: "no_such_index".to_string(),
+            },
+        ],
+    };
+    let result = storage.repair(&failing).await;
+    if storage.testkit_recovery_root().await.is_none() {
+        assert_refused_outside(&result, "in-memory store");
+        assert_fixture_untouched(&storage, "in-memory refusal").await;
+        return;
+    }
+    assert!(
+        result.is_err()
+            && !matches!(
+                result,
+                Err(StorageError::RecoveryPathOutsideWorkspace { .. })
+            ),
+        "an unknown index fails the action transaction: {result:?}"
+    );
+    assert!(
+        target.is_file(),
+        "the snapshot precedes the action transaction"
+    );
+    assert_fixture_untouched(&storage, "after the rolled-back transaction").await;
+
+    storage
+        .testkit_execute_batch("CREATE INDEX \"odd\"\"name\" ON metadata(value);")
+        .await
+        .unwrap();
+    let actions = vec![
+        RepairAction::RaiseChildCounter {
+            parent_id: "ub-a".to_string(),
+            to: 10,
+        },
+        RepairAction::Reindex {
+            index: "odd\"name".to_string(),
+        },
+        RepairAction::Reindex {
+            index: "idx_metadata_key".to_string(),
+        },
+    ];
+    let outcome = storage
+        .repair(&RepairRequest {
+            snapshot: snapshot_target(&storage, "one-tx-ok").await,
+            migrate: false,
+            actions: actions.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome.applied, actions);
+    assert_eq!(
+        storage.testkit_child_high_water("ub-a").await.unwrap(),
+        Some(10)
+    );
+}
+
+/// `repair` with `migrate` runs the D46 ladder on the write connection it already holds, while the
+/// CALLER holds `acquire_write_lock()`: on a store re-stamped one step behind it neither deadlocks
+/// nor waits, and reports `migrated == (behind, current)`.
+pub async fn contract_repair_migrates_under_the_held_guard<S: Storage + StorageTestkit>(
+    storage: S,
+) {
+    let current = crate::CURRENT_SCHEMA_VERSION;
+    let behind = current - 1;
+    storage
+        .testkit_execute_batch(&format!("PRAGMA user_version = {behind};"))
+        .await
+        .unwrap();
+    let guard = storage.acquire_write_lock().await.unwrap();
+    let request = RepairRequest {
+        snapshot: snapshot_target(&storage, "migrate").await,
+        migrate: true,
+        actions: Vec::new(),
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), storage.repair(&request))
+        .await
+        .expect("repair under the held guard must not deadlock");
+    drop(guard);
+    if storage.testkit_recovery_root().await.is_none() {
+        assert_refused_outside(&result, "in-memory store");
+        assert_eq!(storage.schema_version().await.unwrap(), behind);
+        return;
+    }
+    let outcome = result.unwrap();
+    assert_eq!(outcome.migrated, Some((behind, current)));
+    assert!(outcome.applied.is_empty());
+    assert_eq!(storage.schema_version().await.unwrap(), current);
+}
+
+/// Seed the D58 scale shape (criterion (o)) on top of a [`seed_corpus`] corpus: `parents` parent
+/// issues `ub-h<p>` (a hash no corpus id uses), each with `children_per_parent` direct children
+/// `ub-h<p>.<N>` and their `child_counters` rows (written by the create path), plus one `metadata`
+/// row per parent, DUPLICATED for every even parent.
+///
+/// # Errors
+///
+/// Propagates any [`StorageError`] from the create path or the raw `metadata` insert.
+pub async fn seed_health_shape<S: Storage + StorageTestkit>(
+    storage: &S,
+    parents: usize,
+    children_per_parent: usize,
+) -> Result<(), StorageError> {
+    let created = ts(2026, 1, 1);
+    let parent_id = |p: usize| format!("ub-h{p:06}");
+    let mut chunk: Vec<Issue> = Vec::with_capacity(SEED_CHUNK);
+    for p in 0..parents {
+        chunk.push(Issue {
+            id: parent_id(p),
+            title: format!("health parent {p}"),
+            created_at: created,
+            updated_at: created,
+            ..Issue::default()
+        });
+        if chunk.len() == SEED_CHUNK {
+            storage.create_issues(&chunk, "seed").await?;
+            chunk.clear();
+        }
+    }
+    if !chunk.is_empty() {
+        storage.create_issues(&chunk, "seed").await?;
+        chunk.clear();
+    }
+    for p in 0..parents {
+        for n in 1..=children_per_parent {
+            chunk.push(Issue {
+                id: format!("{}.{n}", parent_id(p)),
+                title: format!("health child {p}.{n}"),
+                created_at: created,
+                updated_at: created,
+                ..Issue::default()
+            });
+            if chunk.len() == SEED_CHUNK {
+                storage.create_issues(&chunk, "seed").await?;
+                chunk.clear();
+            }
+        }
+    }
+    if !chunk.is_empty() {
+        storage.create_issues(&chunk, "seed").await?;
+    }
+    for start in (0..parents).step_by(SEED_CHUNK) {
+        let rows: Vec<String> = (start..(start + SEED_CHUNK).min(parents))
+            .flat_map(|p| {
+                let key = format!("health.{}", parent_id(p));
+                let mut rows = vec![format!("('{key}', 'v1')")];
+                if p % 2 == 0 {
+                    rows.push(format!("('{key}', 'v2')"));
+                }
+                rows
+            })
+            .collect();
+        storage
+            .testkit_execute_batch(&format!(
+                "INSERT INTO metadata (key, value) VALUES {};",
+                rows.join(", ")
+            ))
+            .await?;
+    }
+    Ok(())
 }
 
 // --------------------------------------------------------------------------------------------------

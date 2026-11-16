@@ -251,6 +251,17 @@ impl Storage for WidenedStorage {
     async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
         self.inner.unset_config(key).await
     }
+
+    async fn health_facts(&self) -> Result<unblock_storage::DbHealthFacts, StorageError> {
+        self.inner.health_facts().await
+    }
+
+    async fn repair(
+        &self,
+        request: &unblock_storage::RepairRequest,
+    ) -> Result<unblock_storage::RepairOutcome, StorageError> {
+        self.inner.repair(request).await
+    }
 }
 
 #[tokio::main]

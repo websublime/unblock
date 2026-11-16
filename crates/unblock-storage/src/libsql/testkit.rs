@@ -23,6 +23,8 @@
 //! All are compiled only under `#[cfg(any(test, feature = "testkit"))]`; they never enter a
 //! production build.
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use libsql::params;
 
@@ -126,5 +128,27 @@ impl StorageTestkit for LibsqlStorage {
 
     async fn testkit_set_busy_witness(&self, on: bool) {
         self.instrument().set_busy_witness(on);
+    }
+
+    // --- D58 health seams ----------------------------------------------------------------------
+
+    async fn testkit_health_facts_calls(&self) -> u64 {
+        self.instrument().health_facts_calls()
+    }
+
+    async fn testkit_integrity_check_calls(&self) -> u64 {
+        self.instrument().integrity_check_calls()
+    }
+
+    async fn testkit_recovery_root(&self) -> Option<PathBuf> {
+        self.recovery_root()
+    }
+
+    async fn testkit_execute_batch(&self, sql: &str) -> Result<(), StorageError> {
+        // Raw SQL on the write connection: no guard, no event, no transaction of its own. It seeds
+        // the drift and duplicate fixtures the public surface cannot write.
+        let conn = self.write().await;
+        conn.execute_batch(sql).await.map_err(map_libsql_err)?;
+        Ok(())
     }
 }

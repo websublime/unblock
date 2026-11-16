@@ -18,11 +18,7 @@ use unblock_model::{
 use crate::WriteLockGuard;
 use crate::error::StorageError;
 use crate::filters::{DeletePlan, IssuePatch};
-
-// NOTE: the CF-E reserved seams (`diagnostic_probe`/`diagnostic_probes`) reference
-// `DiagnosticKind`/`DiagnosticReport`. They are kept **commented** below per spine §3.2 (reserved
-// for v1.1, NOT live default methods), so those DTOs are intentionally NOT imported here — importing
-// them would trip the unused-import lint. (The CF-E `read_config` reservation landed with D57.)
+use crate::health_types::{DbHealthFacts, RepairOutcome, RepairRequest};
 
 /// The backend-agnostic storage contract (spine §3.2).
 ///
@@ -199,8 +195,7 @@ pub trait Storage: Send + Sync {
     /// an async sleep-poll to the store's `write_lock_timeout_ms`; a timeout surfaces the retryable
     /// [`StorageError::DatabaseLocked`] (no new `ErrorCode`). Returns a [`WriteLockGuard`] on the
     /// file-backed path; `Ok(None)` on the in-memory path (no cross-process sharing, so no lock). Reads
-    /// take NO lock (WAL MVCC). Distinct from the vestigial `.unblock.lock` `OrphanedLockFile` target
-    /// (unblock-health is unchanged by D31).
+    /// take NO lock (WAL MVCC). D58's `write_lock_held` advisory probes the same `.write.lock`.
     async fn acquire_write_lock(&self) -> Result<Option<WriteLockGuard>, StorageError>;
 
     // ---------------------------------------------------------------------------------------------
@@ -748,14 +743,38 @@ pub trait Storage: Send + Sync {
     async fn unset_config(&self, key: &str) -> Result<bool, StorageError>;
 
     // ---------------------------------------------------------------------------------------------
-    // [v1.1] reserved seams (CF-E; spine §3.2) — additive, depended on by health full-taxonomy.
-    //         Kept COMMENTED (not live default methods) so the seam is reserved without v1
-    //         behaviour and this file does not `use` the diagnostics DTOs. (The CF-E `read_config`
-    //         reservation that sat here landed with D57, above.)
+    // workspace health (FR-16 full, D58, v1.1) — NO default body, in every `impl Storage` block.
+    // They replace the withdrawn CF-E `diagnostic_probe(s)` reservation (D58 clause (4)). Types:
+    // spine §3.1 "Health facts and repair requests".
     // ---------------------------------------------------------------------------------------------
-    //
-    // [v1.1] async fn diagnostic_probe(&self, kind: DiagnosticKind) -> Result<DiagnosticReport, StorageError>;
-    // [v1.1] async fn diagnostic_probes(&self) -> Result<Vec<DiagnosticReport>, StorageError>;
+
+    /// The database-internal health facts — a PURE READ: no permit, no lock (FR-10).
+    ///
+    /// Runs `PRAGMA integrity_check` ONCE (`ok` normalized to no rows; `doctor()` takes its rows
+    /// from here and nowhere else), then reads `PRAGMA user_version`, the `sqlite_schema` index
+    /// names, the child-counter drift and the duplicated `metadata` keys (`GROUP BY key HAVING
+    /// COUNT(*) > 1`). Drift is a `child_counters` row whose `last_child` is below the greatest
+    /// direct-child number `N` among the `issues` ids `<parent_id>.<N>`, tombstones included — the
+    /// predicate `next_child_number`'s legacy scan uses. The drift probe is BOUNDED: per counter
+    /// row, the children come from the primary-key range `id > parent || '.' AND id < parent ||
+    /// '/'`, so it costs O(counters × log issues + children). Every list is ordered by its key.
+    async fn health_facts(&self) -> Result<DbHealthFacts, StorageError>;
+
+    /// Run the online SQL repairs, in order, and report what ran.
+    ///
+    /// (1) `VACUUM INTO request.snapshot` OUTSIDE any transaction. The target must not exist and
+    /// must lie under `<db dir>/.recovery/`, else [`StorageError::RecoveryPathOutsideWorkspace`]
+    /// with NOTHING applied; an in-memory store has no database directory and refuses every
+    /// target. (2) When `request.migrate`, the D46 ladder on the write connection `repair` ALREADY
+    /// holds — never through [`Storage::migrate`], which would wait on that same connection; a
+    /// later failure of (3) leaves the migrated stamp in place. (3) EVERY action in ONE `BEGIN
+    /// IMMEDIATE` (a failure rolls them all back): `Reindex` re-checks the name against
+    /// `sqlite_schema` and runs `REINDEX "<index>"`; `RaiseChildCounter` sets `last_child =
+    /// MAX(last_child, to)`, never lowering it (D21); `DedupeMetadataKey` keeps the row with the
+    /// GREATEST rowid. Writes no `Event` (events are per issue, spine §1.7). The CALLER holds the
+    /// permit and the `.write.lock` (`Session::recover`). The snapshot is the only rewrite of the
+    /// file (D58 clause (3)).
+    async fn repair(&self, request: &RepairRequest) -> Result<RepairOutcome, StorageError>;
 }
 
 /// Object-safety guard: this signature only compiles if [`Storage`] is object-safe (i.e. usable as
@@ -769,6 +788,7 @@ mod tests {
     use crate::WriteLockGuard;
     use crate::error::StorageError;
     use crate::filters::{DeletePlan, IssuePatch};
+    use crate::health_types::{DbHealthFacts, RepairOutcome, RepairRequest};
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use std::sync::Arc;
@@ -1039,6 +1059,16 @@ mod tests {
         }
 
         async fn unset_config(&self, _key: &str) -> Result<bool, StorageError> {
+            Err(StorageError::NotInitialized)
+        }
+
+        // --- workspace health (D58) — the read reports nothing, the repair is not initialized ---
+
+        async fn health_facts(&self) -> Result<DbHealthFacts, StorageError> {
+            Ok(DbHealthFacts::default())
+        }
+
+        async fn repair(&self, _request: &RepairRequest) -> Result<RepairOutcome, StorageError> {
             Err(StorageError::NotInitialized)
         }
     }

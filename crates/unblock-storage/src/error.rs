@@ -13,6 +13,7 @@
 //! [`StorageError::DatabaseLocked`] and everything else to [`StorageError::Backend`].
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 use snafu::Snafu;
@@ -304,6 +305,36 @@ pub enum StorageError {
         /// The integrity-check failure messages.
         messages: Vec<String>,
     },
+
+    /// A recovery target is refused: it does not lie under `<db dir>/.recovery/`, it already
+    /// exists, or the store has no database directory (an in-memory store). Only an engine bug
+    /// passes one (D58 clause (5)).
+    #[snafu(display(
+        "recovery path refused (it must be a new file under the database's .recovery/ directory): {}",
+        display_path(path)
+    ))]
+    RecoveryPathOutsideWorkspace {
+        /// The refused path.
+        path: PathBuf,
+    },
+
+    /// A file operation of the pre-open health primitives failed (D58 clause (5)).
+    #[snafu(display("recovery file I/O failed at {}: {}", display_path(path), sanitize_message(&source.to_string())))]
+    RecoveryIo {
+        /// The file the operation touched.
+        path: PathBuf,
+        /// The I/O failure.
+        source: std::io::Error,
+    },
+
+    /// A mutation reached a store opened by [`crate::LibsqlStorage::open_local_read_only`].
+    #[snafu(display("the store is open read-only"))]
+    ReadOnlyStore,
+
+    /// The read-only open met a hot rollback journal: its first read failed with the extended
+    /// `SQLITE_READONLY_ROLLBACK` (D58 clause (8)).
+    #[snafu(display("the read-only open met a hot rollback journal (SQLITE_READONLY_ROLLBACK)"))]
+    ReadOnlyRollback,
 }
 
 impl CodedError for StorageError {
@@ -330,8 +361,16 @@ impl CodedError for StorageError {
             Self::HasDependents { .. } => ErrorCode::HasDependents,
             Self::SelfDependency => ErrorCode::SelfDependency,
             Self::DuplicateDependency => ErrorCode::DuplicateDependency,
-            // `Backend` and `IntegrityFailed` both surface as the generic `DatabaseError` code.
-            Self::Backend { .. } | Self::IntegrityFailed { .. } => ErrorCode::DatabaseError,
+            // `Backend`, `IntegrityFailed` and the D58 hot-journal refusal all surface as the
+            // generic `DatabaseError` code (exit 2).
+            Self::Backend { .. } | Self::IntegrityFailed { .. } | Self::ReadOnlyRollback => {
+                ErrorCode::DatabaseError
+            }
+            // D58: an engine bug is the only way to reach either; neither mints a code.
+            Self::RecoveryPathOutsideWorkspace { .. } | Self::ReadOnlyStore => {
+                ErrorCode::InternalError
+            }
+            Self::RecoveryIo { .. } => ErrorCode::IoError,
         }
     }
 
@@ -429,7 +468,11 @@ impl CodedError for StorageError {
             | Self::SelfDependency
             | Self::DuplicateDependency
             | Self::Backend { .. }
-            | Self::IntegrityFailed { .. } => None,
+            | Self::IntegrityFailed { .. }
+            | Self::RecoveryPathOutsideWorkspace { .. }
+            | Self::RecoveryIo { .. }
+            | Self::ReadOnlyStore
+            | Self::ReadOnlyRollback => None,
         }
     }
 
@@ -498,6 +541,9 @@ impl CodedError for StorageError {
                 let array = messages.iter().map(|m| Value::String(m.clone())).collect();
                 map.insert("messages".to_string(), Value::Array(array));
             }
+            Self::RecoveryPathOutsideWorkspace { path } | Self::RecoveryIo { path, .. } => {
+                map.insert("path".to_string(), Value::String(display_path(path)));
+            }
             // No structured payload beyond the (already sanitized) Display message.
             Self::DatabaseLocked
             | Self::NotInitialized
@@ -505,10 +551,17 @@ impl CodedError for StorageError {
             | Self::DependencyNotFound
             | Self::SelfDependency
             | Self::DuplicateDependency
-            | Self::Backend { .. } => {}
+            | Self::Backend { .. }
+            | Self::ReadOnlyStore
+            | Self::ReadOnlyRollback => {}
         }
         map
     }
+}
+
+/// A path rendered for a message: lossy UTF-8, terminal-sanitized.
+fn display_path(path: &Path) -> String {
+    sanitize_message(&path.display().to_string()).into_owned()
 }
 
 /// An opaque, terminal-sanitized wrapper around a backend (libsql) failure.
@@ -600,6 +653,7 @@ mod tests {
     /// Golden `StorageError` -> `ErrorCode` table (mirrors the `unblock-error` golden). Every
     /// variant is constructed explicitly so adding a variant forces this table to be extended.
     #[test]
+    #[allow(clippy::too_many_lines)] // one row per variant: the table IS the golden.
     fn every_variant_maps_to_expected_code() {
         let cases: Vec<(StorageError, ErrorCode)> = vec![
             (
@@ -689,6 +743,21 @@ mod tests {
                 },
                 ErrorCode::DatabaseError,
             ),
+            (
+                StorageError::RecoveryPathOutsideWorkspace {
+                    path: "/tmp/x.db".into(),
+                },
+                ErrorCode::InternalError,
+            ),
+            (
+                StorageError::RecoveryIo {
+                    path: "/tmp/x.db".into(),
+                    source: std::io::Error::other("boom"),
+                },
+                ErrorCode::IoError,
+            ),
+            (StorageError::ReadOnlyStore, ErrorCode::InternalError),
+            (StorageError::ReadOnlyRollback, ErrorCode::DatabaseError),
         ];
         for (err, expected) in cases {
             assert_eq!(err.code(), expected, "wrong code for {err:?}");
@@ -741,10 +810,48 @@ mod tests {
             StorageError::IntegrityFailed {
                 messages: vec!["x".into()],
             },
+            StorageError::RecoveryPathOutsideWorkspace {
+                path: "/tmp/x.db".into(),
+            },
+            StorageError::RecoveryIo {
+                path: "/tmp/x.db".into(),
+                source: std::io::Error::other("x"),
+            },
+            StorageError::ReadOnlyStore,
+            StorageError::ReadOnlyRollback,
         ];
         for err in &non_retryable {
             assert!(!err.retryable(), "{err:?} should NOT be retryable");
         }
+    }
+
+    /// D58 — the recovery variants name their path in `context["path"]` and render it
+    /// terminal-safe: a control byte in the path or in the I/O message never reaches the terminal.
+    #[test]
+    fn recovery_variants_carry_a_sanitized_path() {
+        let outside = StorageError::RecoveryPathOutsideWorkspace {
+            path: "/w/.unblock/evil\x1b[2K.db".into(),
+        };
+        let io = StorageError::RecoveryIo {
+            path: "/w/.unblock/unblock.db-shm".into(),
+            source: std::io::Error::other("denied\x07"),
+        };
+        for err in [&outside, &io] {
+            let shown = err.to_string();
+            assert!(
+                !shown
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\t')),
+                "raw control byte leaked: {shown:?}"
+            );
+            let structured: StructuredError = err.into();
+            assert!(structured.context.contains_key("path"), "{err:?}");
+            assert_eq!(structured.hint, None, "{err:?} carries no hint");
+        }
+        assert!(io.to_string().contains("unblock.db-shm"));
+        let structured: StructuredError = (&StorageError::ReadOnlyRollback).into();
+        assert_eq!(structured.code, ErrorCode::DatabaseError);
+        assert!(structured.context.is_empty());
     }
 
     /// `AlreadyClaimed{by}`'s holder survives the bridge into a `StructuredError`'s `context`.

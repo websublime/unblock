@@ -31,9 +31,24 @@
 //!
 //! Drop order is the whole mechanism. Struct fields drop in declaration order, so `conn` MUST stay
 //! declared before `_close_guard`. Every libsql connection the backend opens goes through
-//! [`CloseOnceConnection::connect`].
+//! [`CloseOnceConnection::connect`] or [`CloseOnceConnection::connect_raw`].
+//!
+//! # The connection registry
+//!
+//! A file-backed connection joins a process-wide registry keyed by its database file, and leaves
+//! it when it drops. [`crate::live_connections_to`] reads the count, and the exclusive window
+//! refuses while it is non-zero (PRD §4 D58 clause (6)). The key is the device and inode on Unix
+//! and the canonical path on Windows, where Rust 1.96 still marks the file index unstable. The
+//! `_registration` field is declared after `_close_guard`, so the entry leaves only once the handle
+//! has closed. In-memory connections never join, so parallel tests on other databases never see
+//! each other.
 
+use std::collections::BTreeMap;
 use std::ops::Deref;
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 use libsql::{Connection, Database, Statement};
 
@@ -45,26 +60,67 @@ pub(crate) struct CloseOnceConnection {
     /// The connection. Declared FIRST so it drops before `_close_guard`.
     conn: Connection,
     /// Prepared, never stepped. It keeps the handle open past `conn`'s double-closing `Drop`, then
-    /// closes it once when it drops. Declared LAST.
+    /// closes it once when it drops.
     _close_guard: Statement,
+    /// The registry entry of a file-backed connection. Declared LAST so it leaves the registry
+    /// after the handle has closed.
+    _registration: Option<Registration>,
 }
 
 impl CloseOnceConnection {
-    /// Open a new connection to `db` and pair it with its close guard.
+    /// Open a new connection to `db` and pair it with its close guard. A `path` names the database
+    /// file and joins the connection registry. In-memory databases pass `None`.
     ///
     /// # Errors
     ///
     /// Returns [`StorageError::Backend`] if the connection cannot be opened or the guard statement
     /// cannot be prepared. In the second case the unguarded `conn` drops on the error path. That is
     /// a `SELECT 1` prepare on a handle opened a moment earlier, so it fails only on allocation
-    /// failure.
-    pub(super) async fn connect(db: &Database) -> Result<Self, StorageError> {
-        let conn = db.connect().map_err(map_libsql_err)?;
-        let close_guard = conn.prepare("SELECT 1").await.map_err(map_libsql_err)?;
-        Ok(Self {
+    /// failure. Returns [`StorageError::RecoveryIo`] if the database file cannot be stat'ed for the
+    /// registry key.
+    pub(super) async fn connect(db: &Database, path: Option<&Path>) -> Result<Self, StorageError> {
+        Self::connect_raw(db, path).await?.map_err(map_libsql_err)
+    }
+
+    /// [`connect`](Self::connect) with the libsql failure left raw in the inner `Err`, so the
+    /// exclusive window can read its `SQLite` result code before [`map_libsql_err`] absorbs it.
+    ///
+    /// # Errors
+    ///
+    /// The outer `Err` is [`StorageError::RecoveryIo`] when the database file cannot be stat'ed
+    /// for the registry key. The connection then drops guarded.
+    pub(super) async fn connect_raw(
+        db: &Database,
+        path: Option<&Path>,
+    ) -> Result<Result<Self, libsql::Error>, StorageError> {
+        let conn = match db.connect() {
+            Ok(conn) => conn,
+            Err(error) => return Ok(Err(error)),
+        };
+        let close_guard = match conn.prepare("SELECT 1").await {
+            Ok(statement) => statement,
+            Err(error) => return Ok(Err(error)),
+        };
+        let registration = match path {
+            None => None,
+            Some(path) => match FileKey::of(path) {
+                Ok(key) => Some(Registration::join(key)),
+                Err(source) => {
+                    // The struct's drop order, by hand.
+                    drop(conn);
+                    drop(close_guard);
+                    return Err(StorageError::RecoveryIo {
+                        path: path.to_path_buf(),
+                        source,
+                    });
+                }
+            },
+        };
+        Ok(Ok(Self {
             conn,
             _close_guard: close_guard,
-        })
+            _registration: registration,
+        }))
     }
 }
 
@@ -73,6 +129,82 @@ impl Deref for CloseOnceConnection {
 
     fn deref(&self) -> &Connection {
         &self.conn
+    }
+}
+
+/// The identity of a database file in the connection registry.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct FileKey {
+    dev: u64,
+    ino: u64,
+}
+
+/// The identity of a database file in the connection registry. A hard link aliases it.
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct FileKey {
+    path: PathBuf,
+}
+
+impl FileKey {
+    /// The key of the file at `path`. On Unix it reads metadata and never opens the file. On
+    /// Windows `canonicalize` opens a handle briefly, which is harmless there because Windows
+    /// byte-range locks belong to their handle.
+    ///
+    /// # Errors
+    ///
+    /// The `stat` (Unix) or `canonicalize` (Windows) error, `NotFound` for an absent file.
+    pub(super) fn of(path: &Path) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let meta = std::fs::metadata(path)?;
+            Ok(Self {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                path: std::fs::canonicalize(path)?,
+            })
+        }
+    }
+}
+
+/// Open file-backed connections per database file. A key leaves the map when its count reaches 0.
+static REGISTRY: Mutex<BTreeMap<FileKey, usize>> = Mutex::new(BTreeMap::new());
+
+/// The number of registered connections to the file `key` names.
+pub(super) fn registered_connections(key: &FileKey) -> usize {
+    let registry = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
+    registry.get(key).copied().unwrap_or(0)
+}
+
+/// One connection's registry entry. Dropping it leaves the registry.
+struct Registration {
+    key: FileKey,
+}
+
+impl Registration {
+    fn join(key: FileKey) -> Self {
+        let mut registry = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
+        *registry.entry(key.clone()).or_insert(0) += 1;
+        Self { key }
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        let mut registry = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(count) = registry.get_mut(&self.key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                registry.remove(&self.key);
+            }
+        }
     }
 }
 
@@ -96,7 +228,9 @@ mod tests {
     /// guarded connection. That connection keeps the database alive only while it is open.
     async fn table_exists(uri: &str) -> bool {
         let db = Builder::new_local(uri).build().await.expect("build");
-        let probe = CloseOnceConnection::connect(&db).await.expect("probe");
+        let probe = CloseOnceConnection::connect(&db, None)
+            .await
+            .expect("probe");
         let mut rows = probe
             .query(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 't'",
@@ -117,7 +251,9 @@ mod tests {
     async fn guard_defers_the_close_past_the_connection_then_closes_it() {
         let uri = unique_memory_uri();
         let db = Builder::new_local(&uri).build().await.expect("build");
-        let guarded = CloseOnceConnection::connect(&db).await.expect("connect");
+        let guarded = CloseOnceConnection::connect(&db, None)
+            .await
+            .expect("connect");
         guarded
             .execute("CREATE TABLE t (x INTEGER)", ())
             .await
@@ -126,7 +262,12 @@ mod tests {
         let CloseOnceConnection {
             conn,
             _close_guard: close_guard,
+            _registration: registration,
         } = guarded;
+        assert!(
+            registration.is_none(),
+            "an in-memory connection never registers"
+        );
         drop(conn);
         assert!(
             table_exists(&uri).await,

@@ -263,6 +263,16 @@ pub mod parked {
         /// commit+swap task, which owns the write guard — so a test can prove the guard is held
         /// across the commit and that a caller future dropped after the commit still swaps.
         config_armed: AtomicBool,
+        /// The D58 classification gate (armed ONLY by [`new_gated_health`](Self::new_gated_health)):
+        /// parks the first `health_facts` call before it delegates.
+        health_armed: AtomicBool,
+        /// The D58 repair gate (armed ONLY by [`new_gated_health`](Self::new_gated_health)): parks
+        /// the first `repair` call before it delegates.
+        repair_armed: AtomicBool,
+        /// The D58 page-corruption double (set ONLY by
+        /// [`new_with_integrity_row`](Self::new_with_integrity_row)): one `integrity_check` row
+        /// appended to every `health_facts` result.
+        integrity_row: Option<&'static str>,
     }
 
     impl ParkedStorage {
@@ -280,6 +290,9 @@ pub mod parked {
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
                 config_armed: AtomicBool::new(false),
+                health_armed: AtomicBool::new(false),
+                repair_armed: AtomicBool::new(false),
+                integrity_row: None,
             })
         }
 
@@ -298,6 +311,9 @@ pub mod parked {
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
                 config_armed: AtomicBool::new(false),
+                health_armed: AtomicBool::new(false),
+                repair_armed: AtomicBool::new(false),
+                integrity_row: None,
             })
         }
 
@@ -315,6 +331,9 @@ pub mod parked {
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
                 config_armed: AtomicBool::new(false),
+                health_armed: AtomicBool::new(false),
+                repair_armed: AtomicBool::new(false),
+                integrity_row: None,
             })
         }
 
@@ -333,6 +352,9 @@ pub mod parked {
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
                 config_armed: AtomicBool::new(false),
+                health_armed: AtomicBool::new(false),
+                repair_armed: AtomicBool::new(false),
+                integrity_row: None,
             })
         }
 
@@ -350,6 +372,9 @@ pub mod parked {
                 close_armed: AtomicBool::new(true),
                 close_calls: AtomicUsize::new(0),
                 config_armed: AtomicBool::new(false),
+                health_armed: AtomicBool::new(false),
+                repair_armed: AtomicBool::new(false),
+                integrity_row: None,
             })
         }
 
@@ -368,6 +393,51 @@ pub mod parked {
                 close_armed: AtomicBool::new(false),
                 close_calls: AtomicUsize::new(0),
                 config_armed: AtomicBool::new(true),
+                health_armed: AtomicBool::new(false),
+                repair_armed: AtomicBool::new(false),
+                integrity_row: None,
+            })
+        }
+
+        /// Wrap an inner storage; the first `health_facts` call and the first `repair` call each
+        /// park until released (D58 criterion (k) — `recover()` holds the permit and `.write.lock`
+        /// from classification through the repair). Every other gate stays disarmed.
+        #[must_use]
+        pub fn new_gated_health(inner: Arc<dyn Storage>) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                gate: Notify::new(),
+                entered: Notify::new(),
+                armed: AtomicBool::new(false),
+                bulk_armed: AtomicBool::new(false),
+                org_armed: AtomicBool::new(false),
+                close_armed: AtomicBool::new(false),
+                close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
+                health_armed: AtomicBool::new(true),
+                repair_armed: AtomicBool::new(true),
+                integrity_row: None,
+            })
+        }
+
+        /// Wrap an inner storage; every `health_facts` result carries `row` as one more
+        /// `integrity_check` row (D58 — a corrupt page without corrupting a file). Every gate stays
+        /// disarmed.
+        #[must_use]
+        pub fn new_with_integrity_row(inner: Arc<dyn Storage>, row: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                gate: Notify::new(),
+                entered: Notify::new(),
+                armed: AtomicBool::new(false),
+                bulk_armed: AtomicBool::new(false),
+                org_armed: AtomicBool::new(false),
+                close_armed: AtomicBool::new(false),
+                close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
+                health_armed: AtomicBool::new(false),
+                repair_armed: AtomicBool::new(false),
+                integrity_row: Some(row),
             })
         }
 
@@ -388,6 +458,22 @@ pub mod parked {
         /// Park here, AFTER a committed config write, when the D57 config gate is armed (one-shot).
         async fn park_if_config_armed(&self) {
             if self.config_armed.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.gate.notified().await;
+            }
+        }
+
+        /// Park here, before delegating, when the D58 classification gate is armed (one-shot).
+        async fn park_if_health_armed(&self) {
+            if self.health_armed.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.gate.notified().await;
+            }
+        }
+
+        /// Park here, before delegating, when the D58 repair gate is armed (one-shot).
+        async fn park_if_repair_armed(&self) {
+            if self.repair_armed.swap(false, Ordering::SeqCst) {
                 self.entered.notify_one();
                 self.gate.notified().await;
             }
@@ -636,6 +722,23 @@ pub mod parked {
             let committed = self.inner.unset_config(key).await;
             self.park_if_config_armed().await;
             committed
+        }
+
+        async fn health_facts(&self) -> Result<unblock_storage::DbHealthFacts, StorageError> {
+            self.park_if_health_armed().await;
+            let mut facts = self.inner.health_facts().await?;
+            if let Some(row) = self.integrity_row {
+                facts.integrity_rows.push(row.to_string());
+            }
+            Ok(facts)
+        }
+
+        async fn repair(
+            &self,
+            request: &unblock_storage::RepairRequest,
+        ) -> Result<unblock_storage::RepairOutcome, StorageError> {
+            self.park_if_repair_armed().await;
+            self.inner.repair(request).await
         }
     }
 }
@@ -943,6 +1046,17 @@ pub mod collide {
 
         async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
             self.inner.unset_config(key).await
+        }
+
+        async fn health_facts(&self) -> Result<unblock_storage::DbHealthFacts, StorageError> {
+            self.inner.health_facts().await
+        }
+
+        async fn repair(
+            &self,
+            request: &unblock_storage::RepairRequest,
+        ) -> Result<unblock_storage::RepairOutcome, StorageError> {
+            self.inner.repair(request).await
         }
     }
 }
@@ -1293,6 +1407,17 @@ pub mod race {
 
         async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
             self.inner.unset_config(key).await
+        }
+
+        async fn health_facts(&self) -> Result<unblock_storage::DbHealthFacts, StorageError> {
+            self.inner.health_facts().await
+        }
+
+        async fn repair(
+            &self,
+            request: &unblock_storage::RepairRequest,
+        ) -> Result<unblock_storage::RepairOutcome, StorageError> {
+            self.inner.repair(request).await
         }
     }
 }

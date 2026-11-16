@@ -635,6 +635,19 @@ impl Storage for StorageInjector {
     async fn unset_config(&self, key: &str) -> Result<bool, unblock_storage::StorageError> {
         self.inner.unset_config(key).await
     }
+
+    async fn health_facts(
+        &self,
+    ) -> Result<unblock_storage::DbHealthFacts, unblock_storage::StorageError> {
+        self.inner.health_facts().await
+    }
+
+    async fn repair(
+        &self,
+        request: &unblock_storage::RepairRequest,
+    ) -> Result<unblock_storage::RepairOutcome, unblock_storage::StorageError> {
+        self.inner.repair(request).await
+    }
 }
 
 #[tokio::test]
