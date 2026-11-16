@@ -112,7 +112,8 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Print version / build metadata (no workspace, no network).
     Version(VersionArgs),
-    /// Scaffold a new `.unblock/` workspace (config + migrated empty database, FR-14).
+    /// Scaffold a new `.unblock/` workspace (config + migrated empty database, FR-14), or create
+    /// only the database under an existing `config.toml` whose database is absent or empty (D58).
     Init(InitArgs),
     /// Write / refresh the managed `AGENTS.md` MCP-wiring block (FR-14).
     Agents(AgentsArgs),
@@ -174,8 +175,8 @@ pub struct VersionArgs {
     pub short: bool,
 }
 
-/// `unblock init` — scaffold a workspace (AF-3); `--agents` also writes the managed `AGENTS.md`
-/// block (v1.1).
+/// `unblock init` — scaffold a workspace (AF-3), or recreate only its missing database (D58);
+/// `--agents` also writes the managed `AGENTS.md` block (v1.1).
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// The issue-id prefix to seed `config.toml` with (normalized; default `ub`).

@@ -105,6 +105,10 @@ unblock's product surface is MCP, so the goal is to get an MCP client spawning t
    `unblock init` prints a one-line hint on stderr naming the `unblock agents --dir …` command to run
    next (`-q` silences it). Release 1.0.x has neither, and it rejects `--agents` as a usage error.
 
+   From v1.1, on a clone whose committed `.unblock/config.toml` has no database beside it, a plain
+   `unblock init` creates only the database and leaves `config.toml` byte-identical (the
+   database-only mode, see [Workspace files and recovery](#workspace-files-and-recovery)).
+
 2. **Write or refresh the agent wiring block.** Writes/refreshes a managed block in `AGENTS.md`
    (delimited by `<!-- BEGIN unblock -->` / `<!-- END unblock -->`) documenting the full MCP surface —
    tool, resource, and prompt tables, the per-action parameter surface, the error-code/exit table, and
@@ -256,15 +260,16 @@ The `unblock` binary is lifecycle/ops only — domain features are MCP tools. Se
 |---|---|
 | `unblock mcp` | Run the MCP stdio server (the primary product surface, FR-20) |
 | `unblock migrate` | Bring the workspace database schema to the version this build expects and report the from→to delta; a database written by an older release is migrated forward, a database newer than this build is refused rather than opened (FR-16, D46) |
-| `unblock doctor` | Run read-only health diagnostics on the workspace, including the schema version observed on disk against the one this build expects (doctor-lite, FR-16, D46) |
+| `unblock doctor` | Classify workspace health read-only and list the repairs `--repair` would run, changing no database content: `Healthy` and `Drifted` exit 0, `Recoverable` and `Unsafe` exit 2 (FR-16, D58). SQLite's read-only open may create an empty `-wal` and a `-shm` beside the database, and rebuild a lone `-shm`, which is a derived index |
+| `unblock doctor --repair` | Run those repairs after writing evidence under `.unblock/.recovery/`, then exit by the re-classified level (2 when any repair was refused). It first classifies exactly as `unblock doctor` does: when any class is `Unsafe`, it prints that report, repairs nothing, creates no `.unblock/.recovery/` entry and exits 2. Before that classification it reads every anomalous `-wal`, `-shm` or `-journal` into memory, so the evidence keeps their original bytes; a sidecar above the import size cap, or one that is not a regular file, is refused with `DATABASE_ERROR` (exit 2). It refuses every repair whose exclusive access it cannot prove, so stop every `unblock mcp` on the workspace first for a database-file or sidecar repair |
 | `unblock version` | Print version / build metadata (no workspace, no network) |
-| `unblock init` | Scaffold a new `.unblock/` workspace (config + migrated empty database, FR-14) |
+| `unblock init` | Scaffold a new `.unblock/` workspace (config + migrated empty database, FR-14); from v1.1, under an existing `config.toml` whose configured database is absent or empty, create only that database (the database-only mode, D58) |
 | `unblock agents` | Write / refresh the managed `AGENTS.md` MCP-wiring block (FR-14) |
 | `unblock update` | Self-update the `unblock` binary (checksum-verified before swap, FR-25/D17) |
 
 Command-specific flags: `init` takes `--prefix <PREFIX>`, `--force` and, from v1.1, `--agents` (after
 scaffolding, it also writes the `AGENTS.md` block through the same merge `unblock agents` runs);
-`update` takes `--dry-run`; `version` takes `--short`.
+`doctor` takes `--repair` (v1.1); `update` takes `--dry-run`; `version` takes `--short`.
 
 **Global options** (present on every subcommand):
 
@@ -286,6 +291,58 @@ Structured output goes to **stdout**; diagnostics go to **stderr** (NFR-14). One
 stdout as the MCP JSON-RPC framing channel, so **once the server starts** it writes nothing there but frames —
 its structured errors go to stderr too, whole and machine-readable (the exit code is the same either way).
 `unblock mcp --help` never starts the server, so it keeps its usage text on stdout like every other subcommand.
+
+## Workspace files and recovery
+
+**What to commit.** `config.toml` (and an `issues.jsonl` export, if you keep one) can be committed so
+teammates share the workspace settings. The database and its housekeeping files cannot. If you commit
+`.unblock/`, ignore these:
+
+```gitignore
+.unblock/.write.lock
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+.unblock/.recovery/
+```
+
+unblock never writes a `.gitignore` for you. `.unblock/.write.lock` is also the record that a database
+existed in that directory. On a fresh clone (no database, no `.write.lock`) the first command creates
+the database as usual. When the database is gone or emptied while `.write.lock` remains, every command
+that opens it refuses with `DATABASE_NOT_FOUND` (exit 2) and creates nothing, so a lost database is
+never silently replaced by an empty one. A committed `.write.lock` makes every clone look lost: untrack
+it (`git rm --cached .unblock/.write.lock`), ignore it, and run `unblock init`.
+
+**Recovering a lost database.** `unblock doctor` reports it as `database_lost` (`Unsafe`, exit 2).
+
+1. Stop every unblock process on the workspace: every `unblock mcp` server and every CLI command.
+2. Move any `-wal`, `-shm` or `-journal` file left beside the database path into a new directory under
+   `.unblock/.recovery/`. A stale `-wal` is replayed into whatever database file next opens there.
+3. Restore the database file from a backup, or copy the newest `.unblock/.recovery/<run>/snapshot.db`
+   (a complete copy `doctor --repair` takes before it changes anything) to the configured database path.
+4. With nothing to restore, run `unblock init`. Its database-only mode creates an EMPTY database under
+   the configured `db_filename` and keeps `config.toml`; it refuses with `DATABASE_ERROR` (exit 2) while
+   any `-wal`, `-shm` or `-journal` remains beside the database path. Then import the last export
+   through an MCP client's `sync` tool (`import` action). The CLI has no import command.
+
+**When `doctor --repair` repairs nothing.** Any `Unsafe` class (`database_lost`, `database_unreadable`,
+`database_not_sqlite`, `page_corruption`, `schema_stamp_ahead`) has no in-product repair, so
+`doctor --repair` prints the `unblock doctor` report, repairs nothing, creates no `.unblock/.recovery/`
+entry and exits 2, even when other classes in the same report could be repaired. Follow the manual path
+the report names, then run `doctor --repair` again for the rest.
+
+**Recovering a database file that is not SQLite.** `unblock doctor` reports it as `database_not_sqlite`
+(`Unsafe`, exit 2), and `doctor --repair` leaves it in place.
+
+1. Stop every unblock process on the workspace: every `unblock mcp` server and every CLI command.
+2. Move the invalid file, and any `-wal`, `-shm` or `-journal` file beside it, aside by hand into a new
+   directory under `.unblock/.recovery/`.
+3. Run `unblock init`. Its database-only mode creates an EMPTY database under the configured
+   `db_filename` and keeps `config.toml`.
+4. Import the last export through an MCP client's `sync` tool (`import` action).
+
+The same database-only mode creates the database after a change of `db_filename`.
 
 ## Self-update
 

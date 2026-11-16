@@ -23,6 +23,10 @@ expression: "redacted_init_report(&[])"
     {
       "detail": "ub",
       "label": "id_prefix"
+    },
+    {
+      "detail": "scaffold",
+      "label": "mode"
     }
   ],
   "kind": "info"

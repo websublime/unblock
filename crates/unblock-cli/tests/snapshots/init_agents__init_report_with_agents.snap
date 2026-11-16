@@ -25,6 +25,10 @@ expression: "redacted_init_report(&[\"--agents\"])"
       "label": "id_prefix"
     },
     {
+      "detail": "scaffold",
+      "label": "mode"
+    },
+    {
       "detail": "<root>/AGENTS.md",
       "label": "agents_path"
     }

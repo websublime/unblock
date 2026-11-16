@@ -8,8 +8,10 @@
 //! `ErrorCode::InternalError` (exit 1) — an MCP-server run-loop/transport failure is an INTERNAL condition,
 //! not a user `IoError` (exit 8). CLI-local variants: `AlreadyInitialized` (exit 2, the init clobber
 //! guard and sibling guard — `ConfigError` has none), `SiblingBindsFirst` (exit 2 through
-//! `ALREADY_INITIALIZED`, the init binds-first check), scaffold/agents `Io` (exit 8),
-//! `InitAgentsWrite` (exit 8, an `init --agents` that scaffolded but could not write `AGENTS.md`),
+//! `ALREADY_INITIALIZED`, the init binds-first check), `OrphanSidecars` (exit 2 through
+//! `DATABASE_ERROR`, the database-only `init` meeting an orphan `-wal`/`-shm`/`-journal`, D58),
+//! scaffold/agents `Io` (exit 8), `InitAgentsWrite` (exit 8, an `init --agents` that scaffolded but
+//! could not write `AGENTS.md`),
 //! `Update` (exit 1), and, behind `self-update`, `UpdateRateLimited` (exit 2, GitHub answered the
 //! release query 403 or 429) and `UpdateUnauthorized` (exit 7, GitHub answered 401) — D55. The HTTP
 //! status alone picks the variant; the token state picks only the message words.
@@ -119,6 +121,21 @@ pub enum CliError {
         hidden: PathBuf,
     },
 
+    /// The database-only `unblock init` found a `-wal`, `-shm` or `-journal` beside the absent or
+    /// 0-byte database (PRD §4 D58 clause (7)). Opening a database there would let `SQLite` delete or
+    /// replay the orphan, so `init` writes nothing. Maps to `ErrorCode::DatabaseError` (exit 2).
+    #[snafu(display(
+        "orphan database sidecar files beside the missing database: {}; stop every unblock \
+         process on this workspace first (every `unblock mcp` server and every CLI command), \
+         because a running process's `-wal` and `-shm` are live files, then move each file into \
+         a new directory under `.unblock/.recovery/` and run `unblock init` again",
+        sidecar_list(files)
+    ))]
+    OrphanSidecars {
+        /// Names each sidecar found, in `-wal`, `-shm`, `-journal` order.
+        files: Vec<PathBuf>,
+    },
+
     /// `init --agents` scaffolded the workspace but could not update `AGENTS.md` (v1.1). Maps to
     /// `ErrorCode::IoError` (exit 8).
     #[snafu(display(
@@ -188,6 +205,7 @@ impl CliError {
                 ErrorCode::AlreadyInitialized
             }
             Self::Io { .. } | Self::InitAgentsWrite { .. } => ErrorCode::IoError,
+            Self::OrphanSidecars { .. } => ErrorCode::DatabaseError,
             #[cfg(feature = "self-update")]
             Self::Update { .. } => ErrorCode::InternalError,
             #[cfg(feature = "self-update")]
@@ -203,6 +221,15 @@ fn refusal_suffix(retry: Option<&str>) -> String {
     retry.map_or_else(String::new, |retry| {
         format!("; to write its AGENTS.md block, run {retry}")
     })
+}
+
+/// Joins the sidecar paths with `, `, each through `sanitize_inline`, so the message stays one line.
+fn sidecar_list(files: &[PathBuf]) -> String {
+    files
+        .iter()
+        .map(|file| sanitize_inline(&file.display().to_string()).into_owned())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Build the `StructuredError` payload for a `CliError` (spine §2.4). Transparent-`CodedError` arms
@@ -1031,6 +1058,65 @@ mod tests {
         let line = String::from_utf8(err_sink).expect("utf8 diagnostic");
         assert!(
             line.starts_with("error[IO_ERROR]: "),
+            "the NFR-14 line shape: {line:?}"
+        );
+        assert!(
+            line.ends_with('\n') && line.matches('\n').count() == 1,
+            "exactly one newline-terminated line: {line:?}"
+        );
+    }
+
+    // -- The database-only `init` refusal (D58) -----------------------------------------------
+
+    /// The orphan-sidecar refusal maps to exit 2 through `DATABASE_ERROR`, names every file, carries
+    /// the stop-every-process instruction, and escapes a newline in a path so the human arm writes
+    /// exactly one line.
+    #[test]
+    fn orphan_sidecars_maps_to_database_error_and_names_every_file_on_one_line() {
+        let err = CliError::OrphanSidecars {
+            files: vec![
+                "/ws/.unblock/unblock.db-wal".into(),
+                "/ws/.unblock/unblock.db-shm".into(),
+            ],
+        };
+        assert_eq!(err.code(), ErrorCode::DatabaseError);
+        assert_eq!(err.code().exit_code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "orphan database sidecar files beside the missing database: \
+             /ws/.unblock/unblock.db-wal, /ws/.unblock/unblock.db-shm; stop every unblock process \
+             on this workspace first (every `unblock mcp` server and every CLI command), because a \
+             running process's `-wal` and `-shm` are live files, then move each file into a new \
+             directory under `.unblock/.recovery/` and run `unblock init` again"
+        );
+        assert!(
+            to_structured(err).hint.is_none(),
+            "the refusal publishes no structured hint"
+        );
+
+        let with_newline = || CliError::OrphanSidecars {
+            files: vec!["/ws/a\nb/.unblock/unblock.db-journal".into()],
+        };
+        let display = with_newline().to_string();
+        assert!(!display.contains('\n'), "no raw newline: {display:?}");
+        assert!(
+            display.contains(r"/ws/a\nb/.unblock/unblock.db-journal"),
+            "the path carries the escaped newline: {display:?}"
+        );
+
+        let (mut out, mut err_sink) = (Vec::new(), Vec::new());
+        let code = into_exit_to(
+            with_newline(),
+            OutputFormat::Plain,
+            StdoutRole::Reports,
+            &mut out,
+            &mut err_sink,
+        );
+        assert_eq!(code, 2);
+        assert!(out.is_empty(), "the human arm never uses stdout");
+        let line = String::from_utf8(err_sink).expect("utf8 diagnostic");
+        assert!(
+            line.starts_with("error[DATABASE_ERROR]: "),
             "the NFR-14 line shape: {line:?}"
         );
         assert!(
