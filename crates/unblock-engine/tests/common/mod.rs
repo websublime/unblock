@@ -1459,3 +1459,19 @@ pub async fn raw_connection(db: &std::path::Path) -> RawConnection {
         _close_guard: close_guard,
     }
 }
+
+/// Hand-built pre-open facts of a clean workspace, for a `doctor` call on an in-memory session
+/// (which has no database file to gather facts from).
+#[cfg(feature = "health")]
+#[must_use]
+pub fn clean_preopen() -> unblock_engine::PreOpenFacts {
+    unblock_engine::PreOpenFacts {
+        db: unblock_engine::DbFileFact::SqliteHeader,
+        lost: false,
+        wal_len: None,
+        shm_present: false,
+        journal_present: false,
+        write_lock_held: false,
+        recovery_entries: Vec::new(),
+    }
+}

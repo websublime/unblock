@@ -35,6 +35,13 @@ impl Session {
     #[cfg(feature = "sync")]
     pub async fn export_jsonl(&self, path: &Path) -> Result<ExportReport> {
         self.gated_runtime()?;
+        self.write_export(path).await
+    }
+
+    /// The ungated export body, shared by [`Session::export_jsonl`] and `recover()`'s
+    /// `regenerate_export` (which runs it under the permit and `.write.lock` it already holds).
+    #[cfg(feature = "sync")]
+    pub(crate) async fn write_export(&self, path: &Path) -> Result<ExportReport> {
         let report = unblock_sync::export_jsonl(
             &*self.storage,
             path,

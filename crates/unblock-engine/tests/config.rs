@@ -170,7 +170,8 @@ async fn assert_every_gated_method_refuses(session: &Session, dir: &Path, keys: 
     gated!(session.import_jsonl(&jsonl, ImportOptions::default()));
     gated!(session.import_bd(&jsonl));
     gated!(session.migrate());
-    gated!(session.doctor());
+    #[cfg(feature = "health")]
+    gated!(session.doctor(&common::clean_preopen()));
     gated!(session.recover());
     gated!(session.create(&issue));
     gated!(session.create_issue(new_issue("gated")));

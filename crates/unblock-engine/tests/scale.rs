@@ -3,23 +3,27 @@
 //!
 //! Seeds the storage-direct, validated-but-non-minted 250k corpus via
 //! [`unblock_storage::testkit::seed_corpus`] (batched `create_issues`, NOT the O(N²) engine mint —
-//! D34/F-2), wraps it in a real [`Session`] over a live on-disk `.unblock/` (the same
+//! D34/F-2), adds the D58 health shape (`seed_health_shape`: 1,000 parents with children, their
+//! `child_counters` rows and duplicated `metadata` keys) and times the `health_facts` probe on it,
+//! then wraps it in a real [`Session`] over a live on-disk `.unblock/` (the same
 //! `WorkspaceContext` shape `unblock-config` builds), and asserts the engine's list/ready/count read
 //! paths stay bounded at 250k and `Session::integrity_check` is clean. The engine adds a policy
 //! re-rank over the raw storage read, so this covers the L5 read cost the storage `scale.rs` does not.
 //!
-//! Gated on `feature = "testkit"` (it needs `seed_corpus`); it compiles to zero tests under a plain
+//! Gated on `feature = "testkit"` (it needs `seed_corpus`) and the default-on `health` feature (it
+//! calls `doctor`); it compiles to zero tests under a plain
 //! `cargo test --workspace`, and runs in the CI `scale` job via
 //! `cargo test -p unblock-engine --features testkit --test scale`.
-#![cfg(feature = "testkit")]
+#![cfg(all(feature = "testkit", feature = "health"))]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
-use unblock_engine::{Session, SessionConfig};
+use unblock_engine::preopen::gather_preopen;
+use unblock_engine::{PreOpenFacts, Session, SessionConfig};
 use unblock_model::{CountGroupBy, ListFilters};
-use unblock_storage::testkit::seed_corpus;
+use unblock_storage::testkit::{seed_corpus, seed_health_shape};
 use unblock_storage::{DEFAULT_WRITE_LOCK_TIMEOUT_MS, LibsqlStorage, Storage};
 
 /// The v1 NFR-2 acceptance corpus (per-PR).
@@ -31,9 +35,14 @@ const READ_GUARD: Duration = Duration::from_secs(15);
 /// A realistic page size for the list/ready reads at scale (agents page).
 const PAGE: usize = 1_000;
 
+/// D58 criterion (o): the parents of the hierarchical health shape, and the children of each.
+const HEALTH_PARENTS: usize = 1_000;
+const CHILDREN_PER_PARENT: usize = 3;
+
 /// Build a `Session` over a fresh on-disk `.unblock/` with a file-backed store seeded with `n`
-/// issues (storage-direct — F-2), returning the session and its owning tempdir.
-async fn build_session(n: usize) -> (Session, tempfile::TempDir) {
+/// issues (storage-direct — F-2) plus the D58 health shape, returning the session, the pre-open
+/// facts gathered while no store was open, and the owning tempdir.
+async fn build_session(n: usize) -> (Session, PreOpenFacts, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let workspace_dir = tmp.path().to_path_buf();
     let unblock_dir = workspace_dir.join(".unblock");
@@ -50,13 +59,37 @@ async fn build_session(n: usize) -> (Session, tempfile::TempDir) {
         .expect("open_local");
     storage.migrate().await.expect("migrate");
     seed_corpus(&storage, n).await.expect("seed corpus");
-    let storage: Arc<dyn Storage> = Arc::new(storage);
+    seed_health_shape(&storage, HEALTH_PARENTS, CHILDREN_PER_PARENT)
+        .await
+        .expect("seed health shape");
+
+    // D58 (o): the probe's own timing, reported like the read timings below.
+    let t = Instant::now();
+    let facts = storage.health_facts().await.expect("health_facts");
+    eprintln!(
+        "engine scale: D58 health_facts (integrity rows={}, drift={}, duplicate keys={}) in {:?}",
+        facts.integrity_rows.len(),
+        facts.child_counter_drift.len(),
+        facts.duplicate_metadata_keys.len(),
+        t.elapsed()
+    );
+    assert!(
+        !facts.duplicate_metadata_keys.is_empty(),
+        "the seeded shape duplicates metadata keys"
+    );
+    drop(storage);
 
     let paths = ConfigPaths {
         db_path,
         jsonl_path,
         unblock_dir,
     };
+    // Gathered while no connection is open (D58 clause (6)), as the cli does before its open.
+    let preopen = gather_preopen(&paths).expect("gather_preopen");
+    let storage = LibsqlStorage::open_local(&paths.db_path, DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+        .await
+        .expect("reopen_local");
+    let storage: Arc<dyn Storage> = Arc::new(storage);
     let ctx = WorkspaceContext {
         storage,
         workspace_dir,
@@ -75,13 +108,13 @@ async fn build_session(n: usize) -> (Session, tempfile::TempDir) {
     let session = Session::open(ctx, SessionConfig::default())
         .await
         .expect("open session");
-    (session, tmp)
+    (session, preopen, tmp)
 }
 
 /// Seed `n` issues and assert the engine read paths stay bounded + integrity is clean at that scale.
 async fn run_scale(n: usize) {
     let t = Instant::now();
-    let (session, _tmp) = build_session(n).await;
+    let (session, preopen, _tmp) = build_session(n).await;
     eprintln!(
         "engine scale: built + seeded {n} issues in {:?}",
         t.elapsed()
@@ -100,7 +133,11 @@ async fn run_scale(n: usize) {
         .sum();
     let count_elapsed = t.elapsed();
     eprintln!("engine scale: count(total) = {total} in {count_elapsed:?}");
-    assert_eq!(total, n, "every seeded row is present");
+    assert_eq!(
+        total,
+        n + HEALTH_PARENTS * (1 + CHILDREN_PER_PARENT),
+        "every seeded row is present (the corpus plus the health shape)"
+    );
     assert!(
         count_elapsed < READ_GUARD,
         "count(total) at {n} exceeded the boundedness guard: {count_elapsed:?}"
@@ -168,8 +205,7 @@ async fn run_scale(n: usize) {
         "integrity_check must be clean at {n}: {problems:?}"
     );
 
-    #[cfg(feature = "health")]
-    measure_d45_doctor_cost(&session, n).await;
+    measure_d45_doctor_cost(&session, &preopen, n).await;
 
     drop(session);
 }
@@ -196,8 +232,7 @@ async fn run_scale(n: usize) {
 /// so this corpus has an EMPTY `dependencies` table — the driving table of the new query. A workspace
 /// with a real edge graph pays more, but now in proportion to its EDGE count rather than its ROW
 /// count, which is exactly what the amendment bought.
-#[cfg(feature = "health")]
-async fn measure_d45_doctor_cost(session: &Session, n: usize) {
+async fn measure_d45_doctor_cost(session: &Session, preopen: &PreOpenFacts, n: usize) {
     use unblock_model::DiagnosticKind;
 
     let t = Instant::now();
@@ -212,11 +247,11 @@ async fn measure_d45_doctor_cost(session: &Session, n: usize) {
     );
 
     let t = Instant::now();
-    let doctor = session.doctor().await.expect("doctor");
+    let doctor = session.doctor(preopen).await.expect("doctor").report;
     let doctor_elapsed = t.elapsed();
     eprintln!(
-        "engine scale: D45 doctor() (integrity + file-state + the dangling fold) findings={} in \
-         {doctor_elapsed:?}",
+        "engine scale: D45 doctor() (health_facts + export scan + the dangling fold) findings={} \
+         in {doctor_elapsed:?}",
         doctor.findings.len()
     );
     eprintln!(

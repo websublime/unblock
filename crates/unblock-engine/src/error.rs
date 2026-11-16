@@ -30,15 +30,17 @@
 //! - `ShutdownInProgress` → [`ErrorCode::InternalError`]
 //! - `WritePermitPoisoned`→ [`ErrorCode::InternalError`]
 //! - `FeatureNotWired`    → [`ErrorCode::InternalError`]
+//! - `PreOpenWithLiveConnection` → [`ErrorCode::InternalError`] (`health` feature)
+//! - `SidecarCaptureRefused` → [`ErrorCode::DatabaseError`] (`health` feature)
 //!
 //! # Additive growth (NO v1 signature change)
 //!
 //! `Sync { source: SyncError }` landed at **T2.4** (cfg-gated behind the default-on `sync` feature,
 //! forwarding `source.code()`/`hint()`/`context()`); `FeatureNotWired` (`"sync"`) is now removed for
 //! `export_jsonl`/`import_jsonl` **and `import_bd`** (all wired at T2.4/T2.5), kept only under
-//! `--no-default-features`. `Health { source: HealthError }` lands the same way at **T3.3** —
-//! `doctor()` is wired (HEALTH-LITE, D29), so a health failure surfaces transparently, while
-//! `recover()` STAYS `FeatureNotWired { feature: "health" }` (its `--repair`/evidence body is **v1.1**).
+//! `--no-default-features`. `Health { source: HealthError }` lands the same way at **T3.3**, so a
+//! `doctor()`/`recover()` health failure surfaces transparently. Under `--no-default-features`
+//! `recover()` returns `FeatureNotWired { feature: "health" }`.
 //! No backend type ever leaks (spine §6 rule 2).
 
 use snafu::Snafu;
@@ -94,11 +96,10 @@ pub enum EngineError {
         source: unblock_sync::SyncError,
     },
 
-    /// A `unblock-health` doctor operation failed (T3.3/HEALTH-LITE, D29). Additive, cfg-gated behind
-    /// the default-on `health` feature — vanishes together with the `unblock-health` dep under
-    /// `--no-default-features`. Forwards `source.code()`/`hint()`/`context()` (`CodedError`). Wiring
-    /// [`Session::doctor`](crate::Session::doctor) makes a health failure surface transparently;
-    /// `recover()` STAYS `FeatureNotWired` (its repair body is v1.1).
+    /// A `unblock-health` operation failed (classification evidence, the recovery run directory).
+    /// Cfg-gated behind the default-on `health` feature, so it vanishes together with the
+    /// `unblock-health` dep under `--no-default-features`. Forwards `source.code()`/`hint()`/
+    /// `context()` (`CodedError`).
     #[cfg(feature = "health")]
     #[snafu(transparent)]
     Health {
@@ -128,16 +129,41 @@ pub enum EngineError {
 
     /// A method whose backing crate is not compiled in returned its typed seam error.
     ///
-    /// `feature` is `"sync"` (the `export_jsonl`/`import_jsonl`/`import_bd` bodies, wired at T2.4/T2.5
-    /// — this variant is now reached ONLY under `--no-default-features`) or `"health"` (the
-    /// `doctor()`/`recover()` seam: `doctor()` is wired at T3.3/HEALTH-LITE (D29), so post-T3.3 this
-    /// reaches `"health"` only via `recover()`, whose `--repair`/evidence body is v1.1). It is **never**
-    /// a faked success and **never** inline L3 logic. Maps to [`ErrorCode::InternalError`] (exit 1)
-    /// until/unless the dep crate is compiled in.
+    /// `feature` is `"sync"` (the `export_jsonl`/`import_jsonl`/`import_bd` bodies) or `"health"`
+    /// (`recover()`); both are reached ONLY under `--no-default-features`. It is **never** a faked
+    /// success and **never** inline L3 logic. Maps to [`ErrorCode::InternalError`] (exit 1).
     #[snafu(display("feature not wired: {feature}"))]
     FeatureNotWired {
-        /// The not-yet-wired feature: `"sync"` or `"health"`.
+        /// The feature that is not compiled in: `"sync"` or `"health"`.
         feature: &'static str,
+    },
+
+    /// `preopen::gather_preopen` was called while this process holds a libsql connection to the
+    /// database file (PRD §4 D58 clause (11)). Reading the file then would close a descriptor that
+    /// drops the connection's POSIX locks (`howtocorrupt.html` section 2.2), so only an engine or
+    /// cli bug reaches it. Maps to [`ErrorCode::InternalError`] (exit 1).
+    #[cfg(feature = "health")]
+    #[snafu(display(
+        "a database connection to '{}' is open in this process; pre-open checks must run before \
+         any connection exists",
+        path.display()
+    ))]
+    PreOpenWithLiveConnection {
+        /// The database file.
+        path: std::path::PathBuf,
+    },
+
+    /// `preopen::capture_sidecars` refused an anomalous sidecar before any connection exists (PRD
+    /// §4 D58, tracker comment 390): it is a symlink or not a regular file, or it exceeds the
+    /// export-copy size cap. A refusal, so it maps to [`ErrorCode::DatabaseError`] (exit 2). A
+    /// failed read stays the storage `IO_ERROR` (exit 8).
+    #[cfg(feature = "health")]
+    #[snafu(display("cannot capture '{}' before repair: {reason}", path.display()))]
+    SidecarCaptureRefused {
+        /// The sidecar file.
+        path: std::path::PathBuf,
+        /// Why it was refused, naming the cap for an oversized file.
+        reason: String,
     },
 }
 
@@ -159,6 +185,10 @@ impl CodedError for EngineError {
             Self::ShutdownInProgress | Self::WritePermitPoisoned | Self::FeatureNotWired { .. } => {
                 ErrorCode::InternalError
             }
+            #[cfg(feature = "health")]
+            Self::PreOpenWithLiveConnection { .. } => ErrorCode::InternalError,
+            #[cfg(feature = "health")]
+            Self::SidecarCaptureRefused { .. } => ErrorCode::DatabaseError,
         }
     }
 
@@ -178,6 +208,8 @@ impl CodedError for EngineError {
             | Self::ShutdownInProgress
             | Self::WritePermitPoisoned
             | Self::FeatureNotWired { .. } => None,
+            #[cfg(feature = "health")]
+            Self::PreOpenWithLiveConnection { .. } | Self::SidecarCaptureRefused { .. } => None,
         }
     }
 
@@ -198,6 +230,10 @@ impl CodedError for EngineError {
             | Self::ShutdownInProgress
             | Self::WritePermitPoisoned
             | Self::FeatureNotWired { .. } => serde_json::Map::new(),
+            #[cfg(feature = "health")]
+            Self::PreOpenWithLiveConnection { .. } | Self::SidecarCaptureRefused { .. } => {
+                serde_json::Map::new()
+            }
         }
     }
     // `retryable()` is intentionally the default (`code().is_retryable()`): a transparent source's

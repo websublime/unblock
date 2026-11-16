@@ -21,11 +21,9 @@
 mod anomaly;
 mod audit;
 mod classify;
-mod doctor;
 mod error;
 mod export;
 mod facts;
-mod file_state;
 mod integrity;
 mod level;
 mod paths;
@@ -34,14 +32,10 @@ pub mod recovery;
 pub use anomaly::{Advisory, AnomalyClass, PlannedAction, PlannedRepair, RepairPath};
 pub use audit::ReliabilityAuditRecord;
 pub use classify::{WorkspaceClassification, classify};
-pub use doctor::{DoctorReport, HealthSummary, run_doctor};
 pub use error::HealthError;
 pub use export::scan_export;
 pub use facts::{
     AdvisoryFacts, DbFacts, DbFileFact, ExportFacts, ExportScan, PreOpenFacts, RecoveryEntry,
-};
-pub use file_state::{
-    FileAnomaly, classify_file_state, is_orphaned_lock_file, jsonl_has_conflict_markers,
 };
 pub use integrity::classify_integrity_row;
 pub use level::HealthLevel;

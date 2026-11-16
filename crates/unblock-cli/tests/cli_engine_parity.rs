@@ -156,23 +156,62 @@ fn never_migrated_workspace() -> Workspace {
     ws
 }
 
+/// FR-9 parity for `doctor` (PRD §4 D58 clause (8)): the cli renders `HealthReport.report` verbatim.
+/// The engine side runs the cli's own phases (a resolve-only open, `gather_preopen`, a read-only
+/// open, one `Session::doctor(&preopen)`), so any cli-added, dropped or reordered row fails here.
+/// The workspace holds a duplicated `metadata` key, so the report carries an anomaly row and a
+/// `repair_planned` row besides the level and schema rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn doctor_cli_renders_session_doctor_verbatim() {
-    // T3.3 (D29/F4): the cli RENDERS the wired `Session::doctor()` `DiagnosticReport` directly (no
-    // transformation), so the rendered findings match the engine's report exactly — the FR-9 no-drift
-    // guarantee for the doctor path.
-    let ws = Workspace::init();
+    use unblock_config::{OpenedContext, StorageOpenMode, open_with_cli_with_env};
+    use unblock_engine::HealthLevel;
+    use unblock_engine::preopen::gather_preopen;
 
-    // CLI side: `unblock doctor --output json` (child process; it closes its session on exit).
+    let ws = Workspace::init();
+    {
+        let conn = common::raw_connection(&ws.db_path()).await;
+        for value in ["v1", "v2"] {
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES ('k', ?1)",
+                libsql::params![value],
+            )
+            .await
+            .expect("insert a metadata row");
+        }
+    }
+
+    // CLI side: `unblock doctor --output json` (a child process; it closes its session on exit).
     let out = output_locked(ws.cmd().args(["doctor", "--output", "json"]), "run doctor");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(0), "Drifted exits 0");
     let cli_report: Value = serde_json::from_slice(&out.stdout).expect("valid JSON doctor report");
 
-    // Engine side: `Session::doctor()` over the SAME workspace (after the child exited — single-MCP-server).
-    let session = open_session(&ws).await;
-    let engine_report = session.doctor().await.expect("Session::doctor");
+    // Engine side: the same phases over the same workspace, after the child exited.
+    let overrides = CliOverrides::new().with_dir(ws.unblock_dir());
+    let OpenedContext::Resolved(resolved) =
+        open_with_cli_with_env(None, &overrides.clone().with_no_db(true), &MapEnv::empty())
+            .await
+            .expect("resolve-only open")
+    else {
+        panic!("no_db resolves only");
+    };
+    let preopen = gather_preopen(&resolved.paths).expect("gather the pre-open facts");
+    let OpenedContext::Storage(ctx) = open_with_cli_with_env(
+        None,
+        &overrides.with_storage_open(StorageOpenMode::ReadOnly),
+        &MapEnv::empty(),
+    )
+    .await
+    .expect("read-only open") else {
+        panic!("a storage-bearing open");
+    };
+    let session = Session::open(ctx, SessionConfig::default())
+        .await
+        .expect("open session");
+    let health = session.doctor(&preopen).await.expect("Session::doctor");
+    drop(session);
+    assert_eq!(health.level, HealthLevel::Drifted);
 
-    // Kind parity + verbatim finding parity (label + detail, in order): the cli adds nothing.
+    // Kind parity and verbatim finding parity (label and detail, in order).
     assert_eq!(
         cli_report["kind"], "info",
         "doctor reuses DiagnosticKind::Info"
@@ -180,17 +219,19 @@ async fn doctor_cli_renders_session_doctor_verbatim() {
     let cli_findings = cli_report["findings"].as_array().expect("findings array");
     assert_eq!(
         cli_findings.len(),
-        engine_report.findings.len(),
+        health.report.findings.len(),
         "no cli-added findings (verbatim render); cli: {cli_report}"
     );
-    for (cli_finding, engine_finding) in cli_findings.iter().zip(&engine_report.findings) {
+    for (cli_finding, engine_finding) in cli_findings.iter().zip(&health.report.findings) {
         assert_eq!(cli_finding["label"], engine_finding.label, "label parity");
         assert_eq!(
             cli_finding["detail"], engine_finding.detail,
             "detail parity"
         );
     }
-    // A clean workspace is healthy with clean integrity (sanity on the shared content).
-    assert_eq!(detail(&cli_report, "health"), Some("healthy"));
-    assert_eq!(detail(&cli_report, "integrity"), Some("ok"));
+    assert_eq!(detail(&cli_report, "health"), Some("drifted"));
+    assert!(
+        detail(&cli_report, "duplicate_metadata_key").is_some(),
+        "cli: {cli_report}"
+    );
 }

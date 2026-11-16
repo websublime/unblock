@@ -562,19 +562,28 @@ mod tests {
         document
     }
 
-    /// A report shaped like the one `Session::doctor()` returns. Its integrity problem holds a
-    /// newline, and its sidecar detail holds a comma.
+    /// A report shaped like the one `Session::doctor()` returns (PRD §4 D58 clause (8) order): the
+    /// level row, the anomalies, the `repair_planned` rows, an advisory, the two D46 rows and the
+    /// D45 dangling block. Its page-corruption row holds a newline, and its manual row a comma.
     fn doctor_report() -> DiagnosticReport {
         let rows = [
-            ("health", "recoverable"),
-            ("integrity", "1 problem(s)"),
+            ("health", "unsafe"),
+            ("sidecar_mismatch", "a -shm file exists without a -wal file"),
             (
-                "integrity_problem",
-                "*** in database main ***\nPage 3 is never used",
+                "page_corruption",
+                "integrity_check reports: *** in database main ***\nPage 3 is never used",
             ),
-            ("sidecar_mismatch", "sidecar mismatch (WAL=false, SHM=true)"),
-            ("schema_version", "2"),
-            ("schema_expected", "2"),
+            ("repair_planned", "quarantine_sidecar (preopen-exclusive)"),
+            (
+                "repair_planned",
+                "manual (manual): restore from a backup, or from the newest snapshot",
+            ),
+            (
+                "write_lock_held",
+                "another process holds .unblock/.write.lock right now",
+            ),
+            ("schema_version", "3"),
+            ("schema_expected", "3"),
             ("ub-a1", "blocks -> ub-ghost"),
         ];
         DiagnosticReport {

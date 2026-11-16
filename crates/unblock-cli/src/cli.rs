@@ -108,7 +108,7 @@ pub enum Command {
     /// direction ships in a patch release; it is stated here rather than left to be inferred from
     /// silence (D46 clause (8)).
     Migrate(MigrateArgs),
-    /// Run read-only health diagnostics on the workspace (doctor-lite, FR-16).
+    /// Classify workspace health read-only and list the repairs `--repair` would run (FR-16).
     Doctor(DoctorArgs),
     /// Print version / build metadata (no workspace, no network).
     Version(VersionArgs),
@@ -156,9 +156,15 @@ pub struct McpArgs {}
 #[derive(Debug, Args)]
 pub struct MigrateArgs {}
 
-/// `unblock doctor` — no v1 flags (`--repair` is a v1.1 seam, AF-1/D29).
+/// `unblock doctor` — plain `doctor` is the read-only dry run; `--repair` runs the planned repairs
+/// (PRD §4 D58).
 #[derive(Debug, Args)]
-pub struct DoctorArgs {}
+pub struct DoctorArgs {
+    /// Run the planned repairs (file repairs in an exclusive pre-open window, SQL repairs online),
+    /// writing evidence under `.unblock/.recovery/` first, then exit by the re-classified level.
+    #[arg(long)]
+    pub repair: bool,
+}
 
 /// `unblock version` — `--short` prints the bare version (no `--check`; no network, AD-5).
 #[derive(Debug, Args)]

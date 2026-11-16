@@ -117,10 +117,11 @@ async fn shutdown_then_writes_are_refused_and_double_shutdown_is_noop() {
         .expect("second shutdown is a no-op");
 }
 
+/// D58: `recover()` on a healthy workspace returns no action row and writes nothing. The
+/// file-backed recover cells (evidence, drift, export, failure, lock posture) live in `health.rs`.
+#[cfg(feature = "health")]
 #[tokio::test]
-async fn recover_returns_health_seam_and_writes_nothing() {
-    // recover() STAYS the typed FeatureNotWired health seam through v1 (F1/D29) — its --repair /
-    // evidence body is v1.1. It must write nothing.
+async fn recover_on_a_healthy_session_returns_no_action_rows_and_writes_nothing() {
     let session = session().await;
     let issue = common::issue("ub-0001", unblock_model::Priority::MEDIUM, 1000);
     session.create(&issue).await.expect("create");
@@ -129,101 +130,102 @@ async fn recover_returns_health_seam_and_writes_nothing() {
         .await
         .expect("list");
 
-    let recover_err = session.recover().await.expect_err("health seam");
-    assert!(matches!(
-        recover_err,
-        EngineError::FeatureNotWired { feature: "health" }
-    ));
-
-    // The DB is unchanged (the seam wrote nothing).
-    let after = session
-        .list(&unblock_model::ListFilters::default())
-        .await
-        .expect("list");
-    assert_eq!(before.len(), after.len());
-}
-
-/// T3.3 (HEALTH-LITE, D29): `doctor()` is WIRED — it returns a `DiagnosticReport` of the reused
-/// `DiagnosticKind::Info` (F2). On a fresh in-memory workspace (clean integrity, no on-disk file-state
-/// anomalies) the composite is healthy.
-#[cfg(feature = "health")]
-#[tokio::test]
-async fn doctor_wired_returns_healthy_info_report() {
-    use unblock_engine::DiagnosticKind;
-
-    let session = session().await;
-    let report = session
-        .doctor()
-        .await
-        .expect("doctor is wired (health-lite)");
-
-    assert_eq!(
-        report.kind,
-        DiagnosticKind::Info,
-        "doctor reuses DiagnosticKind::Info (F2 — no new model variant)"
-    );
-    let detail = |label: &str| {
-        report
-            .findings
-            .iter()
-            .find(|f| f.label == label)
-            .map(|f| f.detail.as_str())
-    };
-    assert_eq!(
-        detail("health"),
-        Some("healthy"),
-        "clean workspace is healthy; findings: {:?}",
-        report.findings
-    );
-    assert_eq!(detail("integrity"), Some("ok"), "clean integrity");
+    let report = session.recover().await.expect("recover");
     assert!(
         !report
             .findings
             .iter()
-            .any(|f| f.label == "integrity_problem"),
-        "a clean DB has no integrity problems"
+            .any(|f| f.label == "repair" || f.label == "evidence"),
+        "nothing to repair: {:?}",
+        report.findings
+    );
+    assert!(!session.workspace_dir().join(".unblock/.recovery").exists());
+
+    let after = session
+        .list(&unblock_model::ListFilters::default())
+        .await
+        .expect("list");
+    assert_eq!(before, after);
+}
+
+/// D58 clause (8): a build without the `health` feature keeps `recover()`'s signature and returns
+/// the typed `FeatureNotWired { feature: "health" }`.
+#[cfg(not(feature = "health"))]
+#[tokio::test]
+async fn no_default_features_recover_returns_feature_not_wired() {
+    let session = session().await;
+    let err = session
+        .recover()
+        .await
+        .expect_err("health is not compiled in");
+    assert!(matches!(
+        err,
+        EngineError::FeatureNotWired { feature: "health" }
+    ));
+}
+
+/// D58: `doctor()` returns a typed `HealthReport` whose report reuses `DiagnosticKind::Info` (F2).
+/// A fresh workspace is healthy, its first row is the `health` level row, and no integrity row
+/// exists any more (the rows come from `health_facts`).
+#[cfg(feature = "health")]
+#[tokio::test]
+async fn doctor_returns_a_healthy_info_report_on_a_fresh_workspace() {
+    use unblock_engine::{DiagnosticKind, HealthLevel};
+
+    let session = session().await;
+    let health = session
+        .doctor(&common::clean_preopen())
+        .await
+        .expect("doctor");
+
+    assert_eq!(health.level, HealthLevel::Healthy);
+    assert!(health.planned.is_empty());
+    assert_eq!(health.report.kind, DiagnosticKind::Info);
+    assert_eq!(health.report.findings[0].label, "health");
+    assert_eq!(health.report.findings[0].detail, "healthy");
+    assert!(
+        !health
+            .report
+            .findings
+            .iter()
+            .any(|f| f.label.starts_with("integrity")),
+        "{:?}",
+        health.report.findings
     );
 }
 
-/// T3.3: a pure file-state anomaly (a merge-conflict marker in the JSONL) FOLDS INTO the wired
-/// `doctor()` report — surfaced as an advisory `jsonl_conflict_markers` finding, lifting the composite
-/// `health` to `unsafe` (the F5 severity for conflict markers).
+/// D58: a merge-conflict marker in the export is `jsonl_conflict_markers`/`Recoverable`, with its
+/// `regenerate_export` repair planned online.
 #[cfg(feature = "health")]
 #[tokio::test]
-async fn doctor_folds_in_a_file_state_anomaly() {
-    use std::io::Write as _;
+async fn doctor_reports_conflict_markers_in_the_export_as_recoverable() {
+    use unblock_engine::HealthLevel;
 
     let (session, tmp) = common::session_with_unblock_dir().await;
-    let unblock_dir = tmp.path().join(".unblock");
-    // A valid magic-header db file so DatabaseMissing/NotSqlite do NOT fire (the live storage is
-    // in-memory; this is only the on-disk file-state the classifier inspects).
-    let mut db = std::fs::File::create(unblock_dir.join("unblock.db")).expect("create db file");
-    db.write_all(b"SQLite format 3\0").expect("magic");
-    db.write_all(&[0_u8; 100]).expect("body");
-    // A JSONL with an unresolved merge-conflict marker.
     std::fs::write(
-        unblock_dir.join("issues.jsonl"),
+        tmp.path().join(".unblock").join("issues.jsonl"),
         "<<<<<<< HEAD\n{\"id\":\"a\"}\n=======\n{\"id\":\"b\"}\n>>>>>>> branch\n",
     )
     .expect("write conflict jsonl");
 
-    let report = session.doctor().await.expect("doctor is wired");
-    assert!(
-        report
-            .findings
-            .iter()
-            .any(|f| f.label == "jsonl_conflict_markers"),
-        "the file-state anomaly must fold into the doctor report; findings: {:?}",
-        report.findings
+    let health = session
+        .doctor(&common::clean_preopen())
+        .await
+        .expect("doctor");
+    assert_eq!(health.level, HealthLevel::Recoverable);
+    let labels: Vec<&str> = health
+        .report
+        .findings
+        .iter()
+        .map(|f| f.label.as_str())
+        .collect();
+    assert_eq!(
+        &labels[..3],
+        ["health", "jsonl_conflict_markers", "repair_planned"]
     );
     assert_eq!(
-        report
-            .findings
-            .iter()
-            .find(|f| f.label == "health")
-            .map(|f| f.detail.as_str()),
-        Some("unsafe"),
-        "a conflict marker lifts the composite health to unsafe (F5)"
+        health.report.findings[2].detail,
+        "regenerate_export (online)"
     );
 }
 
@@ -284,11 +286,17 @@ async fn doctor_schema_findings_report_the_stamp_and_the_build_version_separatel
             .expect("re-stamp to the baseline");
     }
 
-    // 3. `Session::open` does NOT migrate (the config facade does, and this cell deliberately
-    //    bypasses it), so the drifted stamp survives into `doctor()`.
-    let storage = LibsqlStorage::open_local(&db_path, DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+    // 3. Gather the pre-open facts while no connection is open, then open read-only (no migrate),
+    //    so the drifted stamp survives into `doctor()`.
+    let facts = unblock_engine::preopen::gather_preopen(&unblock_config::ConfigPaths {
+        unblock_dir: unblock_dir.clone(),
+        db_path: db_path.clone(),
+        jsonl_path: unblock_dir.join("issues.jsonl"),
+    })
+    .expect("gather_preopen");
+    let storage = LibsqlStorage::open_local_read_only(&db_path)
         .await
-        .expect("reopen_local");
+        .expect("open read-only");
     let storage: Arc<dyn Storage> = Arc::new(storage);
     let session = common::session_over_in_dir(
         storage,
@@ -298,7 +306,7 @@ async fn doctor_schema_findings_report_the_stamp_and_the_build_version_separatel
     )
     .await;
 
-    let report = session.doctor().await.expect("doctor is wired");
+    let report = session.doctor(&facts).await.expect("doctor").report;
     let detail = |label: &str| {
         report
             .findings

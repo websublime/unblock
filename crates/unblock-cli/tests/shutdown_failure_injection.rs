@@ -43,8 +43,8 @@
 //!   accepting for the *line* but never for the *behaviour*. Post-D38 it is a genuine backstop, and
 //!   the first-signal pre-handshake exit is proven deterministically by
 //!   `mcp_lifecycle.rs::a_signal_before_any_handshake_exits_128_plus_signo_and_never_hangs`.
-//! - **C-doctor** — after a clean C1-style round, `unblock doctor --output json` reports a clean
-//!   integrity header (reusing `migrate_doctor.rs`'s promoted `json_report`/`detail` helpers — no
+//! - **C-doctor** — after a clean C1-style round, `unblock doctor --output json` reports
+//!   `health: healthy` (reusing `migrate_doctor.rs`'s promoted `json_report`/`detail` helpers — no
 //!   invented report shape).
 //! - **C-neg** (gated `#[ignore]`) — a negative CONTROL proving `reopen_and_check`'s two oracle
 //!   channels (integrity / count) are EACH independently capable of catching a real defect. This does
@@ -310,13 +310,13 @@ async fn c_doctor_reports_clean_integrity_after_a_shutdown_round() {
     );
     drop(client);
 
-    // Reuses `migrate_doctor.rs`'s promoted `json_report`/`detail` helpers — asserts exit 0 (inside
-    // `json_report`) + the REAL `DoctorReport` integrity finding (no invented shape).
+    // Reuses `migrate_doctor.rs`'s promoted `json_report`/`detail` helpers. `json_report` asserts
+    // exit 0, and the `HealthReport` leads with its `health` row, which one `integrity_check` sets.
     let report = json_report(&ws, &["doctor", "--output", "json"]);
     assert_eq!(
-        detail(&report, "integrity"),
-        Some("ok"),
-        "doctor must report a clean integrity header after the round: {report}"
+        detail(&report, "health"),
+        Some("healthy"),
+        "doctor must report a healthy workspace after the round: {report}"
     );
 }
 
