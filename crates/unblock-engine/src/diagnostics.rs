@@ -5,9 +5,8 @@
 //! `unblock-model`** (spine §1.10, CF-B) and re-exported (never redefined here) so `unblock-render`
 //! (model + error only) can format them. The EIGHT landed kinds — `Stats|Info|Where|Version|Lint|
 //! Changelog|Orphans|Dangling` (the eighth added by D45) — are the caller-supplied **input** (this is
-//! the BUILD-now read path; contrast `doctor()`/`recover()`, the `health` seam: `doctor()` is wired
-//! at T3.3/HEALTH-LITE and REUSES the existing `DiagnosticKind::Info` for its lite report — no new
-//! variant, D29/F2 — while `recover()` stays `FeatureNotWired` for its v1.1 repair body).
+//! the BUILD-now read path; `doctor()` and `recover()`, the `health` pair, report with the existing
+//! `DiagnosticKind::Info` — no new variant, D29/F2).
 //!
 //! Every derivation is **pure-DB** (counts, `epic_child_rollup`, `closed_since`, `orphan_candidates`,
 //! `list`/`ready`/`blocked` reads) — it **never** shells to git or touches the network (FR-15 /

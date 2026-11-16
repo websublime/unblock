@@ -128,11 +128,14 @@ jobs:
       - name: D45 dangling diagnostics + doctor fold (engine testkit)
         run: cargo test -p unblock-engine --features testkit --locked --test dangling
       # D58 (v1.1) — criterion (f): the exclusive window's `locking_mode=EXCLUSIVE` proof, MEASURED on
-      # Linux here and on macOS in `exclusivity-macos` below.
+      # Linux here and on macOS in `exclusivity-macos` below. The engine's `health` cells read the
+      # testkit call counters (criterion (d)), so they run under the engine's `testkit` feature too.
       - name: D58 exclusive window, criterion (f) measured on Linux
         run: cargo test -p unblock-storage --features testkit --locked --test exclusive_window
       - name: D58 read-only open (criterion (l))
         run: cargo test -p unblock-storage --features testkit --locked --test read_only
+      - name: D58 engine health cells (testkit counters)
+        run: cargo test -p unblock-engine --features testkit --locked --test health
 
   exclusivity-macos:
     name: exclusivity (macOS, D58 criterion (f))
@@ -250,8 +253,10 @@ jobs:
       # testkit` (never `--all-features`). The `#[ignore]`d 1M soak variant is NOT run here.
       - name: NFR-2 storage scale (250k read budgets + integrity)
         run: cargo test -p unblock-storage --features testkit --locked --test scale
+      # `--nocapture` puts the timing lines (D58 criterion (o): the `health_facts` probe's own
+      # timing) in the job log.
       - name: NFR-2 engine scale (250k read budgets + integrity)
-        run: cargo test -p unblock-engine --features testkit --locked --test scale
+        run: cargo test -p unblock-engine --features testkit --locked --test scale -- --nocapture
 
   rate-limit:
     name: rate-limit (NFR-18 Arc<Semaphore> chokepoint)
@@ -544,6 +549,10 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: build without self-update (axoupdater/reqwest/hyper unreachable — AUTHORITATIVE proof)
         run: cargo build -p unblock-cli --no-default-features --locked
+      # D58 criterion (k): an engine built without `health` compiles, and `recover()` returns
+      # `FeatureNotWired{"health"}` there.
+      - name: engine without default features (D58 recover seam)
+        run: cargo test -p unblock-engine --no-default-features --locked --test lifecycle
       - name: control — no network crate resolves without self-update (runtime edges only)
         run: |
           tree="$(cargo tree -p unblock-cli --no-default-features --edges normal --locked)"

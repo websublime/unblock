@@ -35,6 +35,44 @@ fn config_case_faulty_db_config() -> (&'static str, EngineError) {
     )
 }
 
+/// The transparent `unblock-health` source, cfg-gated behind the default-on `health` feature. It
+/// forwards `HealthError::code()` (`DATABASE_ERROR` and the D58 evidence `IO_ERROR` here). The
+/// D58 pre-open refusal is engine-local `INTERNAL_ERROR`, and the ruling-390 capture refusal is
+/// engine-local `DATABASE_ERROR`. None is retryable.
+#[cfg(feature = "health")]
+fn health_cases() -> Vec<(&'static str, EngineError)> {
+    vec![
+        (
+            "Health::IntegrityCheckFailed",
+            unblock_health::HealthError::IntegrityCheckFailed {
+                rows: vec!["corrupt page".into()],
+            }
+            .into(),
+        ),
+        (
+            "Health::RecoveryEvidenceWrite",
+            unblock_health::HealthError::RecoveryEvidenceWrite {
+                source: std::io::Error::other("disk full"),
+                path: "/ws/.unblock/.recovery/run".into(),
+            }
+            .into(),
+        ),
+        (
+            "PreOpenWithLiveConnection",
+            EngineError::PreOpenWithLiveConnection {
+                path: "/ws/.unblock/unblock.db".into(),
+            },
+        ),
+        (
+            "SidecarCaptureRefused",
+            EngineError::SidecarCaptureRefused {
+                path: "/ws/.unblock/unblock.db-shm".into(),
+                reason: "not a regular file".into(),
+            },
+        ),
+    ]
+}
+
 /// Build the full `(variant-label -> (code, exit_code, retryable))` table.
 fn contract_rows() -> Vec<(&'static str, String, u8, bool)> {
     let cases: Vec<(&'static str, EngineError)> = vec![
@@ -119,18 +157,10 @@ fn contract_rows() -> Vec<(&'static str, String, u8, bool)> {
         cases
     };
 
-    // The transparent `unblock-health` source (T3.3/HEALTH-LITE, D29), cfg-gated behind the default-on
-    // `health` feature. It forwards `HealthError::code()` (exit-2 DATABASE_ERROR here), non-retryable.
     #[cfg(feature = "health")]
     let cases = {
         let mut cases = cases;
-        cases.push((
-            "Health::IntegrityCheckFailed",
-            unblock_health::HealthError::IntegrityCheckFailed {
-                rows: vec!["corrupt page".into()],
-            }
-            .into(),
-        ));
+        cases.extend(health_cases());
         cases
     };
 

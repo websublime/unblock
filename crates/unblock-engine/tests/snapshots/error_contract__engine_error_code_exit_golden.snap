@@ -104,5 +104,23 @@ expression: contract_rows()
     "DATABASE_ERROR",
     2,
     false
+  ],
+  [
+    "Health::RecoveryEvidenceWrite",
+    "IO_ERROR",
+    8,
+    false
+  ],
+  [
+    "PreOpenWithLiveConnection",
+    "INTERNAL_ERROR",
+    1,
+    false
+  ],
+  [
+    "SidecarCaptureRefused",
+    "DATABASE_ERROR",
+    2,
+    false
   ]
 ]

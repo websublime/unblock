@@ -1,5 +1,5 @@
-//! `impl Session` lifecycle — `open` / `shutdown` (BUILD-now) and `doctor` / `recover` (signatures
-//! land now; bodies seamed to `unblock-health`, T3.3).
+//! `impl Session` lifecycle — `open`, `shutdown`, `migrate`, and the FR-16 health pair `doctor`
+//! (classify) and `recover` (online repair), both built on `unblock-health` (PRD §4 D58).
 //!
 //! `open` **consumes** a `WorkspaceContext` built by `unblock-config` (CF-D): config already did
 //! `.unblock/` discovery, opened/migrated libsql, and built the `Arc<dyn Storage>` — the engine takes
@@ -12,15 +12,30 @@
 //! must still open — so `unblock mcp` and its repair action stay reachable — and always close);
 //! `migrate`, `doctor` and `recover` apply it.
 
+#[cfg(feature = "health")]
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::Semaphore;
 use unblock_config::WorkspaceContext;
+#[cfg(feature = "health")]
+use unblock_health::recovery::{Manifest, Phase, RunDir};
+#[cfg(feature = "health")]
+use unblock_health::{
+    DbFacts, DbFileFact, HealthLevel, PlannedAction, PreOpenFacts, RepairPath,
+    WorkspaceClassification, WorkspacePaths,
+};
+#[cfg(feature = "health")]
+use unblock_model::DiagnosticKind;
 use unblock_model::DiagnosticReport;
+#[cfg(feature = "health")]
+use unblock_storage::{DbHealthFacts, RepairAction, RepairOutcome, RepairRequest};
 
 use crate::error::{EngineError, Result};
 use crate::permit::{WRITE_PERMITS, acquire_write};
+#[cfg(feature = "health")]
+use crate::preopen::{self, ActionResult, HealthReport};
 use crate::session::{Session, SessionConfig};
 
 /// The outcome of an idempotent [`Session::migrate`] run (D27/AF-2, T3.1 — spine §4.1).
@@ -181,227 +196,389 @@ impl Session {
         })
     }
 
-    /// Run health/integrity diagnostics (FR-15/FR-16).
+    /// Classify the workspace (FR-16 full, PRD §4 D58 clause (8)).
     ///
-    /// **Pre-T3.3 = SIGNATURE only; body seamed to `unblock-health`.** Returns
-    /// [`EngineError::FeatureNotWired`] (`feature: "health"`) and writes nothing until wired.
-    /// **T3.3 (HEALTH-LITE, D29) wires the lite body**: it composes `integrity_check()` rows + the pure
-    /// file-state classification from `unblock-health` (`run_doctor`) into a `DoctorReport`, then maps it
-    /// onto a [`DiagnosticReport`] **reusing the existing `DiagnosticKind::Info`** (F2 — NO new model
-    /// variant, no spine §1.10 / `CONTRACT_HASH` change). The cli `doctor` command routes
-    /// through this wired `doctor()` from T3.3 (F4). The full 4-state taxonomy + `--repair` are **v1.1**.
+    /// Call it on a session opened `ReadOnly`, with `preopen` gathered by
+    /// [`gather_preopen`](crate::preopen::gather_preopen) before that open. It is a pure read: no
+    /// permit, no `.write.lock`, no migration. It makes ONE `Storage::health_facts()` call, whose
+    /// rows are the one `integrity_check` of this classification, scans the export with
+    /// `unblock_health::scan_export`, and classifies with the pure `unblock_health::classify`.
     ///
-    /// **D46 (v1.0.1) — TWO ADVISORY SCHEMA-VERSION findings are folded in here TOO, and nowhere
-    /// else.** `doctor()` additionally awaits the EXISTING pure read
-    /// [`Storage::schema_version`](unblock_storage::Storage::schema_version) and inserts the stamp
-    /// OBSERVED ON DISK (`schema_version`) then the version THIS BUILD EXPECTS (`schema_expected`), in
-    /// that fixed order — **AFTER the file-state anomalies and BEFORE the D45 dangling block, which
-    /// REMAINS the report's trailing suffix.** That placement is NORMATIVE (spine §4.1), because the
-    /// shipped suffix assertion in `crates/unblock-engine/tests/dangling.rs` is a live D45 mutation
-    /// proof: appending after the block would redden a required CI step, and relaxing the suffix to a
-    /// subsequence would retire that proof to buy nothing. The findings are ADVISORY — they report two
-    /// integers and COMPARE nothing — so `doctor_exit` and the FR-16 exit rule are byte-identical, and
-    /// a general schema-conformance check is explicitly out of scope (PRD §4, D46). `unblock-health`
-    /// is again NOT touched (D29 clause F3 preserved).
-    ///
-    /// **D45 — the DANGLING-dependency findings are FOLDED IN HERE, in the ENGINE.** `doctor()`
-    /// additionally awaits the SAME fn the `diagnostics {kind:"dangling"}` action uses
-    /// ([`crate::diagnostics::dangling_findings`] — ONE home, never a second implementation) and
-    /// APPENDS its findings, in the pinned `(issue_id, dep_type, depends_on_id)`
-    /// order, AFTER the file-state anomalies (a deterministic overall order, NFR-14). The report's
-    /// `kind` stays `Info` — the fold moves no spine §1.10 byte; the `Dangling` KIND exists for the
-    /// `diagnostics` tool arm, where the response must declare what it is.
-    ///
-    /// **`unblock_health::run_doctor` is NOT given a third argument, its signature does NOT change,
-    /// and `unblock-health` gains NO `unblock-storage` dependency:** the list is DB-derived and D29
-    /// clause F3 makes `run_doctor` PURE, non-async and storage-free — that clause is PRESERVED, not
-    /// reversed. Composing in the engine fold is exactly how the engine already folds in the pure
-    /// file-state anomalies; passing DB rows into `run_doctor` would reverse a shipped clause.
-    ///
-    /// **D45 — COST, MEASURED. AMENDED 2026-08-02: the fold is now ONE SQL query.** The fold is
-    /// UNCONDITIONAL on every `doctor()` call, which is precisely why its cost mattered. As first
-    /// shipped it differenced a whole-graph edge load against a FULLY-INCLUSIVE `list_issues`
-    /// (closed + deferred + tombstone) that hydrated labels, dependencies and comments for every row
-    /// merely to derive an id SET — `O(rows + edges)` work and `O(rows)` peak memory. At 250k rows
-    /// the `scale` gate measured `integrity_check` 5.51 s + the fold 10.72 s = `doctor()` 16.31 s
-    /// against a 15 s boundedness guard: a RED required job. It is now ONE
-    /// [`Storage::dangling_dependencies`](unblock_storage::Storage::dangling_dependencies) read (a
-    /// `LEFT JOIN … WHERE i.id IS NULL` excluding external targets), at the stated price of one trait
-    /// method and its implementors. The live numbers are re-derived on every run by the reporting
-    /// timings in `crates/unblock-engine/tests/scale.rs`.
+    /// The report order is NORMATIVE. The `health` level row comes first, then the anomalies in
+    /// class order, one `repair_planned` row per planned action, the advisories, and the two D46
+    /// rows (`schema_version` observed on disk, then `schema_expected` for this build). The D45
+    /// dangling block is the trailing suffix. It comes from the same fn the
+    /// `diagnostics {kind:"dangling"}` action calls, so the two cannot drift.
     ///
     /// # Errors
-    ///
     /// - [`EngineError::Config`] (`FaultyDbConfig`) while a blocking DB config fault exists (D57
     ///   clause (2a)), before any storage call.
-    /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) until the T3.3 wiring lands; thereafter
-    ///   the transparent `Health { source: HealthError }` variant on a health failure, or the
-    ///   transparent storage source from the D45 dangling read.
-    #[cfg_attr(not(feature = "health"), allow(clippy::unused_async))] // no await without health
-    pub async fn doctor(&self) -> Result<DiagnosticReport> {
+    /// - The transparent storage source of the `health_facts` or dangling read.
+    #[cfg(feature = "health")]
+    pub async fn doctor(&self, preopen: &PreOpenFacts) -> Result<HealthReport> {
         self.gated_runtime()?;
-        #[cfg(feature = "health")]
-        {
-            // Compose the ONE corruption signal reachable now (integrity_check rows) + the pure
-            // file-state classification into unblock-health's `DoctorReport`, then fold it onto a
-            // `DiagnosticReport` reusing `DiagnosticKind::Info` (F2 — no model change). `run_doctor`
-            // is storage-free and non-async (F3); `integrity_check()` (a read, no write permit) is the
-            // only await.
-            let integrity_rows = self.integrity_check().await?;
-            let report = unblock_health::run_doctor(&integrity_rows, &self.health_paths())?;
-            let mut diagnostic = doctor_report_to_diagnostic(&report);
-            // D46: the TWO ADVISORY schema-version rows — the stamp OBSERVED ON DISK and the version
-            // THIS BUILD EXPECTS — over the EXISTING pure `Storage::schema_version()` read (no new
-            // trait method, no write permit, no migration side-effect). Their PLACEMENT IS NORMATIVE
-            // (spine §4.1, ruled at the 2026-08-03 design gate): AFTER the file-state anomalies and
-            // BEFORE the D45 dangling block, which REMAINS the report's trailing suffix — the shipped
-            // cell `crates/unblock-engine/tests/dangling.rs` asserts that suffix and its docstring
-            // names the mutant it kills, so appending AFTER the block would redden a required CI step
-            // and relaxing the suffix to a subsequence would retire a live D45 proof for nothing.
-            // They COMPARE nothing (two integers), so the exit rule is byte-identical: `doctor` still
-            // exits non-zero only on detected corruption (FR-16). What they buy is that `doctor` can
-            // no longer print `healthy` without also printing the number that would contradict it.
-            let observed = self.storage.schema_version().await?;
-            diagnostic.findings.push(unblock_model::DiagnosticFinding {
-                label: "schema_version".to_string(),
-                detail: observed.to_string(),
-            });
-            diagnostic.findings.push(unblock_model::DiagnosticFinding {
-                label: "schema_expected".to_string(),
-                detail: unblock_storage::CURRENT_SCHEMA_VERSION.to_string(),
-            });
-            // D45: the dangling-dependency fold. The SAME engine-side fn the `dangling` diagnostics
-            // action calls — one home — appended AFTER the file-state anomalies, in the pinned order
-            // the read's own `ORDER BY` produces. No write permit: every half is a read (FR-10).
-            diagnostic
-                .findings
-                .extend(crate::diagnostics::dangling_findings(self.storage.as_ref()).await?);
-            Ok(diagnostic)
-        }
-        #[cfg(not(feature = "health"))]
-        {
-            Err(EngineError::FeatureNotWired { feature: "health" })
-        }
+        let db = db_facts(self.storage.health_facts().await?);
+        let export = preopen::scan_export(Some(self.jsonl_path.clone())).await?;
+        let classification =
+            unblock_health::classify(preopen, Some(&db), &export, &preopen::advisory_now());
+        let mut tail = vec![
+            preopen::finding("schema_version", db.schema_version.to_string()),
+            preopen::finding("schema_expected", db.expected_schema_version.to_string()),
+        ];
+        tail.extend(crate::diagnostics::dangling_findings(self.storage.as_ref()).await?);
+        Ok(preopen::render(classification, tail))
     }
 
-    /// Build the [`WorkspacePaths`](unblock_health::WorkspacePaths) bundle `doctor()` classifies over
-    /// (F3 — health is storage-free; the engine supplies the already-resolved paths). `recovery_dir`
-    /// is reserved for the v1.1 evidence writer (unused by the lite `run_doctor`).
+    /// Health's path bundle for this session's workspace.
     #[cfg(feature = "health")]
-    fn health_paths(&self) -> unblock_health::WorkspacePaths {
-        unblock_health::WorkspacePaths {
+    fn health_paths(&self) -> WorkspacePaths {
+        WorkspacePaths {
             db: self.db_path.clone(),
             jsonl: Some(self.jsonl_path.clone()),
-            recovery_dir: self.unblock_dir.join(".recovery"),
+            recovery_dir: preopen::recovery_root(&self.unblock_dir),
         }
     }
 
-    /// Attempt workspace repair (WAL checkpoint, reindex; reports actions taken) — FR-16.
+    /// Run the online repairs (FR-16 full, PRD §4 D58 clause (6)).
     ///
-    /// **STAYS SIGNATURE only through v1 (F1/D29).** Returns [`EngineError::FeatureNotWired`]
-    /// (`feature: "health"`) and writes nothing. Returns [`DiagnosticReport`] (spine §4.1, NOT a bespoke
-    /// `RecoveryReport`); its body — `--repair` (WAL checkpoint/reindex) + the `.unblock/.recovery/`
-    /// evidence writer + the rich repair taxonomy — is a **v1.1** deliverable, NOT T3.3. T3.3 wires only
-    /// `doctor()` (the read-only lite report); wiring `recover()` to a hollow "nothing repaired" report
-    /// would be the faked success `FeatureNotWired` forbids.
+    /// Call it on a session opened `NoMigrate`. The steps run in this order:
+    /// 1. the D57 fail-closed gate;
+    /// 2. the write permit and the `.write.lock`, held to the end with the configured timeout (a
+    ///    timeout is the retryable `DATABASE_LOCKED`);
+    /// 3. ONE `health_facts()` call and `scan_export`, classifying the online classes;
+    /// 4. the Unsafe gate: with any `Unsafe` class, a report of those classes, their manual path
+    ///    and a `recover` row, with no action row and no directory (tracker comment 389);
+    /// 5. with no online action, a report with no action rows, and no directory;
+    /// 6. otherwise one run directory under `.unblock/.recovery/` with its manifest, a copy of a
+    ///    poisoned export at `export/issues.jsonl`, and ONE `Storage::repair` call (the snapshot,
+    ///    then `migrate` when planned, then one action transaction);
+    /// 7. the export, regenerated through the atomic sync exporter;
+    /// 8. the manifest, rewritten with every outcome.
+    ///
+    /// It never runs an exclusive action; those belong to
+    /// [`repair_preopen`](crate::preopen::repair_preopen). The report holds one `repair` row per
+    /// action, an `export_not_imported` row after a regenerated export, and the trailing
+    /// `evidence` row. It reports no final level.
     ///
     /// # Errors
+    /// - [`EngineError::Config`] (`FaultyDbConfig`) while a blocking DB config fault exists.
+    /// - [`EngineError::ShutdownInProgress`] when a shutdown is in progress.
+    /// - The storage error of a failed `repair`, or the sync error of a failed regeneration, after
+    ///   the manifest records `failed` with its code. A `migrate` whose ladder reached this build's
+    ///   stamp before the failure is recorded `applied`.
+    /// - The health error of an evidence write.
+    #[cfg(feature = "health")]
+    pub async fn recover(&self) -> Result<DiagnosticReport> {
+        self.gated_runtime()?;
+        let _guard = acquire_write(&self.write_permit, &self.shutdown).await?;
+        // Declared after the permit, so it drops first (spine §4.2).
+        let _lock = self.storage.acquire_write_lock().await?;
+
+        let paths = self.health_paths();
+        let db = db_facts(self.storage.health_facts().await?);
+        let export = preopen::scan_export(paths.jsonl.clone()).await?;
+        let classification = unblock_health::classify(
+            &online_preopen(),
+            Some(&db),
+            &export,
+            &preopen::advisory_now(),
+        );
+        if classification.level == HealthLevel::Unsafe {
+            return Ok(unsafe_gate_report(&classification));
+        }
+        let actions: Vec<PlannedAction> = classification
+            .planned
+            .iter()
+            .filter(|repair| repair.path == RepairPath::Online)
+            .map(|repair| repair.action.clone())
+            .collect();
+        if actions.is_empty() {
+            return Ok(DiagnosticReport {
+                kind: DiagnosticKind::Info,
+                findings: vec![preopen::finding("recover", "nothing to repair online")],
+            });
+        }
+
+        let run = preopen::create_run_dir(paths.recovery_dir).await?;
+        // NFR-13: one audit record per mutating phase, naming its run directory.
+        let mut audit = classification.audit_record("recover");
+        audit.path = run.path().display().to_string();
+        audit.emit();
+        let manifest = Manifest::new(
+            &run,
+            Phase::Online,
+            preopen::BINARY_VERSION,
+            Some(db.schema_version),
+            classification.level,
+        );
+        preopen::write_manifest(&run, &manifest).await?;
+        let mut online = OnlineRun {
+            run,
+            manifest,
+            results: vec![None; actions.len()],
+            actions,
+        };
+
+        let regenerate = online.position(&PlannedAction::RegenerateExport);
+        let export_copy = match (&export.path, regenerate) {
+            (Some(path), Some(_)) => {
+                match preopen::copy_export(&online.run, path, &self.unblock_dir).await {
+                    Ok(copy) => Some(copy),
+                    Err(err) => return Err(online.fail(err).await),
+                }
+            }
+            _ => None,
+        };
+
+        let request = RepairRequest {
+            snapshot: online.run.path().join(preopen::SNAPSHOT_FILE),
+            migrate: online.position(&PlannedAction::Migrate).is_some(),
+            actions: online.actions.iter().filter_map(repair_action).collect(),
+        };
+        let outcome = match self.storage.repair(&request).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                if let Some(index) = online.position(&PlannedAction::Migrate)
+                    && self.migrated_to_current().await
+                {
+                    online.results[index] = Some(ActionResult::Applied);
+                }
+                return Err(online.fail(err.into()).await);
+            }
+        };
+        for (action, result) in online.actions.iter().zip(online.results.iter_mut()) {
+            *result = repair_result(action, &outcome);
+        }
+
+        if let Some(index) = regenerate {
+            match self.write_export(&self.jsonl_path).await {
+                Ok(_) => online.results[index] = Some(ActionResult::Applied),
+                Err(err) => return Err(online.fail(err).await),
+            }
+        }
+
+        online.finish().await?;
+        Ok(online.report(export_copy.as_deref()))
+    }
+
+    /// Whether the on-disk stamp now equals this build's, after a failed `repair` whose ladder
+    /// may have committed before its action transaction failed (D58 clause (5)). A stamp that
+    /// cannot be read counts as not migrated.
+    #[cfg(feature = "health")]
+    async fn migrated_to_current(&self) -> bool {
+        match self.storage.schema_version().await {
+            Ok(stamp) => stamp == unblock_storage::CURRENT_SCHEMA_VERSION,
+            Err(err) => {
+                tracing::warn!(error = %err, "recover could not re-read the schema stamp");
+                false
+            }
+        }
+    }
+
+    /// Attempt workspace repair — FR-16.
     ///
-    /// - [`EngineError::Config`] (`FaultyDbConfig`) while a blocking DB config fault exists (D57
-    ///   clause (2a)).
-    /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) through v1 (the recover seam is unwired
-    ///   until v1.1).
-    #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the v1.1 body awaits health repair.
+    /// # Errors
+    /// - [`EngineError::Config`] (`FaultyDbConfig`) while a blocking DB config fault exists.
+    /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) otherwise: this build has no
+    ///   `health` feature.
+    #[cfg(not(feature = "health"))]
+    #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the health body awaits.
     pub async fn recover(&self) -> Result<DiagnosticReport> {
         self.gated_runtime()?;
         Err(EngineError::FeatureNotWired { feature: "health" })
     }
 }
 
-/// Map an `unblock-health` [`DoctorReport`](unblock_health::DoctorReport) onto the model
-/// [`DiagnosticReport`] `Session::doctor` returns, **reusing the existing
-/// [`DiagnosticKind::Info`](unblock_model::DiagnosticKind::Info)** (F2 — no new model variant, no
-/// spine §1.10 / `CONTRACT_HASH` change).
-///
-/// Emits a stable headline (`health` = the composite worst level, `integrity` = `ok`/`N problem(s)`),
-/// then one generic [`DiagnosticFinding`](unblock_model::DiagnosticFinding) per integrity problem row
-/// and per file-state anomaly (`label` = the anomaly's stable code, `detail` = its `Display`). The
-/// order is deterministic (NFR-14 — insta-pinned at the cli/engine boundary).
+/// One `recover()` phase in progress: its run directory, manifest and per-action results.
+/// `None` marks an action that has not run yet.
 #[cfg(feature = "health")]
-fn doctor_report_to_diagnostic(report: &unblock_health::DoctorReport) -> DiagnosticReport {
-    use unblock_model::{DiagnosticFinding, DiagnosticKind};
+struct OnlineRun {
+    run: RunDir,
+    manifest: Manifest,
+    actions: Vec<PlannedAction>,
+    results: Vec<Option<ActionResult>>,
+}
 
-    let mut findings =
-        Vec::with_capacity(2 + report.integrity_rows.len() + report.file_state.len());
-    findings.push(DiagnosticFinding {
-        label: "health".to_string(),
-        detail: report.summary.worst.as_str().to_string(),
-    });
-    findings.push(DiagnosticFinding {
-        label: "integrity".to_string(),
-        detail: if report.integrity_ok {
-            "ok".to_string()
-        } else {
-            format!("{} problem(s)", report.integrity_rows.len())
-        },
-    });
-    for row in &report.integrity_rows {
-        findings.push(DiagnosticFinding {
-            label: "integrity_problem".to_string(),
-            detail: row.clone(),
-        });
+#[cfg(feature = "health")]
+impl OnlineRun {
+    /// The index of `wanted` in the plan.
+    fn position(&self, wanted: &PlannedAction) -> Option<usize> {
+        self.actions.iter().position(|action| action == wanted)
     }
-    for anomaly in &report.file_state {
-        findings.push(DiagnosticFinding {
-            label: anomaly.code().to_string(),
-            detail: anomaly.to_string(),
-        });
+
+    /// Hash the evidence and rewrite the manifest with every result.
+    async fn finish(&mut self) -> Result<()> {
+        let not_run = ActionResult::Failed {
+            reason: "not_run".to_string(),
+        };
+        self.manifest.actions = self
+            .actions
+            .iter()
+            .zip(&self.results)
+            .map(|(action, result)| {
+                preopen::manifest_action(action, result.as_ref().unwrap_or(&not_run))
+            })
+            .collect();
+        preopen::finish_manifest(&self.run, &mut self.manifest).await
     }
+
+    /// Record every action that has not run as `failed` with `err`'s code, then hand `err` back.
+    /// A failure to record is logged, because `err` is the error the caller must see.
+    async fn fail(mut self, err: EngineError) -> EngineError {
+        let reason = preopen::error_code(&err);
+        for result in self.results.iter_mut().filter(|result| result.is_none()) {
+            *result = Some(ActionResult::Failed {
+                reason: reason.clone(),
+            });
+        }
+        if let Err(evidence) = self.finish().await {
+            tracing::warn!(
+                run_dir = %self.run.path().display(),
+                error = %evidence,
+                "recover could not record its failure in the manifest"
+            );
+        }
+        err
+    }
+
+    /// One `repair` row per action, `export_not_imported` after a regenerated export, then the
+    /// `evidence` row.
+    fn report(&self, export_copy: Option<&Path>) -> DiagnosticReport {
+        let mut findings = Vec::with_capacity(self.actions.len() + 2);
+        for (action, result) in self.actions.iter().zip(&self.results) {
+            let Some(result) = result else { continue };
+            findings.push(preopen::action_finding(action, result));
+            if let (PlannedAction::RegenerateExport, ActionResult::Applied, Some(copy)) =
+                (action, result, export_copy)
+            {
+                findings.push(preopen::finding(
+                    "export_not_imported",
+                    format!(
+                        "rows present only in the replaced export (for example a teammate's side \
+                         of a merge) were NOT imported; its copy is {}; to keep them, resolve the \
+                         conflict in that copy, then import it through the MCP `sync` tool's \
+                         import action",
+                        copy.display()
+                    ),
+                ));
+            }
+        }
+        findings.push(preopen::evidence_finding(self.run.path()));
+        DiagnosticReport {
+            kind: DiagnosticKind::Info,
+            findings,
+        }
+    }
+}
+
+/// The report of a `recover()` stopped by the Unsafe gate (PRD §4 D58, tracker comment 389).
+///
+/// It holds each `Unsafe` anomaly, its manual `repair_planned` row and a `recover` row. No in-product
+/// repair is safe while such a class is present, so it holds no action row.
+#[cfg(feature = "health")]
+fn unsafe_gate_report(classification: &WorkspaceClassification) -> DiagnosticReport {
+    let unsafe_codes: Vec<&'static str> = classification
+        .anomalies
+        .iter()
+        .filter(|anomaly| anomaly.severity() == HealthLevel::Unsafe)
+        .map(unblock_health::AnomalyClass::code)
+        .collect();
+    let mut findings: Vec<_> = classification
+        .anomalies
+        .iter()
+        .filter(|anomaly| anomaly.severity() == HealthLevel::Unsafe)
+        .map(|anomaly| preopen::finding(anomaly.code(), anomaly.to_string()))
+        .collect();
+    findings.extend(
+        classification
+            .planned
+            .iter()
+            .filter(|repair| unsafe_codes.contains(&repair.anomaly))
+            .map(|repair| preopen::finding("repair_planned", preopen::planned_detail(repair))),
+    );
+    findings.push(preopen::finding(
+        "recover",
+        format!(
+            "nothing repaired because an unsafe class is present ({}); resolve it by its manual \
+             path first",
+            unsafe_codes.join(", ")
+        ),
+    ));
     DiagnosticReport {
         kind: DiagnosticKind::Info,
         findings,
     }
 }
 
-#[cfg(all(test, feature = "health"))]
-mod tests {
-    use super::doctor_report_to_diagnostic;
-    use std::path::PathBuf;
-    use unblock_health::{WorkspacePaths, run_doctor};
-    use unblock_model::DiagnosticKind;
-
-    /// The engine mapping folds corrupt integrity rows into a `recoverable` health finding + one
-    /// `integrity_problem` per row, reusing `DiagnosticKind::Info` (F2). Uses non-existent paths so no
-    /// file-state anomaly fires and integrity is the sole signal.
-    #[test]
-    fn corrupt_integrity_maps_to_a_recoverable_info_report() {
-        let paths = WorkspacePaths {
-            db: PathBuf::from("/nonexistent/unblock.db"),
-            jsonl: None,
-            recovery_dir: PathBuf::from("/nonexistent/.recovery"),
-        };
-        let rows = vec![
-            "*** in database main ***".to_string(),
-            "page 5 is never used".to_string(),
-        ];
-        let report = run_doctor(&rows, &paths).expect("run_doctor is infallible");
-        let diag = doctor_report_to_diagnostic(&report);
-
-        assert_eq!(diag.kind, DiagnosticKind::Info);
-        let detail = |label: &str| {
-            diag.findings
-                .iter()
-                .find(|f| f.label == label)
-                .map(|f| f.detail.as_str())
-        };
-        assert_eq!(detail("health"), Some("recoverable"));
-        assert_eq!(detail("integrity"), Some("2 problem(s)"));
-        let problems: Vec<&str> = diag
-            .findings
-            .iter()
-            .filter(|f| f.label == "integrity_problem")
-            .map(|f| f.detail.as_str())
-            .collect();
-        assert_eq!(problems, rows);
+/// Map storage's health facts into health's own type, so no storage type crosses into health.
+#[cfg(feature = "health")]
+fn db_facts(facts: DbHealthFacts) -> DbFacts {
+    DbFacts {
+        integrity_rows: facts.integrity_rows,
+        schema_version: facts.schema_version,
+        expected_schema_version: unblock_storage::CURRENT_SCHEMA_VERSION,
+        index_names: facts.index_names,
+        child_counter_drift: facts
+            .child_counter_drift
+            .into_iter()
+            .map(|drift| (drift.parent_id, drift.stored, drift.observed_max))
+            .collect(),
+        duplicate_metadata_keys: facts
+            .duplicate_metadata_keys
+            .into_iter()
+            .map(|dup| (dup.key, dup.rows))
+            .collect(),
     }
+}
+
+/// Pre-open facts with no pre-open class. `recover()` classifies only the online classes, and a
+/// live session may not read the database file (D58 clause (6)).
+#[cfg(feature = "health")]
+fn online_preopen() -> PreOpenFacts {
+    PreOpenFacts {
+        db: DbFileFact::SqliteHeader,
+        lost: false,
+        wal_len: None,
+        shm_present: false,
+        journal_present: false,
+        write_lock_held: false,
+        recovery_entries: Vec::new(),
+    }
+}
+
+/// The SQL action of a planned online action, if it has one.
+#[cfg(feature = "health")]
+fn repair_action(action: &PlannedAction) -> Option<RepairAction> {
+    match action {
+        PlannedAction::Reindex { index } => Some(RepairAction::Reindex {
+            index: index.clone(),
+        }),
+        PlannedAction::RaiseChildCounter { parent_id, to } => {
+            Some(RepairAction::RaiseChildCounter {
+                parent_id: parent_id.clone(),
+                to: *to,
+            })
+        }
+        PlannedAction::DedupeMetadataKey { key } => {
+            Some(RepairAction::DedupeMetadataKey { key: key.clone() })
+        }
+        _ => None,
+    }
+}
+
+/// What a successful `repair` call did for one action. `None` for an action `repair` does not
+/// run (`regenerate_export`).
+#[cfg(feature = "health")]
+fn repair_result(action: &PlannedAction, outcome: &RepairOutcome) -> Option<ActionResult> {
+    let applied = match action {
+        PlannedAction::Migrate => outcome.migrated.is_some(),
+        _ => outcome.applied.contains(&repair_action(action)?),
+    };
+    Some(if applied {
+        ActionResult::Applied
+    } else {
+        ActionResult::Failed {
+            reason: "not_applied".to_string(),
+        }
+    })
 }

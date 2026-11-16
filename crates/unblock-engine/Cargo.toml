@@ -44,7 +44,8 @@ serde_json = { workspace = true }
 [features]
 default = ["sync", "health"]
 sync = ["dep:unblock-sync"]
-health = ["dep:unblock-health"]
+# `health` implies `sync`: `recover()` regenerates the export through the sync exporter (D58).
+health = ["dep:unblock-health", "sync"]
 # D15/D51: forwards only to storage's non-default REMOTE-mode feature. Not a libsql feature.
 remote = ["unblock-storage/remote"]
 # T3.5/D34: forwards to storage's `testkit` so `benches/engine.rs` + `tests/scale.rs` can seed the
@@ -73,8 +74,8 @@ async-trait = { workspace = true }
 # (the `#[cfg(feature="sync")]` case). Default-on `sync` makes it a dev-dep for the test binary.
 unblock-sync = { workspace = true }
 # Likewise the `error_contract.rs` golden constructs a `HealthError` to pin the `EngineError::Health`
-# row (the `#[cfg(feature="health")]` case, T3.3/D29); the `lifecycle.rs` doctor-mapping unit test
-# constructs a `DoctorReport` via `run_doctor`. Default-on `health` makes it a dev-dep too.
+# row (the `#[cfg(feature="health")]` case), and the health cells build `PreOpenFacts` and read
+# run-directory manifests. Default-on `health` makes it a dev-dep too.
 unblock-health = { workspace = true }
 # FR-9 linearizability property test + the write-permit single-occupancy invariant.
 proptest = { workspace = true }

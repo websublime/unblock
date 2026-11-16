@@ -94,6 +94,8 @@ P1@.unblock/issues.jsonl@\"id\":\"ub-lp9\.3\"@the tracker record names the work 
 REQUIRE_NONE="
 N1@crates/unblock-health/Cargo.toml@$STORAGE_DEP_RE@NEGATIVE: unblock-health declares no unblock-storage dependency — the classifier takes facts as data (D29 clause F3, kept by D58 clause (4))
 N2@crates/*/src/*.rs@$VACUUM_STMT_RE@NEGATIVE: no production source spells a VACUUM statement other than VACUUM INTO — D58 clause (3) forbids VACUUM, which would erase the forensic trace of the corruption
+N3@crates/unblock-cli/src/commands/doctor.rs@integrity_check\(@NEGATIVE: the cli doctor command makes no second integrity_check call — the exit derives from HealthReport.level, one scan per classification (criterion (d), the cli half no in-process counter can observe)
+N4@crates/unblock-health/src/*.rs@<{7}|>{7}@NEGATIVE: unblock-health spells no conflict-marker literal — its export scan is unblock-sync's ONE scanner, so health has no scanner of its own (criterion (j))
 "
 
 # =================================================================================================
@@ -352,17 +354,41 @@ Q200@crates/unblock-config/src/error.rs@^            Self::DatabaseMissing \{ \.
 Q201@crates/unblock-config/src/cli.rs@^pub enum StorageOpenMode \{@pub enum StorageOpenMode \{\$@clause (8): the open modes (Migrate, ReadOnly, NoMigrate) exist on the config facade
 Q202@crates/unblock-config/src/cli.rs@^    pub create_db: @    pub create_db: bool,\$@clause (7): init's create-over-the-marker flag exists on CliOverrides
 Q203@crates/unblock-config/src/context.rs@^    if cli\.no_db \{@    if cli\.no_db \{\$@clause (8): open_with_cli is the FIRST reader of the reserved no_db seam
+Q204@crates/unblock-engine/src/preopen.rs@^pub fn gather_preopen\(@pub fn gather_preopen\(paths: &ConfigPaths\) -> Result<PreOpenFacts> \{\$@clause (11): the session-less pre-open fact gatherer takes config's ConfigPaths
+Q205@crates/unblock-engine/src/preopen.rs@^pub fn classify_preopen\(@pub fn classify_preopen\(facts: &PreOpenFacts\) -> HealthReport \{\$@clause (8): the session-less classification the cli renders alone when the facts forbid a read-only open
+Q206@crates/unblock-engine/src/preopen.rs@^pub async fn repair_preopen\(@pub async fn repair_preopen\(\$@clause (11): the pre-open repair entry runs the exclusive window outside any Session
+Q207@crates/unblock-engine/src/preopen.rs@^pub struct HealthReport \{@pub struct HealthReport \{\$@clause (8): the engine-local typed report carries the level the cli exits by
+Q208@crates/unblock-engine/src/session/lifecycle.rs@^    pub async fn doctor\(@pub async fn doctor\(&self, preopen: &PreOpenFacts\) -> Result<HealthReport> \{\$@clause (8): doctor takes the pre-open facts and returns the typed HealthReport
+Q209@crates/unblock-cli/src/cli.rs@^pub struct DoctorArgs \{@pub struct DoctorArgs \{\$@clause (8): the doctor command carries arguments
+Q210@crates/unblock-cli/src/cli.rs@^    pub repair: bool,@pub repair: bool,\$@clause (8): --repair is the doctor flag (D3: a lifecycle flag, nothing reaches MCP)
 Q211@crates/unblock-health/tests/classify_props.rs@fn class_table_golden\(@fn class_table_golden\(\)@criterion (a): the golden class table cell
 Q212@crates/unblock-health/tests/classify_props.rs@fn adding_a_class_never_lowers_the_level\(@fn adding_a_class_never_lowers_the_level\(@criterion (a): the composite never drops when a class is added
 Q213@crates/unblock-health/tests/classify_props.rs@fn no_unsafe_class_plans_an_executable_action\(@fn no_unsafe_class_plans_an_executable_action\(@criterion (a) as amended (tracker comment 389): no Unsafe class plans any executable action
 Q214@crates/unblock-health/tests/integrity_rows.rs@fn each_index_only_shape_with_and_without_prefix_is_index_corruption\(@fn each_index_only_shape_with_and_without_prefix_is_index_corruption\(@criterion (b): the four index-only shapes, prefixed and bare
 Q215@crates/unblock-health/tests/integrity_rows.rs@fn every_other_row_is_page_corruption_and_unsafe\(@fn every_other_row_is_page_corruption_and_unsafe\(@criterion (b): the fail-safe Unsafe for every other row
+Q216@crates/unblock-cli/tests/migrate_doctor.rs@fn doctor_index_entry_removed_reports_recoverable_exit_2_and_repair_leaves_integrity_clean_exit_0\(@fn doctor_index_entry_removed_reports_recoverable_exit_2_and_repair_leaves_integrity_clean_exit_0\(@criterion (b) end to end: a removed index entry is Recoverable and --repair leaves integrity clean
+Q217@crates/unblock-engine/tests/health.rs@fn drift_child_counter_reports_drifted_and_recover_raises_it_then_next_create_mints_the_following_number\(@fn drift_child_counter_reports_drifted_and_recover_raises_it_then_next_create_mints_the_following_number\(@criterion (c): the child-counter drift cell
+Q218@crates/unblock-engine/tests/health.rs@fn duplicate_metadata_key_recover_keeps_the_latest_and_snapshot_holds_both\(@fn duplicate_metadata_key_recover_keeps_the_latest_and_snapshot_holds_both\(@criterion (c): the greatest-rowid metadata keep rule cell
+Q219@crates/unblock-engine/tests/health.rs@fn schema_stamp_behind_recover_migrates_after_the_snapshot_which_keeps_the_old_stamp\(@fn schema_stamp_behind_recover_migrates_after_the_snapshot_which_keeps_the_old_stamp\(@criterion (c): the stamp-behind cell (migrate after the snapshot)
+Q220@crates/unblock-engine/tests/health.rs@fn doctor_makes_exactly_one_health_facts_call_and_no_integrity_check_call\(@fn doctor_makes_exactly_one_health_facts_call_and_no_integrity_check_call\(@criterion (d): one scan per doctor, through the testkit counters
+Q221@crates/unblock-engine/tests/health.rs@fn recover_makes_exactly_one_health_facts_call\(@fn recover_makes_exactly_one_health_facts_call\(@criterion (d): one health_facts call per recover
+Q222@crates/unblock-cli/tests/migrate_doctor.rs@fn doctor_recoverable_exits_2\(@fn doctor_recoverable_exits_2\(@criterion (d): the exit by level, Recoverable -> 2
+Q223@crates/unblock-engine/tests/dangling.rs@fn doctor_folds_in_the_same_dangling_findings_after_the_file_state_rows\(@fn doctor_folds_in_the_same_dangling_findings_after_the_file_state_rows\(@criterion (e): the D45 dangling block stays the trailing suffix of the typed report
 Q224@crates/unblock-storage/tests/exclusive_window.rs@fn f1_second_process_reader_refuses_database_open_elsewhere\(@fn f1_second_process_reader_refuses_database_open_elsewhere\(@criterion (f1): a live reader in another process is refused, MEASURED
 Q225@crates/unblock-storage/tests/exclusive_window.rs@fn f5_control_begin_exclusive_without_locking_mode_misses_a_wal_reader\(@fn f5_control_begin_exclusive_without_locking_mode_misses_a_wal_reader\(@criterion (f5): the control cell proving BEGIN EXCLUSIVE alone misses a WAL reader
 Q226@crates/unblock-storage/tests/exclusive_window.rs@fn f4_same_process_store_refuses_process_holds_connection_and_creates_no_raw\(@fn f4_same_process_store_refuses_process_holds_connection_and_creates_no_raw\(@criteria (f4)/(n): a same-process connection refuses before any raw copy
+Q227@crates/unblock-cli/tests/migrate_doctor.rs@fn repair_lone_shm_quarantined_final_healthy\(@fn repair_lone_shm_quarantined_final_healthy\(@criterion (g): a lone -shm is quarantined and the final level is Healthy
+Q229@crates/unblock-cli/tests/migrate_doctor.rs@fn doctor_lost_database_reports_unsafe_exit_2_opens_nothing_names_recovery_path\(@fn doctor_lost_database_reports_unsafe_exit_2_opens_nothing_names_recovery_path\(@criterion (h): the lost database is Unsafe, opens nothing and names the recovery path
+Q230@crates/unblock-engine/tests/health.rs@fn recover_creates_exactly_one_run_dir_with_manifest_hashes_and_a_passing_snapshot\(@fn recover_creates_exactly_one_run_dir_with_manifest_hashes_and_a_passing_snapshot\(@criterion (i): one run directory per phase, hashed manifest, a snapshot that passes integrity_check
+Q231@crates/unblock-cli/tests/migrate_doctor.rs@fn plain_doctor_creates_no_recovery_entry_and_leaves_db_and_write_lock_untouched\(@fn plain_doctor_creates_no_recovery_entry_and_leaves_db_and_write_lock_untouched\(@criterion (i): plain doctor is a dry run that writes nothing
+Q232@crates/unblock-engine/tests/health.rs@fn conflict_markers_recover_copies_regenerates_and_reports_not_imported_rows\(@fn conflict_markers_recover_copies_regenerates_and_reports_not_imported_rows\(@criterion (j): the conflicted export is copied, regenerated and its unimported rows reported
+Q233@crates/unblock-engine/tests/health.rs@fn recover_failure_in_second_action_leaves_first_unapplied_records_failed_and_returns_the_error\(@fn recover_failure_in_second_action_leaves_first_unapplied_records_failed_and_returns_the_error\(@criterion (k): one action transaction, failed recorded, the error returned
+Q234@crates/unblock-engine/tests/health.rs@fn recover_holds_permit_and_write_lock_through_classification_and_repair\(@fn recover_holds_permit_and_write_lock_through_classification_and_repair\(@criterion (k): recover holds the permit and .write.lock from classification to the end
 Q235@crates/unblock-storage/src/testkit.rs@^    contract_repair_never_lowers_a_counter\(@contract_repair_never_lowers_a_counter\(factory\(\)\.await\)\.await;\$@criterion (l): the never-lowering repair cell is REGISTERED in run_storage_contract_suite
 Q236@crates/unblock-storage/src/testkit.rs@^    contract_health_facts_reports_drift_and_duplicates_in_key_order\(@contract_health_facts_reports_drift_and_duplicates_in_key_order\(factory\(\)\.await\)\.await;\$@criterion (l): the key-ordered health facts cell is REGISTERED in run_storage_contract_suite
 Q237@crates/unblock-health/tests/classify_props.rs@^\) -> WorkspaceClassification = classify;@WorkspaceClassification = classify;\$@criterion (m): classify is a non-async fn, pinned by a const function-pointer binding
+Q238@crates/unblock-engine/tests/health.rs@fn gather_preopen_with_a_live_session_is_refused_pre_open_with_live_connection\(@fn gather_preopen_with_a_live_session_is_refused_pre_open_with_live_connection\(@criterion (n): gather_preopen refuses while a session holds a connection
+Q239@crates/unblock-engine/tests/scale.rs@^    seed_health_shape\(@seed_health_shape\(&storage, HEALTH_PARENTS, CHILDREN_PER_PARENT\)@criterion (o): the 250k scale corpus is seeded with the health shape
 Q240@.github/workflows/ci.yml@^  exclusivity-macos:@exclusivity-macos:\$@criterion (q): the exclusivity-macos job exists
 Q241@.github/workflows/ci.yml@^    runs-on: macos-15@runs-on: macos-15\$@criterion (q): it runs on the pinned macos-15 image
 Q242@.github/workflows/ci.yml@--test exclusive_window@run: cargo test -p unblock-storage --features testkit --locked --test exclusive_window\$@criterion (q): every step naming the exclusive_window file RUNS it (storage-testkit on Linux, exclusivity-macos on macOS)
@@ -381,11 +407,26 @@ Q254@docs/PRD.md@^\| \*\*D58\*\* \|@the window quarantines the REBUILT copy and 
 Q255@docs/PRD.md@^\| \*\*D58\*\* \|@whose SHA-256 equals the .-shm. as it was before the run, and the cell fails if the capture moves after that open@criterion (g) as amended: the lone -shm original is the pre-run bytes
 Q256@docs/plans/01-design-spine.md@^    //   pub async fn capture_sidecars\(@capture_sidecars\(paths: &ConfigPaths, facts: &PreOpenFacts\) -> Result<SidecarCapture, EngineError>;@spine §4.1 as amended: the capture-before-touch entry
 Q257@docs/plans/01-design-spine.md@^    //   pub async fn repair_preopen\(@repair_preopen\(paths: &ConfigPaths, planned: &\[PlannedRepair\], capture: SidecarCapture\)@spine §4.1 as amended: repair_preopen takes the pre-gate capture
+Q258@crates/unblock-engine/src/session/interchange.rs@^        let report = unblock_sync::export_jsonl\(@unblock_sync::export_jsonl\(\$@criterion (j): the export regeneration goes through unblock-sync's atomic exporter
+Q259@crates/unblock-engine/src/session/lifecycle.rs@^            match self\.write_export\(@match self\.write_export\(&self\.jsonl_path\)\.await \{\$@criterion (j): recover() regenerates the export through that one exporter path
+Q260@crates/unblock-engine/src/session/lifecycle.rs@^        if classification\.level == HealthLevel::Unsafe \{@if classification\.level == HealthLevel::Unsafe \{\$@spine §4.1 (3b) as amended (tracker comment 389): recover() stops on any Unsafe class before any run directory
+Q261@crates/unblock-cli/src/commands/doctor.rs@^fn unsafe_gate_stops_repair\(@fn unsafe_gate_stops_repair\(level: HealthLevel\) -> bool \{\$@spine §5b (i-b) as amended: the cli Unsafe gate decision
+Q262@crates/unblock-engine/src/preopen.rs@^pub async fn capture_sidecars\(@pub async fn capture_sidecars\(paths: &ConfigPaths, facts: &PreOpenFacts\)@spine §4.1 as amended (tracker comment 390): the capture-before-touch entry exists
+Q263@crates/unblock-engine/tests/health.rs@fn recover_with_page_corruption_and_drift_repairs_nothing_and_creates_no_run_dir\(@fn recover_with_page_corruption_and_drift_repairs_nothing_and_creates_no_run_dir\(@criterion (b) as amended: the engine Unsafe-gate cell for page corruption plus drift
+Q264@crates/unblock-engine/tests/health.rs@fn recover_with_schema_stamp_ahead_and_drift_repairs_nothing_and_creates_no_run_dir\(@fn recover_with_schema_stamp_ahead_and_drift_repairs_nothing_and_creates_no_run_dir\(@criterion (b) as amended: the engine Unsafe-gate cell for schema_stamp_ahead plus drift
+Q265@crates/unblock-cli/tests/migrate_doctor.rs@fn repair_with_page_corruption_and_drift_repairs_nothing_exit_2_no_run_dir\(@fn repair_with_page_corruption_and_drift_repairs_nothing_exit_2_no_run_dir\(@criterion (b) as amended: the cli Unsafe-gate cell for page corruption plus drift
+Q266@crates/unblock-cli/tests/migrate_doctor.rs@fn repair_with_schema_stamp_ahead_and_drift_repairs_nothing_exit_2_no_run_dir\(@fn repair_with_schema_stamp_ahead_and_drift_repairs_nothing_exit_2_no_run_dir\(@criterion (b) as amended: the cli Unsafe-gate cell for schema_stamp_ahead plus drift
+Q267@crates/unblock-engine/tests/health.rs@fn capture_sidecars_refuses_a_shm_above_the_cap\(@fn capture_sidecars_refuses_a_shm_above_the_cap\(@clause (8) as amended (tracker comments 390, 393): the capture is bounded at 64 MiB and refuses above it
 Q268@docs/PRD.md@^\| \*\*D58\*\* \|@no mutation beyond SQLite's own rollback of a hot journal\. A hot .-journal. is the documented exception@clause (6) as amended (tracker comment 393): the hot-journal exception to the Unsafe gate — raw/ evidence, then the rollback, then recover()'s gate
 Q269@docs/PRD.md@^\| \*\*D58\*\* \|@the .-journal. is NOT captured in memory@clause (8) as amended (tracker comment 393): only the anomalous -shm/-wal are captured; the journal's evidence is raw/
 Q270@docs/PRD.md@^\| \*\*D58\*\* \|@the capture cap is 64 MiB \(.preopen::CAPTURE_CAP_BYTES.\)@clause (8) as amended (tracker comment 393): the 64 MiB capture cap
 Q271@docs/plans/01-design-spine.md@^\*\*doctor — FR-16 full \(D58@Step \(ii\) plans the exclusive actions from the ORIGINAL phase \(i\) facts and does NOT gather them again@spine §5b as amended (tracker comment 393): step (ii) plans from the original facts
 Q272@docs/plans/01-design-spine.md@^    //   pub const CAPTURE_CAP_BYTES@pub const CAPTURE_CAP_BYTES: u64 = 64 \* 1024 \* 1024;@spine §4.1 as amended (tracker comment 393): the capture cap constant
+Q273@crates/unblock-engine/src/preopen.rs@^pub const CAPTURE_CAP_BYTES@pub const CAPTURE_CAP_BYTES: u64 = 64 \* 1024 \* 1024;\$@the 64 MiB capture cap in code
+Q274@crates/unblock-cli/tests/migrate_doctor.rs@fn repair_hot_journal_beside_page_corruption_rolls_back_and_repairs_no_sql_exit_2\(@fn repair_hot_journal_beside_page_corruption_rolls_back_and_repairs_no_sql_exit_2\(@criterion (b) as amended (tracker comment 393): hot journal + page corruption is rolled back with raw/ evidence and no SQL repair, exit 2
+Q275@crates/unblock-cli/tests/migrate_doctor.rs@fn repair_refuses_a_sidecar_it_cannot_capture_exit_2_and_writes_nothing\(@fn repair_refuses_a_sidecar_it_cannot_capture_exit_2_and_writes_nothing\(@clause (8) as amended: a capture refusal is DATABASE_ERROR, exit 2, with nothing written
+Q276@crates/unblock-engine/tests/health.rs@fn capture_sidecars_leaves_a_hot_journal_to_the_raw_copy\(@fn capture_sidecars_leaves_a_hot_journal_to_the_raw_copy\(@clause (8) as amended: the -journal is not captured in memory; raw/ holds it
+Q277@crates/unblock-engine/tests/health.rs@fn capture_sidecars_keeps_a_truncated_wal_as_its_original\(@fn capture_sidecars_keeps_a_truncated_wal_as_its_original\(@clause (8) as amended: a truncated -wal is captured as its original
 "
 
 blocked=0
@@ -469,8 +510,8 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # The floors are the counts this file shipped with; the implementation and test commits RAISE them in
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
-check_table_floor 'negative (N)' "$n_count" 2 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 237 || blocked=1
+check_table_floor 'negative (N)' "$n_count" 4 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 276 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."

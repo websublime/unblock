@@ -30,13 +30,19 @@
 //! fallible method except `open`, the four `config_*` methods and `shutdown` fail-closes with
 //! `ConfigError::FaultyDbConfig` (→ [`EngineError::Config`], `CONFIG_ERROR`, the recovery hint).
 //!
-//! # SEAM-deferred methods (typed not-wired — never a faked success)
+//! # Feature-gated methods (typed not-wired — never a faked success)
 //!
-//! `export_jsonl`/`import_jsonl`/`import_bd` (the `sync` seam) are WIRED to `unblock-sync` at
-//! T2.4/T2.5 (default-on `sync` feature; `FeatureNotWired` only under `--no-default-features`).
-//! `doctor()` (the `health` seam) is wired to `unblock-health` at T3.3 (HEALTH-LITE, D29); `recover()`
-//! still returns [`EngineError::FeatureNotWired`] through v1 (its `--repair`/evidence body is v1.1). All
-//! were introduced with their v1 **signatures**; bodies land additively (no v1 signature change).
+//! `export_jsonl`/`import_jsonl`/`import_bd` delegate to `unblock-sync` (default-on `sync` feature;
+//! `FeatureNotWired` only under `--no-default-features`).
+//!
+//! # Workspace health (FR-16 full, PRD §4 D58)
+//!
+//! Under the default-on `health` feature (which implies `sync`), [`preopen`] gathers and classifies
+//! the file facts before any libsql connection exists and runs the exclusive repairs,
+//! `Session::doctor` classifies an open workspace into a [`HealthReport`], and [`Session::recover`]
+//! runs the online repairs with evidence under `.unblock/.recovery/`. A `--no-default-features`
+//! build has neither `preopen` nor `doctor`, and `recover()` returns
+//! [`EngineError::FeatureNotWired`] (`feature: "health"`).
 //!
 //! # Example — a happy-path round-trip against a temp workspace
 //!
@@ -117,6 +123,8 @@ mod epic;
 mod error;
 mod logging;
 mod permit;
+#[cfg(feature = "health")]
+pub mod preopen;
 mod report;
 mod session;
 mod shutdown;
@@ -127,6 +135,14 @@ pub use logging::{RELIABILITY_TARGET, TracingOptions, init_tracing};
 pub use session::write::{NewDep, NewIssue};
 pub use session::{MigrateOutcome, Session, SessionConfig};
 pub use shutdown::is_shutdown_requested;
+
+// --- the D58 health surface, re-exported so the cli needs no `unblock-health` edge ---
+#[cfg(feature = "health")]
+pub use preopen::HealthReport;
+#[cfg(feature = "health")]
+pub use unblock_health::{
+    DbFileFact, HealthLevel, PlannedAction, PlannedRepair, PreOpenFacts, RepairPath,
+};
 
 // --- the report module owns the engine-local `ImportOptions` and re-exports the model-owned
 //     report/outcome DTOs (CF-A) from one place ---
@@ -156,6 +172,14 @@ mod tests {
         DepTree, Dependency, DiagnosticFinding, DiagnosticKind, DiagnosticReport, EngineError,
         EpicStatus, ExportReport, GraphEdge, ImportOptions, ImportReport, IssuePatch, LabelCount,
         LabelRename, ListFilters, MigrateOutcome, Result, Session, SessionConfig, TracingOptions,
+    };
+    // The D58 health surface (`health` feature).
+    #[cfg(feature = "health")]
+    #[allow(unused_imports)]
+    use crate::{
+        DbFileFact, HealthLevel, HealthReport, PlannedAction, PlannedRepair, PreOpenFacts,
+        RepairPath,
+        preopen::{ActionOutcome, ActionResult, PreOpenRepairOutcome},
     };
 
     #[test]

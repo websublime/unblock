@@ -301,15 +301,17 @@ async fn a_clean_workspace_reports_no_dangling_edges() {
 }
 
 /// **The `doctor` FOLD, and the ONE-HOME property.** `Session::doctor()` appends the SAME findings
-/// the `dangling` action returns, in the same pinned order, AFTER the health/integrity/file-state
-/// rows — while the report's `kind` stays `Info` (the fold moves no spine §1.10 byte).
+/// the `dangling` action returns, in the same pinned order, AFTER the level, anomaly, repair,
+/// advisory and schema rows — while the report's `kind` stays `Info` (the fold moves no spine
+/// §1.10 byte).
 ///
 /// The equality against `diagnostics(Dangling)` is what pins ONE HOME: a second implementation in
 /// `lifecycle.rs` would have to reproduce the read, its existence-only selection, its external
 /// carve-out AND its order to keep this green.
 ///
-/// MUTANT KILLED: deleting the fold (the tail rows vanish); folding the rows in BEFORE the file-state
-/// anomalies (the suffix assertion goes red); or flipping the report `kind` to `Dangling`.
+/// MUTANT KILLED: deleting the fold (the tail rows vanish); folding the rows in BEFORE the health
+/// rows (the suffix assertion goes red); or flipping the report `kind` to `Dangling`.
+#[cfg(feature = "health")]
 #[tokio::test]
 async fn doctor_folds_in_the_same_dangling_findings_after_the_file_state_rows() {
     let (s, store) = session_and_store().await;
@@ -321,7 +323,11 @@ async fn doctor_folds_in_the_same_dangling_findings_after_the_file_state_rows() 
         .diagnostics(DiagnosticKind::Dangling, None)
         .await
         .expect("diagnostics");
-    let doctor = s.doctor().await.expect("doctor");
+    let doctor = s
+        .doctor(&common::clean_preopen())
+        .await
+        .expect("doctor")
+        .report;
 
     assert_eq!(
         doctor.kind,
@@ -341,17 +347,22 @@ async fn doctor_folds_in_the_same_dangling_findings_after_the_file_state_rows() 
     );
     assert!(
         folded.len() > expected.len(),
-        "the health/integrity rows still precede them"
+        "the health and schema rows still precede them"
     );
 }
 
 /// A `doctor` run on a clean workspace folds in NOTHING, so the fold cannot pad a healthy report.
+#[cfg(feature = "health")]
 #[tokio::test]
 async fn doctor_folds_in_nothing_on_a_clean_workspace() {
     let (s, _store) = session_and_store().await;
     s.create(&issue("ub-1")).await.expect("create");
 
-    let doctor = s.doctor().await.expect("doctor");
+    let doctor = s
+        .doctor(&common::clean_preopen())
+        .await
+        .expect("doctor")
+        .report;
     assert!(
         !doctor.findings.iter().any(|f| f.detail.contains(" -> ")),
         "no dangling row on a clean workspace: {:?}",
