@@ -131,8 +131,10 @@ fn run_migrate_json(ws: &Workspace) -> Value {
     serde_json::from_slice(&out.stdout).expect("valid JSON migrate report")
 }
 
-/// A `.unblock/` carrying `config.toml` and NO `unblock.db`, so the facade's own `open_local` creates
-/// the file at stamp `0` — the never-migrated fixture, in the pre-migration state D46 repairs.
+/// A `.unblock/` carrying `config.toml` and NO `unblock.db` and NO `.write.lock` (a fresh clone), so
+/// the facade's own `open_local` creates the file at stamp `0` — the never-migrated fixture, in the
+/// pre-migration state D46 repairs. With the marker left behind the workspace reads as a LOST
+/// database, which every storage-bearing open refuses (PRD §4 D58 clause (7)).
 fn never_migrated_workspace() -> Workspace {
     let ws = Workspace::init();
     let db = ws.db_path();
@@ -141,7 +143,16 @@ fn never_migrated_workspace() -> Workspace {
         path.push(suffix);
         let _ = std::fs::remove_file(std::path::PathBuf::from(path));
     }
+    let marker = db
+        .parent()
+        .expect("the database lives in .unblock/")
+        .join(".write.lock");
+    let _ = std::fs::remove_file(&marker);
     assert!(!db.exists(), "the never-migrated fixture has no unblock.db");
+    assert!(
+        !marker.exists(),
+        "the never-migrated fixture has no .write.lock"
+    );
     ws
 }
 

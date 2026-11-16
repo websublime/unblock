@@ -2983,6 +2983,7 @@ dependencies = [
  "chrono",
  "dunce",
  "insta",
+ "libsql",
  "proptest",
  "serde",
  "serde_json",

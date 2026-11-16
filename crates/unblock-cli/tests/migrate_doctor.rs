@@ -345,8 +345,10 @@ fn a_lying_stamp_exits_2_with_a_hint_that_names_the_repair_and_the_missing_colum
     );
 }
 
-/// Delete the workspace database (and its WAL sidecars), leaving `.unblock/config.toml` behind — the
-/// NEVER-MIGRATED fixture. The facade's own `open_local` recreates the file at stamp `0`.
+/// Delete the workspace database, its WAL sidecars and the `.write.lock` marker, leaving
+/// `.unblock/config.toml` behind — the NEVER-MIGRATED fixture (a fresh clone). The facade's own
+/// `open_local` recreates the file at stamp `0`. Leaving the marker would make the workspace read as
+/// a LOST database, which every storage-bearing open refuses (PRD §4 D58 clause (7)).
 fn remove_database(ws: &Workspace) {
     let db = ws.db_path();
     for suffix in ["", "-wal", "-shm"] {
@@ -354,7 +356,16 @@ fn remove_database(ws: &Workspace) {
         path.push(suffix);
         let _ = std::fs::remove_file(std::path::PathBuf::from(path));
     }
+    let marker = db
+        .parent()
+        .expect("the database lives in .unblock/")
+        .join(".write.lock");
+    let _ = std::fs::remove_file(&marker);
     assert!(!db.exists(), "the never-migrated fixture has no unblock.db");
+    assert!(
+        !marker.exists(),
+        "the never-migrated fixture has no .write.lock"
+    );
 }
 
 /// Revert the `comments` table to its five-column pre-D37 shape AND stamp `user_version = 1` — the

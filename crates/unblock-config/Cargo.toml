@@ -64,3 +64,8 @@ insta = { workspace = true }
 # precedent) asserts the `unblock.config` warn on an unknown user-file key and an unknown DB row.
 # Already a workspace dependency (no new crate meets cargo-deny).
 tracing-subscriber = { workspace = true }
+# TEST-ONLY (D58): the open-mode cells re-stamp a migrated database's `PRAGMA user_version` (one
+# step behind, one step ahead) through a raw libsql open — the same seam the engine and cli test
+# suites use, same feature set as the storage crate's private backend dep. Never linked into a
+# shipped binary.
+libsql = { workspace = true }
