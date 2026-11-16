@@ -47,6 +47,7 @@
 
 mod error;
 mod filters;
+mod health_types;
 mod libsql;
 mod trait_def;
 
@@ -62,7 +63,13 @@ pub mod testkit;
 
 pub use error::{BackendOpaque, SchemaGap, StorageError};
 pub use filters::{DeleteMode, DeletePlan, IssuePatch};
-pub use libsql::{LibsqlStorage, WriteLockGuard};
+pub use health_types::{
+    ChildCounterDrift, DbHealthFacts, DuplicateKey, RepairAction, RepairOutcome, RepairRequest,
+};
+pub use libsql::{
+    ExclusiveOutcome, ExclusiveRefusal, ExclusiveRequest, LibsqlStorage, WriteLockGuard,
+    exclusive_window, live_connections_to, lost_database, probe_write_lock,
+};
 pub use trait_def::Storage;
 
 /// The on-disk schema version THIS BUILD expects (`PRAGMA user_version`) — D46, v1.0.1.

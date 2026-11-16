@@ -5,9 +5,9 @@
 //! processes share one `unblock.db`; the in-process [`tokio::sync::Semaphore`] (L5) and the
 //! per-store write-connection [`tokio::sync::Mutex`] (L2) serialize writers only *within* one
 //! process. This primitive restores **cross-process** write serialization: every mutation acquires
-//! an OS advisory lock on `.unblock/.write.lock` (a NEW file, a sibling of `unblock.db`, **distinct**
-//! from the vestigial `.unblock.lock` `OrphanedLockFile` detector target) for the WHOLE mutation —
-//! the same span the engine holds the write permit.
+//! an OS advisory lock on `.unblock/.write.lock` (a NEW file, a sibling of `unblock.db`) for the
+//! WHOLE mutation — the same span the engine holds the write permit. D58's `write_lock_held`
+//! advisory probes this file (`probe_write_lock`).
 //!
 //! # Mechanism (faithful port of beads `sync/mod.rs::blocking_write_lock_with_timeout`)
 //!
@@ -16,8 +16,7 @@
 //!   **EXCLUSIVE** lock; reads take no lock (WAL MVCC).
 //! - **Lock file:** opened `read(true).write(true).create(true).truncate(false)` — **no content is
 //!   ever written**; it is a pure flock target. A crashed holder's advisory lock is released by the
-//!   kernel when its fd closes, so the file **never orphans** (which is exactly why the `OrphanedLock`
-//!   detector watches a *different*, presence-based file).
+//!   kernel when its fd closes, so the file **never orphans**.
 //! - **Non-spinning (NFR-3):** a fast-path non-blocking `try_lock()`, then — on contention — an async
 //!   [`tokio::time::sleep`] poll at [`POLL_INTERVAL`] (25 ms) to a bounded timeout. It **never** calls
 //!   the blocking `File::lock()` on a worker thread and **never** busy-spins.
@@ -49,8 +48,8 @@ use crate::error::{BackendOpaque, StorageError};
 
 /// The restored cross-process advisory write-lock file name (a sibling of `unblock.db`).
 ///
-/// **Distinct** from the vestigial `.unblock.lock` `OrphanedLockFile` detector target: this file is
-/// the live flock serializer, never written to, kernel-released on crash.
+/// The live flock serializer, never written to and kernel-released on crash. D58's
+/// `write_lock_held` advisory probes it.
 pub(crate) const WRITE_LOCK_FILE_NAME: &str = ".write.lock";
 
 /// The poll interval between `try_lock` retries while contended (faithful to beads'

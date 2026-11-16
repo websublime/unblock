@@ -28,17 +28,27 @@ mod crud;
 mod deps;
 mod diagnostics;
 mod events;
+mod health;
 mod ids;
 mod lock;
 mod mappers;
 mod migrations;
 mod mutate;
 mod query;
+mod recovery_fs;
+mod repair;
 mod schema;
 
 // The cross-process advisory write lock (D31) + its public RAII guard, re-exported to the crate root
 // (`unblock_storage::WriteLockGuard`) so `Storage::acquire_write_lock` can name it in its signature.
 pub use lock::WriteLockGuard;
+
+// The D58 local-file health primitives (spine §3.3), re-exported to the crate root. Outside the trait:
+// remote mode has no file.
+pub use health::{
+    ExclusiveOutcome, ExclusiveRefusal, ExclusiveRequest, exclusive_window, live_connections_to,
+    lost_database, probe_write_lock,
+};
 
 // D46: the version this build expects, surfaced (widened) at the crate root as
 // `unblock_storage::CURRENT_SCHEMA_VERSION` for the engine's advisory `doctor` finding. The i32
@@ -62,13 +72,13 @@ pub(crate) use migrations::{COMMENTS_STEP_VERSION, CONFIG_STEP_VERSION};
 #[cfg(any(test, feature = "testkit"))]
 mod testkit;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use libsql::{Builder, Connection, Database, TransactionBehavior};
+use libsql::{Builder, Connection, Database, OpenFlags, TransactionBehavior};
 use tokio::sync::Mutex;
 
 use unblock_model::{
@@ -78,6 +88,7 @@ use unblock_model::{
 
 use crate::error::{StorageError, is_busy_locked, map_libsql_err};
 use crate::filters::{DeletePlan, IssuePatch};
+use crate::health_types::{DbHealthFacts, RepairOutcome, RepairRequest};
 use crate::libsql::close_once::CloseOnceConnection;
 use crate::libsql::lock::WriteLock;
 use crate::trait_def::Storage;
@@ -98,6 +109,10 @@ pub(crate) const BUSY_TIMEOUT_MS: u64 = 5000;
 /// contention with this cadence on, and (a `#[ignore]`d negative control) that it breaches the
 /// ceiling with it off.
 pub(crate) const CHECKPOINT_EVERY_N_MUTATIONS: u64 = 50;
+
+/// The extended `SQLITE_READONLY_ROLLBACK` (`SQLITE_READONLY | 3 << 8`): a read-only connection met
+/// a hot rollback journal it may not roll back (D58 clause (8)).
+const SQLITE_READONLY_ROLLBACK: i32 = 776;
 
 /// Monotonic counter giving each `open_in_memory()` a unique shared-cache name, so two in-memory
 /// stores never collide on the process-global `SQLite` shared cache.
@@ -127,6 +142,11 @@ pub(super) struct StorageInstrument {
     /// write-lock contention deterministically without changing the real (blocking) transaction's
     /// semantics. Off in production; the lab enables it so the busy-retry witness is observable.
     busy_witness: AtomicBool,
+    /// `Storage::health_facts` calls on this store (D58 criterion (d)).
+    health_facts_calls: AtomicU64,
+    /// `Storage::integrity_check` calls on this store (D58 criterion (d)). The one
+    /// `integrity_check` inside `health_facts` is not one of them.
+    integrity_check_calls: AtomicU64,
 }
 
 impl Default for StorageInstrument {
@@ -137,6 +157,8 @@ impl Default for StorageInstrument {
             checkpoint_count: AtomicU64::new(0),
             checkpoint_interval: AtomicU64::new(CHECKPOINT_EVERY_N_MUTATIONS),
             busy_witness: AtomicBool::new(false),
+            health_facts_calls: AtomicU64::new(0),
+            integrity_check_calls: AtomicU64::new(0),
         }
     }
 }
@@ -166,6 +188,16 @@ impl StorageInstrument {
         self.busy_witness.load(Ordering::Relaxed)
     }
 
+    /// Bump the `health_facts` call counter.
+    fn record_health_facts(&self) {
+        self.health_facts_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the `integrity_check` call counter.
+    fn record_integrity_check(&self) {
+        self.integrity_check_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Read the committed-mutation count (testkit seam).
     #[cfg(any(test, feature = "testkit"))]
     pub(super) fn mutation_count(&self) -> u64 {
@@ -182,6 +214,18 @@ impl StorageInstrument {
     #[cfg(any(test, feature = "testkit"))]
     pub(super) fn checkpoint_count(&self) -> u64 {
         self.checkpoint_count.load(Ordering::Relaxed)
+    }
+
+    /// Read the `health_facts` call count (testkit seam).
+    #[cfg(any(test, feature = "testkit"))]
+    pub(super) fn health_facts_calls(&self) -> u64 {
+        self.health_facts_calls.load(Ordering::Relaxed)
+    }
+
+    /// Read the `integrity_check` call count (testkit seam).
+    #[cfg(any(test, feature = "testkit"))]
+    pub(super) fn integrity_check_calls(&self) -> u64 {
+        self.integrity_check_calls.load(Ordering::Relaxed)
     }
 
     /// Set the passive-checkpoint cadence (`0` disables it) — testkit seam. The contention lab sets
@@ -219,8 +263,9 @@ pub(super) struct WriteHook<'a> {
 pub struct LibsqlStorage {
     /// Keeps the underlying `Database` alive for the lifetime of the connections. For a shared-cache
     /// in-memory DB the cache is reference-counted by `SQLite`; holding the handle documents the
-    /// ownership and keeps a single source of truth for both connections.
-    _db: Database,
+    /// ownership and keeps a single source of truth for both connections. `health_facts` opens
+    /// its short-lived connection from it.
+    db: Database,
     /// The serialized write connection. The async [`Mutex`] guarantees one in-flight `BEGIN
     /// IMMEDIATE` mutation at a time *within this process* even if the engine's D14 permit is ever
     /// bypassed; under normal operation it is uncontended. A [`CloseOnceConnection`], like
@@ -240,6 +285,12 @@ pub struct LibsqlStorage {
     /// It encapsulates both the `.write.lock` path (derived from the db-file parent) and the
     /// configured `write_lock_timeout_ms` (threaded down from `unblock-config` at open).
     write_lock: Option<WriteLock>,
+    /// The database file, `None` for the in-memory store. `repair` confines its snapshot to
+    /// `<db dir>/.recovery/` (D58 clause (5)).
+    db_path: Option<PathBuf>,
+    /// Set by [`open_local_read_only`](Self::open_local_read_only): every mutation is refused with
+    /// [`StorageError::ReadOnlyStore`].
+    read_only: bool,
 }
 
 impl LibsqlStorage {
@@ -270,7 +321,28 @@ impl LibsqlStorage {
         ));
         // A real file: WAL applies (real WAL + native busy_timeout concurrency, validated by the
         // T0.8 contention lab on a file DB).
-        Self::from_database(db, true, BUSY_TIMEOUT_MS, write_lock).await
+        Self::from_database(db, Some(path), false, BUSY_TIMEOUT_MS, write_lock).await
+    }
+
+    /// Open the existing local database at `path` READ-ONLY (D58 clause (8), spine §3.3).
+    ///
+    /// Both connections carry `SQLITE_OPEN_READONLY`. No journal-mode pragma runs, nothing is
+    /// migrated and no `.write.lock` is taken or created. Every mutating method, `migrate`,
+    /// `acquire_write_lock` and `repair` return [`StorageError::ReadOnlyStore`]. `SQLite` may
+    /// still create its `-shm`/`-wal` housekeeping files beside a WAL database (`wal.html` §5).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::ReadOnlyRollback`] when the first read meets a hot rollback journal
+    /// (the raw extended `SQLITE_READONLY_ROLLBACK`), and [`StorageError::Backend`] when the file
+    /// cannot be opened or read.
+    pub async fn open_local_read_only(path: &Path) -> Result<Self, StorageError> {
+        let db = Builder::new_local(path)
+            .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await
+            .map_err(map_libsql_err)?;
+        Self::from_database(db, Some(path), true, BUSY_TIMEOUT_MS, None).await
     }
 
     /// Open a local libsql database at `path` with a **non-default** native `busy_timeout`.
@@ -299,7 +371,7 @@ impl LibsqlStorage {
             path.parent().unwrap_or_else(|| Path::new(".")),
             crate::DEFAULT_WRITE_LOCK_TIMEOUT_MS,
         ));
-        Self::from_database(db, true, busy_timeout_ms, write_lock).await
+        Self::from_database(db, Some(path), false, busy_timeout_ms, write_lock).await
     }
 
     /// Open a fresh, process-unique in-memory libsql database shared by the write and read
@@ -335,33 +407,62 @@ impl LibsqlStorage {
             .map_err(map_libsql_err)?;
         // In-memory: shared-cache, NOT WAL (see the method docs + `apply_pragmas`); a connection-
         // private in-memory DB has no cross-process sharing, so it takes NO `.write.lock` (`None`).
-        Self::from_database(db, false, BUSY_TIMEOUT_MS, None).await
+        Self::from_database(db, None, false, BUSY_TIMEOUT_MS, None).await
     }
 
     /// Build the two connections from an opened `Database` and apply the runtime pragmas to each.
     ///
-    /// `file_backed` selects whether the WAL-only pragmas are applied (only file databases can use
-    /// WAL; a shared-cache `:memory:` DB reports `journal_mode = memory` regardless).
-    /// `busy_timeout_ms` is the native sleep-based busy timeout applied to both connections (always
-    /// [`BUSY_TIMEOUT_MS`] except on the gated forced-spin control path, which passes `0`).
+    /// `path` is the database file (`None` in memory); the WAL-only pragmas apply to a writable
+    /// file only (a shared-cache `:memory:` DB reports `journal_mode = memory` regardless, and a
+    /// read-only open changes no journal mode). A `read_only` open makes its first read on each
+    /// connection BEFORE any pragma, so a hot journal surfaces as
+    /// [`StorageError::ReadOnlyRollback`]. `busy_timeout_ms` is the native sleep-based busy
+    /// timeout applied to both connections (always [`BUSY_TIMEOUT_MS`] except on the gated
+    /// forced-spin control path, which passes `0`).
     async fn from_database(
         db: Database,
-        file_backed: bool,
+        path: Option<&Path>,
+        read_only: bool,
         busy_timeout_ms: u64,
         write_lock: Option<WriteLock>,
     ) -> Result<Self, StorageError> {
-        let write_conn = CloseOnceConnection::connect(&db).await?;
-        let read_conn = CloseOnceConnection::connect(&db).await?;
-        apply_pragmas(&write_conn, file_backed, busy_timeout_ms).await?;
-        apply_pragmas(&read_conn, file_backed, busy_timeout_ms).await?;
+        let write_conn = CloseOnceConnection::connect(&db, path).await?;
+        let read_conn = CloseOnceConnection::connect(&db, path).await?;
+        if read_only {
+            for conn in [&read_conn, &write_conn] {
+                conn.busy_timeout(Duration::from_millis(busy_timeout_ms))
+                    .map_err(map_libsql_err)?;
+                first_read_only_read(conn).await?;
+            }
+        }
+        let wal = path.is_some() && !read_only;
+        apply_pragmas(&write_conn, wal, busy_timeout_ms).await?;
+        apply_pragmas(&read_conn, wal, busy_timeout_ms).await?;
         Ok(Self {
-            _db: db,
+            db,
             write_conn: Mutex::new(write_conn),
             read_conn,
             busy_timeout_ms,
             instrument: StorageInstrument::default(),
             write_lock,
+            db_path: path.map(Path::to_path_buf),
+            read_only,
         })
+    }
+
+    /// `Err(ReadOnlyStore)` on a store opened by [`open_local_read_only`](Self::open_local_read_only).
+    fn writable(&self) -> Result<(), StorageError> {
+        if self.read_only {
+            Err(StorageError::ReadOnlyStore)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// `<db dir>/.recovery` for a file-backed store, `None` in memory (testkit seam).
+    #[cfg(any(test, feature = "testkit"))]
+    pub(super) fn recovery_root(&self) -> Option<PathBuf> {
+        self.db_path.as_deref().map(recovery_fs::recovery_root)
     }
 
     /// Borrow the read connection (WAL reader snapshots; never serialized behind the writer).
@@ -396,18 +497,18 @@ impl LibsqlStorage {
 /// Apply the runtime pragmas to a connection (spine §3.3, ported from the original schema.rs:606-643
 /// — except `busy_timeout`, which is the native non-spinning inverse of beads).
 ///
-/// Sets, in order: native `busy_timeout`; (file-backed only) WAL journal mode + `wal_autocheckpoint
-/// = 0`; `foreign_keys = ON`; `synchronous = NORMAL`; `temp_store = MEMORY`; `cache_size = -8000`
-/// (≈8 MiB); `journal_size_limit = 33554432` (bound WAL growth).
+/// Sets, in order: native `busy_timeout`; (writable file only) WAL journal mode +
+/// `wal_autocheckpoint = 0`; `foreign_keys = ON`; `synchronous = NORMAL`; `temp_store = MEMORY`;
+/// `cache_size = -8000` (≈8 MiB); `journal_size_limit = 33554432` (bound WAL growth).
 ///
 /// **The WAL-only pragmas (`journal_mode = WAL`, `wal_autocheckpoint = 0`) are applied only when
-/// `file_backed`.** A shared-cache `:memory:` database cannot use WAL — it always reports
+/// `wal`.** A shared-cache `:memory:` database cannot use WAL — it always reports
 /// `journal_mode = memory` — so asserting WAL there is a no-op; the in-memory store relies on
 /// shared-cache + the native `busy_timeout`, and real WAL concurrency is validated by the T0.8
-/// contention lab on a file DB.
+/// contention lab on a file DB. A read-only open changes no journal mode (D58 clause (8)).
 async fn apply_pragmas(
     conn: &Connection,
-    file_backed: bool,
+    wal: bool,
     busy_timeout_ms: u64,
 ) -> Result<(), StorageError> {
     // Native, sleep-based busy handler (NFR-3). Set first so any subsequent switch can wait rather
@@ -416,8 +517,8 @@ async fn apply_pragmas(
     conn.busy_timeout(Duration::from_millis(busy_timeout_ms))
         .map_err(map_libsql_err)?;
 
-    // WAL-only pragmas: file-backed databases only (in-memory cannot use WAL).
-    if file_backed {
+    // WAL-only pragmas: writable file databases only (in-memory cannot use WAL).
+    if wal {
         for pragma in ["PRAGMA journal_mode = WAL", "PRAGMA wal_autocheckpoint = 0"] {
             let _ = conn.query(pragma, ()).await.map_err(map_libsql_err)?;
         }
@@ -436,6 +537,23 @@ async fn apply_pragmas(
         let _ = conn.query(pragma, ()).await.map_err(map_libsql_err)?;
     }
     Ok(())
+}
+
+/// The first read of a read-only connection, inspecting the RAW libsql error before
+/// [`map_libsql_err`]: the extended `SQLITE_READONLY_ROLLBACK` (a hot rollback journal) is
+/// [`StorageError::ReadOnlyRollback`] (D58 clause (8)).
+async fn first_read_only_read(conn: &Connection) -> Result<(), StorageError> {
+    let read = async {
+        let mut rows = conn.query("SELECT count(*) FROM sqlite_schema", ()).await?;
+        rows.next().await.map(drop)
+    };
+    match read.await {
+        Ok(()) => Ok(()),
+        Err(libsql::Error::SqliteFailure(SQLITE_READONLY_ROLLBACK, _)) => {
+            Err(StorageError::ReadOnlyRollback)
+        }
+        Err(other) => Err(map_libsql_err(other)),
+    }
 }
 
 /// Run `op` inside a `BEGIN IMMEDIATE` transaction on `conn`, committing on `Ok` and rolling back on
@@ -569,6 +687,7 @@ async fn passive_checkpoint(conn: &Connection) {
 #[async_trait]
 impl Storage for LibsqlStorage {
     async fn migrate(&self) -> Result<(), StorageError> {
+        self.writable()?;
         // Migration bypasses `with_immediate_tx`, so it takes the cross-process advisory `.write.lock`
         // EXPLICITLY (D31) for the WHOLE command, UNCONDITIONALLY — BEFORE the version check and the
         // migration run. The lock is acquired with `timeout=0` (fail-fast): a concurrent mid-mutation
@@ -589,6 +708,7 @@ impl Storage for LibsqlStorage {
     }
 
     async fn acquire_write_lock(&self) -> Result<Option<WriteLockGuard>, StorageError> {
+        self.writable()?;
         // D31: acquire the cross-process advisory `.write.lock` EXCLUSIVE for the WHOLE mutation. The
         // engine (L5) holds the returned guard across the allocation READ + the write tx — a legal
         // L5→L2 down-call. `Ok(None)` on the file-less in-memory path (no cross-process sharing).
@@ -599,6 +719,7 @@ impl Storage for LibsqlStorage {
     }
 
     async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
+        self.instrument.record_integrity_check();
         diagnostics::integrity_check(self.read()).await
     }
 
@@ -612,11 +733,13 @@ impl Storage for LibsqlStorage {
     }
 
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         crud::create_issue(&conn, self.hook(), issue, actor).await
     }
 
     async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         crud::create_issues(&conn, self.hook(), issues, actor).await
     }
@@ -635,6 +758,7 @@ impl Storage for LibsqlStorage {
         patch: &IssuePatch,
         actor: &str,
     ) -> Result<Issue, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         crud::update_issue(&conn, self.hook(), id, patch, actor).await
     }
@@ -644,11 +768,13 @@ impl Storage for LibsqlStorage {
         plan: &DeletePlan,
         actor: &str,
     ) -> Result<DeletePlan, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         crud::delete_issue(&conn, self.hook(), plan, actor).await
     }
 
     async fn restore_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         crud::restore_issue(&conn, self.hook(), id, actor).await
     }
@@ -659,6 +785,7 @@ impl Storage for LibsqlStorage {
         assignee: &str,
         actor: &str,
     ) -> Result<Issue, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         mutate::claim_issue(&conn, self.hook(), id, assignee, actor).await
     }
@@ -669,11 +796,13 @@ impl Storage for LibsqlStorage {
         until: DateTime<Utc>,
         actor: &str,
     ) -> Result<Issue, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         mutate::defer_issue(&conn, self.hook(), id, until, actor).await
     }
 
     async fn undefer_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         mutate::undefer_issue(&conn, self.hook(), id, actor).await
     }
@@ -715,6 +844,7 @@ impl Storage for LibsqlStorage {
     }
 
     async fn add_dependency(&self, dep: &Dependency, actor: &str) -> Result<(), StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         deps::add_dependency(&conn, self.hook(), dep, actor).await
     }
@@ -726,6 +856,7 @@ impl Storage for LibsqlStorage {
         dep_type: &DependencyType,
         actor: &str,
     ) -> Result<(), StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         deps::remove_dependency(&conn, self.hook(), issue_id, depends_on_id, dep_type, actor).await
     }
@@ -743,6 +874,7 @@ impl Storage for LibsqlStorage {
         body: &str,
         actor: &str,
     ) -> Result<Comment, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         comments::add_comment(&conn, self.hook(), issue_id, author, body, actor).await
     }
@@ -757,11 +889,13 @@ impl Storage for LibsqlStorage {
         body: &str,
         actor: &str,
     ) -> Result<Comment, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         comments::update_comment(&conn, self.hook(), comment_id, body, actor).await
     }
 
     async fn delete_comment(&self, comment_id: i64, actor: &str) -> Result<Comment, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         comments::delete_comment(&conn, self.hook(), comment_id, actor).await
     }
@@ -811,6 +945,7 @@ impl Storage for LibsqlStorage {
     }
 
     async fn rename_label(&self, old: &str, new: &str, actor: &str) -> Result<usize, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         crud::rename_label(&conn, self.hook(), old, new, actor).await
     }
@@ -821,6 +956,7 @@ impl Storage for LibsqlStorage {
         reason: &str,
         actor: &str,
     ) -> Result<Vec<String>, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         crud::close_issues(&conn, self.hook(), ids, reason, actor).await
     }
@@ -832,13 +968,36 @@ impl Storage for LibsqlStorage {
     }
 
     async fn set_config(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         crud::set_config(&conn, self.hook(), key, value).await
     }
 
     async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
+        self.writable()?;
         let conn = self.write().await;
         crud::unset_config(&conn, self.hook(), key).await
+    }
+
+    // --- workspace health (FR-16 full, D58; spine §3.2) ---
+
+    async fn health_facts(&self) -> Result<DbHealthFacts, StorageError> {
+        // A pure read: no permit, no lock (FR-10). Its one read transaction runs on a connection
+        // of its own, never the shared read connection: concurrent reads there would join the
+        // transaction, and a cancelled call would leave it open and pin a stale snapshot. This
+        // connection joins the per-file registry while open and ends the transaction on close.
+        self.instrument.record_health_facts();
+        let conn = CloseOnceConnection::connect(&self.db, self.db_path.as_deref()).await?;
+        apply_pragmas(&conn, false, self.busy_timeout_ms).await?;
+        diagnostics::health_facts(&conn).await
+    }
+
+    async fn repair(&self, request: &RepairRequest) -> Result<RepairOutcome, StorageError> {
+        self.writable()?;
+        // The write connection is held for the whole call: the snapshot, the ladder and the action
+        // transaction all run on it. The caller holds the permit and the `.write.lock`.
+        let conn = self.write().await;
+        repair::repair(&conn, self.hook(), self.db_path.as_deref(), request).await
     }
 }
 

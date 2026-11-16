@@ -26,6 +26,15 @@ path = "tests/bin/c5_abandoned_tx.rs"
 name = "write_lock_race"
 path = "tests/bin/write_lock_race.rs"
 
+# PRD §4 D58 criteria (f)/(g) test-only helper: the SECOND process that holds a libsql reader, the
+# `.write.lock`, or a killed write transaction's hot `-journal`, and runs the (f5) `BEGIN EXCLUSIVE`
+# control. Located from `tests/exclusive_window.rs` via `env!("CARGO_BIN_EXE_exclusive_window_holder")`.
+# Source under `tests/bin/` (never `src/`), so it never ships via `dist`; existing deps only
+# (libsql/tokio), NO new dep.
+[[bin]]
+name = "exclusive_window_holder"
+path = "tests/bin/exclusive_window_holder.rs"
+
 # L2 — the backend-free `Storage` trait + its backend-aware impls, one per product mode (D51).
 # `libsql` and `petgraph` are PRIVATE deps (no backend/graph type in any public signature,
 # spine §6 rule 2). LOCAL mode is this default build — `libsql` with `default-features = false,

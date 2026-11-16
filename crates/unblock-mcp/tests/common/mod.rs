@@ -810,6 +810,19 @@ pub mod recording {
             self.record();
             self.inner.unset_config(key).await
         }
+
+        async fn health_facts(&self) -> Result<unblock_storage::DbHealthFacts, StorageError> {
+            self.inner.health_facts().await
+        }
+
+        // D58: `repair` is a mutation, so it records (the zero-write spy stays non-vacuous).
+        async fn repair(
+            &self,
+            request: &unblock_storage::RepairRequest,
+        ) -> Result<unblock_storage::RepairOutcome, StorageError> {
+            self.record();
+            self.inner.repair(request).await
+        }
     }
 }
 
@@ -1121,6 +1134,17 @@ pub mod gated {
         async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
             self.inner.unset_config(key).await
         }
+
+        async fn health_facts(&self) -> Result<unblock_storage::DbHealthFacts, StorageError> {
+            self.inner.health_facts().await
+        }
+
+        async fn repair(
+            &self,
+            request: &unblock_storage::RepairRequest,
+        ) -> Result<unblock_storage::RepairOutcome, StorageError> {
+            self.inner.repair(request).await
+        }
     }
 }
 
@@ -1374,6 +1398,17 @@ pub mod failing {
 
         async fn unset_config(&self, key: &str) -> Result<bool, StorageError> {
             self.inner.unset_config(key).await
+        }
+
+        async fn health_facts(&self) -> Result<unblock_storage::DbHealthFacts, StorageError> {
+            self.inner.health_facts().await
+        }
+
+        async fn repair(
+            &self,
+            request: &unblock_storage::RepairRequest,
+        ) -> Result<unblock_storage::RepairOutcome, StorageError> {
+            self.inner.repair(request).await
         }
     }
 }
