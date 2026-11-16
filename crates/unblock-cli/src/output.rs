@@ -56,8 +56,8 @@ pub struct MigrateReport {
     pub applied: bool,
 }
 
-/// The `unblock init` report names what `init` scaffolded (AF-3) and, under `--agents`, the
-/// `AGENTS.md` it wrote.
+/// The `unblock init` report names what `init` scaffolded (AF-3) or, in its database-only mode,
+/// recreated (D58), and, under `--agents`, the `AGENTS.md` it wrote.
 #[derive(Debug, Clone, Serialize)]
 pub struct InitReport {
     /// The project root that contains `.unblock/`.
@@ -66,12 +66,36 @@ pub struct InitReport {
     pub unblock_dir: PathBuf,
     /// The migrated empty database path.
     pub db_path: PathBuf,
-    /// The normalized issue-id prefix seeded into `config.toml`.
+    /// The normalized issue-id prefix: the one seeded into `config.toml` by a scaffold, the
+    /// resolved config's in the database-only mode.
     pub id_prefix: String,
-    /// The written `config.toml` path.
+    /// The `config.toml` path, written by a scaffold and left byte-identical otherwise.
     pub config_path: PathBuf,
+    /// What this run created.
+    pub mode: InitMode,
     /// The `AGENTS.md` path `init --agents` wrote, and `None` for a bare `init` (v1.1).
     pub agents_path: Option<PathBuf>,
+}
+
+/// What an `unblock init` run created (PRD §4 D58 clause (7)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitMode {
+    /// `config.toml` and the database (a new target, or `--force`).
+    Scaffold,
+    /// Only the database, under an existing `config.toml` whose database is absent or 0 bytes.
+    DatabaseOnly,
+}
+
+impl InitMode {
+    /// The `mode` row's text.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scaffold => "scaffold",
+            Self::DatabaseOnly => "database_only",
+        }
+    }
 }
 
 /// Map a CLI-local report onto a `DiagnosticReport` for rendering (D27/AD-2). Each report reuses an
@@ -135,6 +159,7 @@ impl ToDiagnosticReport for InitReport {
             finding("db_path", self.db_path.display().to_string()),
             finding("config_path", self.config_path.display().to_string()),
             finding("id_prefix", self.id_prefix.clone()),
+            finding("mode", self.mode.as_str()),
         ];
         if let Some(agents_path) = &self.agents_path {
             findings.push(finding("agents_path", agents_path.display().to_string()));
@@ -268,8 +293,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        FormatPass, InitReport, MigrateReport, ToDiagnosticReport, VersionReport, diag_to,
-        pick_cli_format, pick_cli_format_to,
+        FormatPass, InitMode, InitReport, MigrateReport, ToDiagnosticReport, VersionReport,
+        diag_to, pick_cli_format, pick_cli_format_to,
     };
     use crate::cli::GlobalArgs;
     use unblock_config::EnvSource;
@@ -345,20 +370,26 @@ mod tests {
         report.findings.iter().map(|f| f.label.as_str()).collect()
     }
 
-    /// An `InitReport` for the workspace at `/ws`, with `agents_path` as given.
-    fn init_report(agents_path: Option<&str>) -> InitReport {
+    /// An `InitReport` for the workspace at `/ws` in `mode`, with `agents_path` as given.
+    fn init_report_in(mode: InitMode, agents_path: Option<&str>) -> InitReport {
         InitReport {
             workspace_dir: "/ws".into(),
             unblock_dir: "/ws/.unblock".into(),
             db_path: "/ws/.unblock/unblock.db".into(),
             id_prefix: "ub".to_string(),
             config_path: "/ws/.unblock/config.toml".into(),
+            mode,
             agents_path: agents_path.map(PathBuf::from),
         }
     }
 
+    /// A scaffold `InitReport` for the workspace at `/ws`, with `agents_path` as given.
+    fn init_report(agents_path: Option<&str>) -> InitReport {
+        init_report_in(InitMode::Scaffold, agents_path)
+    }
+
     #[test]
-    fn init_report_without_agents_keeps_its_five_rows() {
+    fn init_report_without_agents_keeps_its_six_rows() {
         let report = init_report(None).to_report();
         assert_eq!(
             labels(&report),
@@ -367,7 +398,8 @@ mod tests {
                 "unblock_dir",
                 "db_path",
                 "config_path",
-                "id_prefix"
+                "id_prefix",
+                "mode"
             ]
         );
     }
@@ -383,6 +415,7 @@ mod tests {
                 "db_path",
                 "config_path",
                 "id_prefix",
+                "mode",
                 "agents_path"
             ]
         );
@@ -393,17 +426,27 @@ mod tests {
         );
     }
 
+    /// The `mode` row reads `scaffold` or `database_only` and sits right before `agents_path`.
+    #[test]
+    fn init_report_mode_row_names_the_mode_before_agents_path() {
+        for (mode, text) in [
+            (InitMode::Scaffold, "scaffold"),
+            (InitMode::DatabaseOnly, "database_only"),
+        ] {
+            let report = init_report_in(mode, Some("/ws/AGENTS.md")).to_report();
+            let rows = &report.findings;
+            let mode_row = &rows[rows.len() - 2];
+            assert_eq!(
+                (mode_row.label.as_str(), mode_row.detail.as_str()),
+                ("mode", text)
+            );
+            assert_eq!(rows.last().map(|f| f.label.as_str()), Some("agents_path"));
+        }
+    }
+
     #[test]
     fn init_report_maps_to_info_kind() {
-        let report = InitReport {
-            workspace_dir: "/ws".into(),
-            unblock_dir: "/ws/.unblock".into(),
-            db_path: "/ws/.unblock/unblock.db".into(),
-            id_prefix: "ub".to_string(),
-            config_path: "/ws/.unblock/config.toml".into(),
-            agents_path: None,
-        }
-        .to_report();
+        let report = init_report(None).to_report();
         assert_eq!(report.kind, DiagnosticKind::Info);
         let prefix = report
             .findings

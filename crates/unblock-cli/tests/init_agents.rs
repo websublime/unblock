@@ -11,11 +11,14 @@
 //!   `init` prints a one-line stderr hint instead. The hint, a failed `AGENTS.md` write and an
 //!   `AlreadyInitialized` refusal under `--agents` end with the same retry text, and the cells run
 //!   that text through `sh`.
+//! - The database-only mode (D58) recreates a missing database under an existing `config.toml`,
+//!   refuses orphan sidecars, and is the recovery path for the lost database every storage-bearing
+//!   open refuses.
 
 mod common;
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
 use common::{Workspace, output_locked, pipe_locked, spawn_locked, unblock};
@@ -99,8 +102,8 @@ fn init_honors_the_output_flag() {
         if format == "csv" {
             assert_eq!(
                 common::csv_report(&out.stdout).len(),
-                5,
-                "the five scaffold records: {stdout}"
+                6,
+                "the six scaffold records: {stdout}"
             );
         }
     }
@@ -131,7 +134,8 @@ fn init_csv_reports_the_scaffold() {
             "unblock_dir",
             "db_path",
             "config_path",
-            "id_prefix"
+            "id_prefix",
+            "mode"
         ]
     );
 
@@ -157,6 +161,7 @@ fn init_csv_reports_the_scaffold() {
             "db_path",
             "config_path",
             "id_prefix",
+            "mode",
             "agents_path"
         ]
     );
@@ -494,7 +499,8 @@ fn init_csv_via_env_reports_the_scaffold() {
             "unblock_dir",
             "db_path",
             "config_path",
-            "id_prefix"
+            "id_prefix",
+            "mode"
         ]
     );
 }
@@ -1199,8 +1205,10 @@ fn init_beside_an_empty_sibling_directory_proceeds() {
     assert_empty_dir(&both_empty.path().join("_unblock"));
 }
 
-/// A root whose two workspace dirs both hold a scaffold meets the clobber guard first, naming the
-/// probed `.unblock/`. Under `--force` the sibling guard refuses it, naming the `_unblock/`.
+/// A `.unblock/` holding `config.toml` beside a scaffolded `_unblock/` passes the clobber guard as a
+/// database-only candidate, so the sibling guard refuses it with `ALREADY_INITIALIZED`, naming the
+/// `_unblock/`, with or without `--force` (PRD §4 D58 clause (7), step (3)). That holds for a
+/// config-only `.unblock/` and for one that also holds a database. No run writes anything.
 #[test]
 fn a_root_with_two_initialized_workspace_dirs_is_refused_by_each_guard() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -1210,32 +1218,26 @@ fn a_root_with_two_initialized_workspace_dirs_is_refused_by_each_guard() {
     let dot = root.path().join(".unblock");
     std::fs::create_dir(&dot).expect("mkdir .unblock");
     std::fs::write(dot.join("config.toml"), "id_prefix = \"ub\"\n").expect("write config.toml");
-    let saved_dot = std::fs::read(dot.join("config.toml")).expect("read .unblock/config.toml");
-    let saved_underscore =
-        std::fs::read(underscore.join("config.toml")).expect("read _unblock/config.toml");
 
-    let message = refusal_message(&init_dir(elsewhere.path(), root.path(), &[]));
-    assert_eq!(
-        message,
-        already_initialized(&root.path().join(".unblock")),
-        "the clobber guard names the probed .unblock/"
-    );
-    let message = refusal_message(&init_dir(elsewhere.path(), root.path(), &["--force"]));
-    assert_eq!(
-        message,
-        already_initialized(&root.path().join("_unblock")),
-        "under --force the sibling guard names the _unblock/"
-    );
-    assert_eq!(
-        std::fs::read(dot.join("config.toml")).expect("re-read .unblock/config.toml"),
-        saved_dot,
-        "the .unblock/ scaffold is untouched"
-    );
-    assert_eq!(
-        std::fs::read(underscore.join("config.toml")).expect("re-read _unblock/config.toml"),
-        saved_underscore,
-        "the _unblock/ scaffold is untouched"
-    );
+    for with_db in [false, true] {
+        if with_db {
+            std::fs::write(dot.join("unblock.db"), b"not empty").expect("write unblock.db");
+        }
+        let saved = tree(root.path());
+        for flags in WITH_AND_WITHOUT_FORCE {
+            let message = refusal_message(&init_dir(elsewhere.path(), root.path(), flags));
+            assert_eq!(
+                message,
+                already_initialized(&root.path().join("_unblock")),
+                "with_db {with_db}, {flags:?}: the sibling guard names the _unblock/"
+            );
+            assert_eq!(
+                tree(root.path()),
+                saved,
+                "with_db {with_db}, {flags:?}: nothing is written"
+            );
+        }
+    }
 }
 
 /// An `_unblock` target beside a `.unblock` directory holding no scaffold is refused with or
@@ -1642,8 +1644,8 @@ fn init_agents_scaffold_set_is_unchanged() {
     );
 }
 
-/// The report's last row is `agents_path`, which names `AGENTS.md` under the canonical root, not
-/// under the symlink `--dir` went through.
+/// The report's last row is `agents_path`, right after the `mode` row (D58), and it names
+/// `AGENTS.md` under the canonical root, not under the symlink `--dir` went through.
 #[cfg(unix)]
 #[test]
 fn init_agents_reports_agents_path_last() {
@@ -1657,10 +1659,12 @@ fn init_agents_reports_agents_path_last() {
         &link.join(".unblock"),
         &["--agents"],
     ));
-    let last = report["findings"]
-        .as_array()
-        .and_then(|findings| findings.last())
-        .expect("a findings array");
+    let findings = report["findings"].as_array().expect("a findings array");
+    let [.., mode, last] = findings.as_slice() else {
+        panic!("at least two rows: {report}");
+    };
+    assert_eq!(mode["label"], "mode", "{report}");
+    assert_eq!(mode["detail"], "scaffold", "{report}");
     assert_eq!(last["label"], "agents_path", "{report}");
     let canonical = std::fs::canonicalize(real.path()).expect("canonicalize the real root");
     assert_eq!(
@@ -1729,8 +1733,8 @@ fn bare_init_hints_unblock_agents_on_stderr_only() {
             }
             "csv" => assert_eq!(
                 common::csv_report(&out.stdout).len(),
-                5,
-                "{format}: the five scaffold records: {stdout}"
+                6,
+                "{format}: the six scaffold records: {stdout}"
             ),
             _ => {}
         }
@@ -2235,4 +2239,467 @@ fn bare_init_with_a_broken_stderr_still_exits_0() {
         scaffold.join("config.toml").exists() && scaffold.join("unblock.db").exists(),
         "the scaffold exists"
     );
+}
+
+// -- The database-only mode and the lost database (PRD §4 D58 clause (7), criterion (h)) ---------
+
+/// A `config.toml` naming a custom database file and a non-default prefix.
+const CUSTOM_CONFIG: &str = "db_filename = \"tracker.db\"\nid_prefix = \"acme\"\n";
+
+/// A `config.toml` that fails to parse.
+const MALFORMED_CONFIG: &str = "id_prefix = [unclosed\n";
+
+/// Returns a root whose `.unblock/` holds `config` as `config.toml`, the `.write.lock` marker when
+/// `marker` is set, and no database.
+fn configured_root(config: &str, marker: bool) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("tempdir");
+    let unblock_dir = root.path().join(".unblock");
+    std::fs::create_dir(&unblock_dir).expect("mkdir .unblock");
+    std::fs::write(unblock_dir.join("config.toml"), config).expect("write config.toml");
+    if marker {
+        std::fs::write(unblock_dir.join(".write.lock"), b"").expect("write .write.lock");
+    }
+    root
+}
+
+/// Scaffolds a workspace through `init`, then loses its database: deletes `unblock.db`, or empties
+/// it when `zero_byte` is set. `config.toml` and the `.write.lock` marker stay.
+fn lost_workspace(zero_byte: bool) -> Workspace {
+    let ws = Workspace::init();
+    if zero_byte {
+        std::fs::File::create(ws.db_path()).expect("empty unblock.db");
+    } else {
+        std::fs::remove_file(ws.db_path()).expect("remove unblock.db");
+    }
+    assert!(
+        ws.unblock_dir().join(".write.lock").is_file(),
+        "init leaves the .write.lock marker"
+    );
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = ws.unblock_dir().join(format!("unblock.db{suffix}"));
+        assert!(!sidecar.exists(), "no {suffix} survives init");
+    }
+    ws
+}
+
+/// Maps every entry under `dir`, by its path below `dir`, to its bytes, or to `None` for a
+/// directory.
+fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        for entry in std::fs::read_dir(dir).expect("read a directory") {
+            let path = entry.expect("a directory entry").path();
+            let below = path
+                .strip_prefix(base)
+                .expect("under the base")
+                .to_path_buf();
+            if path.is_dir() {
+                out.insert(below, None);
+                walk(base, &path, out);
+            } else {
+                out.insert(below, Some(std::fs::read(&path).expect("read a file")));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// Runs `cmd` with `args` from `cwd` under `--output json`.
+fn run_json(cwd: &Path, args: &[&str]) -> Output {
+    output_locked(
+        common::unblock_in(cwd)
+            .args(args)
+            .args(["--output", "json"]),
+        "run unblock",
+    )
+}
+
+/// Asserts that `out` exited with `exit` and carries one JSON error document on stdout whose code
+/// is `code`, and returns that document.
+fn json_error(out: &Output, exit: i32, code: &str) -> Value {
+    assert_exit(out, exit);
+    let error: Value =
+        serde_json::from_slice(&out.stdout).expect("one JSON error document on stdout");
+    assert_eq!(error["code"], code, "error: {error}");
+    error
+}
+
+/// Returns the report's labels, in order.
+fn report_labels(report: &Value) -> Vec<&str> {
+    report["findings"]
+        .as_array()
+        .expect("a findings array")
+        .iter()
+        .map(|f| f["label"].as_str().expect("a string label"))
+        .collect()
+}
+
+/// Asserts that `migrate` now opens the workspace at `root` and exits 0.
+fn assert_migrate_succeeds(root: &Path) {
+    let out = run_json(root, &["migrate"]);
+    assert_exit(&out, 0);
+}
+
+/// Plain `init` over `config.toml` and the marker, with the custom database absent, creates only
+/// that database, keeps `config.toml` byte-identical, reports the config's prefix and
+/// `mode: database_only` (before `agents_path` under `--agents`), and `migrate` then succeeds.
+#[test]
+fn init_database_only_recreates_only_the_database_under_a_custom_db_filename() {
+    let root = configured_root(CUSTOM_CONFIG, true);
+    let unblock_dir = root.path().join(".unblock");
+
+    let report = scaffold_report(&init_in(root.path(), &["--output", "json"]));
+    assert_eq!(
+        report_labels(&report),
+        [
+            "workspace_dir",
+            "unblock_dir",
+            "db_path",
+            "config_path",
+            "id_prefix",
+            "mode"
+        ]
+    );
+    assert_eq!(common::detail(&report, "mode"), Some("database_only"));
+    assert_eq!(common::detail(&report, "id_prefix"), Some("acme"));
+    assert_canonical(
+        Path::new(common::detail(&report, "db_path").expect("a db_path row")),
+        &unblock_dir.join("tracker.db"),
+        &format!("the configured database: {report}"),
+    );
+    assert_eq!(
+        std::fs::read_to_string(unblock_dir.join("config.toml")).expect("read config.toml"),
+        CUSTOM_CONFIG,
+        "config.toml stays byte-identical"
+    );
+    let entries: BTreeSet<PathBuf> = tree(&unblock_dir).into_keys().collect();
+    let expected: BTreeSet<PathBuf> = ["config.toml", ".write.lock", "tracker.db"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    assert_eq!(entries, expected, "only the configured database is created");
+    assert!(
+        std::fs::metadata(unblock_dir.join("tracker.db"))
+            .expect("stat tracker.db")
+            .len()
+            > 0,
+        "the database is created and migrated"
+    );
+    assert!(
+        !root.path().join("AGENTS.md").exists(),
+        "a bare init writes no AGENTS.md"
+    );
+    assert_migrate_succeeds(root.path());
+
+    let agents_root = configured_root(CUSTOM_CONFIG, true);
+    let report = scaffold_report(&init_in(
+        agents_root.path(),
+        &["--agents", "--output", "json"],
+    ));
+    let labels = report_labels(&report);
+    assert_eq!(
+        labels[labels.len() - 2..],
+        ["mode", "agents_path"],
+        "{report}"
+    );
+    assert_eq!(common::detail(&report, "mode"), Some("database_only"));
+}
+
+/// A 0-byte database under `config.toml` and the marker is recreated by the database-only mode.
+#[test]
+fn init_database_only_over_a_zero_byte_database() {
+    let ws = Workspace::init_with_prefix(Some("zed"));
+    std::fs::File::create(ws.db_path()).expect("empty unblock.db");
+    let config = std::fs::read(ws.config_path()).expect("read config.toml");
+
+    let report = scaffold_report(&init_in(ws.root(), &["--output", "json"]));
+    assert_eq!(common::detail(&report, "mode"), Some("database_only"));
+    assert_eq!(common::detail(&report, "id_prefix"), Some("zed"));
+    assert!(
+        std::fs::metadata(ws.db_path())
+            .expect("stat unblock.db")
+            .len()
+            > 0,
+        "the database is recreated"
+    );
+    assert_eq!(
+        std::fs::read(ws.config_path()).expect("re-read config.toml"),
+        config,
+        "config.toml stays byte-identical"
+    );
+    assert_migrate_succeeds(ws.root());
+}
+
+/// Plants `suffix` beside the absent database of a lost workspace and asserts that plain `init`
+/// exits 2 with `DATABASE_ERROR`, names the file, tells the user to stop every unblock process
+/// first, and leaves the workspace byte-identical.
+fn assert_orphan_sidecar_refused(suffix: &str) {
+    let ws = lost_workspace(false);
+    let sidecar = ws.unblock_dir().join(format!("unblock.db{suffix}"));
+    std::fs::write(&sidecar, b"orphan bytes").expect("plant the sidecar");
+    let saved = tree(ws.root());
+
+    let error = json_error(
+        &init_in(ws.root(), &["--output", "json"]),
+        2,
+        "DATABASE_ERROR",
+    );
+    let message = error["message"].as_str().expect("a string message");
+    let canonical = std::fs::canonicalize(ws.unblock_dir())
+        .expect("canonicalize .unblock")
+        .join(format!("unblock.db{suffix}"));
+    assert!(
+        message.contains(&canonical.display().to_string()),
+        "{suffix}: the message names the file: {message}"
+    );
+    assert!(
+        message.contains(
+            "stop every unblock process on this workspace first (every `unblock mcp` server and \
+             every CLI command)"
+        ),
+        "{suffix}: the stop-every-process instruction: {message}"
+    );
+    assert!(
+        message.contains("`.unblock/.recovery/`"),
+        "{suffix}: where to move it: {message}"
+    );
+    assert_eq!(tree(ws.root()), saved, "{suffix}: nothing is written");
+}
+
+#[test]
+fn init_refuses_orphan_wal_beside_absent_database() {
+    assert_orphan_sidecar_refused("-wal");
+}
+
+#[test]
+fn init_refuses_orphan_shm_beside_absent_database() {
+    assert_orphan_sidecar_refused("-shm");
+}
+
+#[test]
+fn init_refuses_orphan_journal_beside_absent_database() {
+    assert_orphan_sidecar_refused("-journal");
+}
+
+/// A fresh clone (`config.toml` only, no database, no marker) gets its database and the
+/// `.write.lock` marker from plain `init`.
+#[test]
+fn init_on_fresh_clone_creates_database_and_writes_write_lock() {
+    let root = configured_root("id_prefix = \"fc\"\n", false);
+    let unblock_dir = root.path().join(".unblock");
+
+    let report = scaffold_report(&init_in(root.path(), &["--output", "json"]));
+    assert_eq!(common::detail(&report, "mode"), Some("database_only"));
+    assert_eq!(common::detail(&report, "id_prefix"), Some("fc"));
+    assert!(
+        std::fs::metadata(unblock_dir.join("unblock.db"))
+            .expect("stat unblock.db")
+            .len()
+            > 0,
+        "the database is created"
+    );
+    assert!(
+        unblock_dir.join(".write.lock").is_file(),
+        "the open writes the .write.lock marker"
+    );
+    assert_eq!(
+        std::fs::read_to_string(unblock_dir.join("config.toml")).expect("read config.toml"),
+        "id_prefix = \"fc\"\n",
+        "config.toml stays byte-identical"
+    );
+}
+
+/// A malformed `config.toml` with no database fails plain `init` with exit 7 and nothing written.
+#[test]
+fn init_malformed_config_without_database_exits_7_writing_nothing() {
+    for marker in [false, true] {
+        let root = configured_root(MALFORMED_CONFIG, marker);
+        let saved = tree(root.path());
+        json_error(
+            &init_in(root.path(), &["--output", "json"]),
+            7,
+            "CONFIG_PARSE_ERROR",
+        );
+        assert_eq!(
+            tree(root.path()),
+            saved,
+            "marker {marker}: nothing is written"
+        );
+    }
+}
+
+/// A malformed `config.toml` beside a non-empty database fails plain `init` with exit 7, where v1
+/// refused it with `ALREADY_INITIALIZED`, and writes nothing.
+#[test]
+fn init_malformed_config_beside_non_empty_database_exits_7() {
+    let ws = Workspace::init();
+    std::fs::write(ws.config_path(), MALFORMED_CONFIG).expect("break config.toml");
+    let saved = tree(ws.root());
+    json_error(
+        &init_in(ws.root(), &["--output", "json"]),
+        7,
+        "CONFIG_PARSE_ERROR",
+    );
+    assert_eq!(tree(ws.root()), saved, "nothing is written");
+}
+
+/// A target holding `unblock.db` without `config.toml` still meets the clobber guard, even when
+/// the file is empty.
+#[test]
+fn init_target_holding_only_unblock_db_still_refuses_already_initialized() {
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    for bytes in [&b""[..], &b"not empty"[..]] {
+        let root = tempfile::tempdir().expect("tempdir");
+        let unblock_dir = root.path().join(".unblock");
+        std::fs::create_dir(&unblock_dir).expect("mkdir .unblock");
+        std::fs::write(unblock_dir.join("unblock.db"), bytes).expect("write unblock.db");
+        let saved = tree(root.path());
+
+        let message = refusal_message(&init_dir(elsewhere.path(), root.path(), &[]));
+        assert_eq!(message, already_initialized(&unblock_dir));
+        assert_eq!(tree(root.path()), saved, "nothing is written");
+    }
+}
+
+/// `--prefix` over an existing `config.toml` asks for a scaffold, so it is refused, lost database
+/// or not.
+#[test]
+fn init_prefix_over_existing_config_refuses_already_initialized() {
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    for zero_byte in [false, true] {
+        let ws = lost_workspace(zero_byte);
+        let saved = tree(ws.root());
+        let message = refusal_message(&init_dir(elsewhere.path(), ws.root(), &["--prefix", "x"]));
+        assert_eq!(message, already_initialized(&ws.unblock_dir()));
+        assert_eq!(
+            tree(ws.root()),
+            saved,
+            "zero_byte {zero_byte}: nothing is written"
+        );
+    }
+}
+
+/// Plain `init` over a non-empty configured database is refused, naming the target.
+#[test]
+fn init_over_non_empty_database_refuses_already_initialized() {
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let ws = Workspace::init();
+    let saved = tree(ws.root());
+    let message = refusal_message(&init_dir(elsewhere.path(), ws.root(), &[]));
+    assert_eq!(message, already_initialized(&ws.unblock_dir()));
+    assert_eq!(tree(ws.root()), saved, "nothing is written");
+}
+
+/// `init --force` over a lost custom database keeps its v1 behaviour: it rewrites `config.toml`
+/// with only `id_prefix` and creates `unblock.db` under the default name, over the marker too.
+#[test]
+fn init_force_rewrites_config_and_creates_default_db() {
+    let root = configured_root(CUSTOM_CONFIG, true);
+    let unblock_dir = root.path().join(".unblock");
+
+    let report = scaffold_report(&init_in(root.path(), &["--force", "--output", "json"]));
+    assert_eq!(common::detail(&report, "mode"), Some("scaffold"));
+    assert_eq!(common::detail(&report, "id_prefix"), Some("ub"));
+    let config = std::fs::read_to_string(unblock_dir.join("config.toml")).expect("read config");
+    assert!(
+        config.contains("id_prefix = \"ub\"") && !config.contains("db_filename"),
+        "config.toml is rewritten with only id_prefix: {config}"
+    );
+    assert!(
+        std::fs::metadata(unblock_dir.join("unblock.db"))
+            .expect("stat unblock.db")
+            .len()
+            > 0,
+        "the default database is created"
+    );
+    assert!(
+        !unblock_dir.join("tracker.db").exists(),
+        "the custom database is not created"
+    );
+}
+
+/// With `config.toml` and the marker present and the database absent, and again 0 bytes,
+/// `migrate` refuses with `DATABASE_NOT_FOUND` and creates nothing.
+#[test]
+fn lost_database_migrate_exits_2_database_not_found_creating_nothing() {
+    for zero_byte in [false, true] {
+        let ws = lost_workspace(zero_byte);
+        let saved = tree(ws.root());
+        json_error(&run_json(ws.root(), &["migrate"]), 2, "DATABASE_NOT_FOUND");
+        assert_eq!(
+            tree(ws.root()),
+            saved,
+            "zero_byte {zero_byte}: nothing is created"
+        );
+    }
+}
+
+/// `unblock mcp` over a lost database refuses before its run loop: exit 2, the structured
+/// `DATABASE_NOT_FOUND` on stderr, no byte on stdout, nothing created (D48).
+#[test]
+fn lost_database_mcp_exits_2_on_stderr_with_empty_stdout() {
+    for zero_byte in [false, true] {
+        let ws = lost_workspace(zero_byte);
+        let saved = tree(ws.root());
+        let out = output_locked(ws.cmd().arg("mcp"), "run unblock mcp");
+        assert_exit(&out, 2);
+        assert!(
+            out.stdout.is_empty(),
+            "zero_byte {zero_byte}: stdout carries no byte: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let payload = common::structured_error_on_stderr(&stderr)
+            .unwrap_or_else(|| panic!("the structured error lands on stderr: {stderr}"));
+        assert_eq!(payload["code"], "DATABASE_NOT_FOUND", "{payload}");
+        assert_eq!(
+            tree(ws.root()),
+            saved,
+            "zero_byte {zero_byte}: nothing is created"
+        );
+    }
+}
+
+/// A `db_filename` changed to a new name beside the marker reads as lost: `migrate` refuses with
+/// `DATABASE_NOT_FOUND` until plain `init` creates the renamed database.
+#[test]
+fn db_filename_changed_beside_marker_refuses_until_init_creates_it() {
+    let ws = Workspace::init();
+    let config = std::fs::read_to_string(ws.config_path()).expect("read config.toml");
+    let renamed = format!("{config}db_filename = \"renamed.db\"\n");
+    std::fs::write(ws.config_path(), &renamed).expect("rename the database in config.toml");
+    let renamed_db = ws.unblock_dir().join("renamed.db");
+
+    json_error(&run_json(ws.root(), &["migrate"]), 2, "DATABASE_NOT_FOUND");
+    assert!(!renamed_db.exists(), "the refused open creates nothing");
+
+    let report = scaffold_report(&init_in(ws.root(), &["--output", "json"]));
+    assert_eq!(common::detail(&report, "mode"), Some("database_only"));
+    assert!(renamed_db.is_file(), "init creates the renamed database");
+    assert_eq!(
+        std::fs::read_to_string(ws.config_path()).expect("re-read config.toml"),
+        renamed,
+        "config.toml stays byte-identical"
+    );
+    assert_migrate_succeeds(ws.root());
+}
+
+/// A malformed `config.toml` over a lost database fails with exit 7 before the lost-database
+/// refusal, for `migrate` and for plain `init`, and nothing is written.
+#[test]
+fn malformed_config_with_lost_database_exits_7() {
+    for zero_byte in [false, true] {
+        let ws = lost_workspace(zero_byte);
+        std::fs::write(ws.config_path(), MALFORMED_CONFIG).expect("break config.toml");
+        let saved = tree(ws.root());
+        for args in [&["migrate"][..], &["init"][..]] {
+            json_error(&run_json(ws.root(), args), 7, "CONFIG_PARSE_ERROR");
+            assert_eq!(
+                tree(ws.root()),
+                saved,
+                "zero_byte {zero_byte}, {args:?}: nothing is written"
+            );
+        }
+    }
 }

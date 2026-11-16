@@ -378,6 +378,7 @@ Q224@crates/unblock-storage/tests/exclusive_window.rs@fn f1_second_process_reade
 Q225@crates/unblock-storage/tests/exclusive_window.rs@fn f5_control_begin_exclusive_without_locking_mode_misses_a_wal_reader\(@fn f5_control_begin_exclusive_without_locking_mode_misses_a_wal_reader\(@criterion (f5): the control cell proving BEGIN EXCLUSIVE alone misses a WAL reader
 Q226@crates/unblock-storage/tests/exclusive_window.rs@fn f4_same_process_store_refuses_process_holds_connection_and_creates_no_raw\(@fn f4_same_process_store_refuses_process_holds_connection_and_creates_no_raw\(@criteria (f4)/(n): a same-process connection refuses before any raw copy
 Q227@crates/unblock-cli/tests/migrate_doctor.rs@fn repair_lone_shm_quarantined_final_healthy\(@fn repair_lone_shm_quarantined_final_healthy\(@criterion (g): a lone -shm is quarantined and the final level is Healthy
+Q228@crates/unblock-cli/tests/init_agents.rs@fn init_database_only_recreates_only_the_database_under_a_custom_db_filename\(@fn init_database_only_recreates_only_the_database_under_a_custom_db_filename\(@criterion (h): init's database-only mode under a custom db_filename
 Q229@crates/unblock-cli/tests/migrate_doctor.rs@fn doctor_lost_database_reports_unsafe_exit_2_opens_nothing_names_recovery_path\(@fn doctor_lost_database_reports_unsafe_exit_2_opens_nothing_names_recovery_path\(@criterion (h): the lost database is Unsafe, opens nothing and names the recovery path
 Q230@crates/unblock-engine/tests/health.rs@fn recover_creates_exactly_one_run_dir_with_manifest_hashes_and_a_passing_snapshot\(@fn recover_creates_exactly_one_run_dir_with_manifest_hashes_and_a_passing_snapshot\(@criterion (i): one run directory per phase, hashed manifest, a snapshot that passes integrity_check
 Q231@crates/unblock-cli/tests/migrate_doctor.rs@fn plain_doctor_creates_no_recovery_entry_and_leaves_db_and_write_lock_untouched\(@fn plain_doctor_creates_no_recovery_entry_and_leaves_db_and_write_lock_untouched\(@criterion (i): plain doctor is a dry run that writes nothing
@@ -511,7 +512,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 4 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 276 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 277 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."

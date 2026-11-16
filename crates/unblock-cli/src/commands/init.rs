@@ -13,11 +13,23 @@
 //! is the other of `.unblock` and `_unblock` in the same parent. The binds-first check refuses the
 //! target with `CliError::SiblingBindsFirst` when the pair's `.unblock` is a directory holding no
 //! scaffold and its `_unblock` is the target or holds a scaffold, because discovery at their root
-//! binds that `.unblock/` first. The clobber guard then refuses a target that holds `config.toml`
-//! or `unblock.db` through the CLI-local `CliError::AlreadyInitialized`, unless `--force` is set.
-//! The sibling guard last refuses a target whose sibling holds a scaffold, naming the sibling. The
+//! binds that `.unblock/` first. The clobber guard then picks the mode. A target holding neither
+//! `config.toml` nor `unblock.db`, or any target under `--force`, is scaffolded. A target holding
+//! `unblock.db` without `config.toml`, or `config.toml` under `--prefix`, is refused through the
+//! CLI-local `CliError::AlreadyInitialized`. Any other target is a database-only candidate. The
+//! sibling guard last refuses a target whose sibling holds a scaffold, naming the sibling. The
 //! binds-first check and the sibling guard refuse with or without `--force`, and neither fires when
 //! the sibling resolves to the target itself.
+//!
+//! The DATABASE-ONLY mode (PRD §4 D58 clause (7)) recreates the database under an existing
+//! `config.toml`. It resolves that config without opening the database, so a malformed one exits 7
+//! with nothing written, and reads the configured database path, which honours `db_filename`. A
+//! non-empty database there is refused through `AlreadyInitialized`. A `-wal`, `-shm` or `-journal`
+//! beside the absent or 0-byte database is refused through `CliError::OrphanSidecars` (exit 2),
+//! because opening a database beside it lets `SQLite` delete or replay it. Otherwise the open creates
+//! and migrates only the database and writes `.write.lock`; `config.toml` stays byte-identical.
+//! Every `init` open sets `CliOverrides::create_db`, so a lost database is created instead of
+//! refused.
 //!
 //! The open forwards the global flags with the target as its `--dir`, so `-o` and `--actor` reach
 //! config (the spine §5b forwarder rule). An actor that fails validation fails that open (exit 7)
@@ -38,21 +50,23 @@
 //! single-quoted for the host's target shells.
 
 use std::ffi::OsStr;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use snafu::ResultExt;
 use unblock_config::{
     CliOverrides, ProcessEnv, UNBLOCK_DIR_NAMES, has_unblock_dir_name, load_user_config,
-    open_with_storage_with_cli, probe_workspace_root,
+    open_with_storage_with_cli, open_workspace_with_cli, probe_workspace_root,
 };
 use unblock_model::normalize_prefix;
 
 use crate::cli::{GlobalArgs, InitArgs};
 use crate::commands::agents;
 use crate::exit::{
-    AlreadyInitializedSnafu, CliError, InitAgentsWriteSnafu, IoSnafu, SiblingBindsFirstSnafu,
+    AlreadyInitializedSnafu, CliError, InitAgentsWriteSnafu, IoSnafu, OrphanSidecarsSnafu,
+    SiblingBindsFirstSnafu,
 };
-use crate::output::{self, InitReport, ToDiagnosticReport};
+use crate::output::{self, InitMode, InitReport, ToDiagnosticReport};
 
 /// The scaffolded config filename.
 const CONFIG_FILENAME: &str = "config.toml";
@@ -62,6 +76,8 @@ const DB_FILENAME: &str = "unblock.db";
 const DEFAULT_PREFIX: &str = "ub";
 /// `init` names a new workspace dir with the name discovery probes first.
 const NEW_UNBLOCK_DIR: &str = UNBLOCK_DIR_NAMES[0];
+/// The `SQLite` sidecar suffixes the database-only mode refuses to open beside, in report order.
+const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Run `unblock init`.
 ///
@@ -69,60 +85,61 @@ const NEW_UNBLOCK_DIR: &str = UNBLOCK_DIR_NAMES[0];
 /// - [`CliError::SiblingBindsFirst`] if discovery at the target's root binds a `.unblock` directory
 ///   holding no scaffold before an `_unblock` that is the target or holds a scaffold, with or
 ///   without `--force`;
-/// - [`CliError::AlreadyInitialized`] if the target already holds a scaffold (no `--force`), or if
-///   a distinct sibling of the target holds one, with or without `--force`;
-/// - [`CliError::Io`] if reading the cwd, creating the directory or writing `config.toml` fails;
-/// - [`CliError::Config`] if the user file is refused (before anything is written), if
-///   opening/migrating the database fails, or if its `config` table holds a blocking fault
-///   (`FaultyDbConfig`, after `config.toml` is written and before any `--agents` write);
-/// - [`CliError::InitAgentsWrite`] if `--agents` cannot write `AGENTS.md` after the scaffold;
+/// - [`CliError::AlreadyInitialized`] (no `--force`) if the target holds `unblock.db` without
+///   `config.toml`, holds `config.toml` under `--prefix`, or holds a non-empty configured database;
+///   with or without `--force`, if a distinct sibling of the target holds a scaffold;
+/// - [`CliError::OrphanSidecars`] if the database-only mode finds a `-wal`, `-shm` or `-journal`
+///   beside the absent or 0-byte database;
+/// - [`CliError::Io`] if reading the cwd, creating the directory, writing `config.toml` or reading
+///   the database's file state fails;
+/// - [`CliError::Config`] if the user file is refused or the existing `config.toml` is malformed
+///   (both before anything is written), if opening/migrating the database fails, or if its
+///   `config` table holds a blocking fault (`FaultyDbConfig`, before any `--agents` write);
+/// - [`CliError::InitAgentsWrite`] if `--agents` cannot write `AGENTS.md` after the open;
 /// - [`CliError::Render`]/[`CliError::Io`] if rendering / writing the report fails.
 pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, CliError> {
-    // 1. Resolve the target, probing a project root the way discovery does.
+    // (1) Resolve the target, probing a project root the way discovery does. The binds-first
+    //     check refuses it when discovery at its root binds a `.unblock` holding no scaffold
+    //     before an `_unblock` that is the target or holds one.
     let unblock_dir = target_unblock_dir(global)?;
-
-    // 2. The binds-first check refuses the target when discovery at its root binds a `.unblock`
-    //    holding no scaffold before an `_unblock` that is the target or holds one.
     check_binds_first(&unblock_dir)?;
 
-    // 3. The clobber guard (AF-3) refuses a target that already holds a scaffold, unless `--force`.
-    if !args.force && is_scaffolded(&unblock_dir) {
-        return Err(already_initialized(unblock_dir, args.agents));
-    }
+    // (2) The clobber guard (AF-3, D58) refuses or picks the mode.
+    let mode = clobber_guard(&unblock_dir, args)?;
 
-    // 4. The sibling guard refuses a target beside a distinct sibling that holds a scaffold.
+    // (3) The sibling guard refuses a target beside a distinct sibling that holds a scaffold.
     check_sibling(&unblock_dir, args.agents)?;
 
-    // 5. Load the user file BEFORE any write (PRD §4 D57 clause (6)): `load_user_config` is the
-    //    single home of every user-file refusal, the same function the open below runs, so a user
-    //    file the open would refuse fails `init` with exit 7 and NOTHING written.
+    // (3b) Load the user file BEFORE any write (PRD §4 D57 clause (6)): `load_user_config` is the
+    //      single home of every user-file refusal, the same function the open below runs, so a
+    //      user file the open would refuse fails `init` with exit 7 and NOTHING written.
     load_user_config(&ProcessEnv)?;
 
-    // 6. Create the target (mkdir -p).
-    std::fs::create_dir_all(&unblock_dir).context(IoSnafu)?;
-
-    // 7. Hand-write config.toml (`ProjectConfig` is Deserialize-only — DR-8). Seed the NORMALIZED prefix.
-    let prefix = args
-        .prefix
-        .as_deref()
-        .map_or_else(|| DEFAULT_PREFIX.to_string(), normalize_prefix);
-    let config_path = unblock_dir.join(CONFIG_FILENAME);
-    std::fs::write(&config_path, render_config_toml(&prefix)).context(IoSnafu)?;
-
-    // 8. Open+migrate via the facade to create the migrated empty unblock.db (FR-9 no-drift). The
-    //    open forwards the global flags, and the target replaces any raw `--dir`.
+    // The open forwards the global flags, and the target replaces any raw `--dir`.
     let overrides = global.to_overrides().with_dir(&unblock_dir);
-    let ctx = open_with_storage_with_cli(&overrides).await?;
+    let config_path = unblock_dir.join(CONFIG_FILENAME);
+    let seeded_prefix = match mode {
+        InitMode::Scaffold => Some(write_scaffold(&unblock_dir, &config_path, args)?),
+        InitMode::DatabaseOnly => {
+            // (4)-(6) Resolve the existing config and check the configured database.
+            check_database_only(&unblock_dir, &overrides, args.agents).await?;
+            None
+        }
+    };
 
-    // 9. A blocking database config fault fails `init` with the `issue config unset` hint BEFORE any
-    //    `--agents` write (PRD §4 D57 clause (6)). A fresh database has no rows and passes; an
-    //    `init --force` over a faulty table has already rewritten `config.toml`.
+    // (7) Open+migrate via the facade to create the migrated empty database (FR-9 no-drift).
+    //     `create_db` lets the open create a database the `.write.lock` marker calls lost.
+    let ctx = open_with_storage_with_cli(&overrides.with_create_db(true)).await?;
+
+    // (8) A blocking database config fault fails `init` with the `issue config unset` hint BEFORE
+    //     any `--agents` write (PRD §4 D57 clause (6)). A fresh database has no rows and passes; an
+    //     `init --force` over a faulty table has already rewritten `config.toml`.
     if let Some(err) = ctx.config.runtime.blocking_fault_error() {
         return Err(err.into());
     }
 
-    // 10. Under `--agents`, write the managed block at the root this open bound, before the report
-    //     renders, so stdout never carries a second document.
+    // (9) Under `--agents`, write the managed block at the root this open bound, before the
+    //     report renders, so stdout never carries a second document.
     let agents_path = if args.agents {
         let path = agents::agents_path(&ctx.workspace_dir);
         agents::write_managed_block(&path)
@@ -136,23 +153,107 @@ pub async fn run(args: &InitArgs, global: &GlobalArgs) -> Result<Option<u8>, Cli
         None
     };
 
-    // 11. Report exactly what was scaffolded.
+    // (10) Report what this run created. The database-only mode names the resolved prefix.
     let fmt = ctx.config.runtime.output_format;
     let report = InitReport {
         workspace_dir: ctx.workspace_dir,
         unblock_dir: ctx.paths.unblock_dir,
         db_path: ctx.paths.db_path,
-        id_prefix: prefix,
+        id_prefix: seeded_prefix.unwrap_or(ctx.config.startup.id_prefix),
         config_path,
+        mode,
         agents_path,
     };
     output::emit_report(&report.to_report(), fmt)?;
 
-    // 12. A bare `init` names the next step on stderr, only after the report is out.
+    // A bare `init` names the next step on stderr, only after the report is out.
     if !args.agents && !global.quiet {
         output::diag(&agents_hint(&report.unblock_dir));
     }
     Ok(None)
+}
+
+/// The clobber guard (AF-3 as amended by PRD §4 D58 clause (7)) picks the mode for `target`.
+///
+/// `--force` scaffolds. Without it, a target holding neither `config.toml` nor `unblock.db` is
+/// scaffolded, `unblock.db` without `config.toml` and `config.toml` under `--prefix` are refused,
+/// and any other target is a database-only candidate.
+fn clobber_guard(target: &Path, args: &InitArgs) -> Result<InitMode, CliError> {
+    if args.force {
+        return Ok(InitMode::Scaffold);
+    }
+    let has_config = target.join(CONFIG_FILENAME).exists();
+    if !has_config && !target.join(DB_FILENAME).exists() {
+        return Ok(InitMode::Scaffold);
+    }
+    if !has_config || args.prefix.is_some() {
+        return Err(already_initialized(target.to_path_buf(), args.agents));
+    }
+    Ok(InitMode::DatabaseOnly)
+}
+
+/// Creates `unblock_dir` and hand-writes `config_path` with the normalized prefix, which it returns.
+fn write_scaffold(
+    unblock_dir: &Path,
+    config_path: &Path,
+    args: &InitArgs,
+) -> Result<String, CliError> {
+    std::fs::create_dir_all(unblock_dir).context(IoSnafu)?;
+    // `ProjectConfig` is Deserialize-only (DR-8), so the TOML text is written here.
+    let prefix = args
+        .prefix
+        .as_deref()
+        .map_or_else(|| DEFAULT_PREFIX.to_string(), normalize_prefix);
+    std::fs::write(config_path, render_config_toml(&prefix)).context(IoSnafu)?;
+    Ok(prefix)
+}
+
+/// Steps (4)-(6) of the database-only mode, which write nothing.
+///
+/// (4) resolves the existing config without opening the database, which validates it and yields
+/// the configured database path; (5) refuses a non-empty database there; (6) refuses an orphan
+/// sidecar beside the absent or 0-byte database.
+async fn check_database_only(
+    target: &Path,
+    overrides: &CliOverrides,
+    agents: bool,
+) -> Result<(), CliError> {
+    let resolved = open_workspace_with_cli(overrides).await?;
+    let db_path = resolved.paths.db_path;
+    if !database_is_missing(&db_path)? {
+        return Err(already_initialized(target.to_path_buf(), agents));
+    }
+    let files = orphan_sidecars(&db_path)?;
+    if !files.is_empty() {
+        return OrphanSidecarsSnafu { files }.fail();
+    }
+    Ok(())
+}
+
+/// Reports whether the database at `db_path` is absent or a 0-byte regular file.
+fn database_is_missing(db_path: &Path) -> Result<bool, CliError> {
+    match std::fs::metadata(db_path) {
+        Ok(meta) => Ok(meta.is_file() && meta.len() == 0),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(true),
+        Err(source) => Err(CliError::Io { source }),
+    }
+}
+
+/// Lists the `-wal`, `-shm` and `-journal` entries present beside `db_path`, in that order. Any
+/// directory entry counts, a dangling symlink included.
+fn orphan_sidecars(db_path: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let mut files = Vec::new();
+    for suffix in SIDECAR_SUFFIXES {
+        let mut name = db_path.as_os_str().to_owned();
+        name.push(suffix);
+        let path = PathBuf::from(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => files.push(path),
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(source) => return Err(CliError::Io { source }),
+        }
+    }
+    Ok(files)
 }
 
 /// Resolves the directory `init` scaffolds.
@@ -329,9 +430,12 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        DEFAULT_PREFIX, TargetShells, agents_hint, is_scaffolded, render_config_toml, retry_for,
-        sibling_unblock_dir,
+        DEFAULT_PREFIX, TargetShells, agents_hint, clobber_guard, database_is_missing,
+        is_scaffolded, orphan_sidecars, render_config_toml, retry_for, sibling_unblock_dir,
     };
+    use crate::cli::InitArgs;
+    use crate::exit::CliError;
+    use crate::output::InitMode;
     use unblock_config::ProjectConfig;
     use unblock_model::normalize_prefix;
 
@@ -368,6 +472,84 @@ mod tests {
         assert!(
             is_scaffolded(db_only.path()),
             "a directory holding only unblock.db holds a scaffold"
+        );
+    }
+
+    /// The `InitArgs` for `--prefix` and `--force` as given, without `--agents`.
+    fn init_args(prefix: Option<&str>, force: bool) -> InitArgs {
+        InitArgs {
+            prefix: prefix.map(str::to_string),
+            force,
+            agents: false,
+        }
+    }
+
+    /// The clobber guard picks the mode or refuses, per PRD §4 D58 clause (7) step (2).
+    #[test]
+    fn clobber_guard_picks_the_mode_or_refuses() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let config_only = tempfile::tempdir().expect("tempdir");
+        std::fs::write(config_only.path().join("config.toml"), "").expect("write config.toml");
+        let db_only = tempfile::tempdir().expect("tempdir");
+        std::fs::write(db_only.path().join("unblock.db"), b"").expect("write unblock.db");
+
+        let mode = |dir: &Path, args: &InitArgs| clobber_guard(dir, args).ok();
+        let bare = init_args(None, false);
+        let prefixed = init_args(Some("x"), false);
+        let forced = init_args(None, true);
+        assert_eq!(mode(empty.path(), &bare), Some(InitMode::Scaffold));
+        assert_eq!(mode(empty.path(), &prefixed), Some(InitMode::Scaffold));
+        assert_eq!(
+            mode(config_only.path(), &bare),
+            Some(InitMode::DatabaseOnly)
+        );
+        for dir in [config_only.path(), db_only.path()] {
+            assert_eq!(mode(dir, &forced), Some(InitMode::Scaffold));
+        }
+        for (dir, args) in [(config_only.path(), &prefixed), (db_only.path(), &bare)] {
+            assert!(
+                matches!(
+                    clobber_guard(dir, args),
+                    Err(CliError::AlreadyInitialized { .. })
+                ),
+                "{} under {args:?} is refused",
+                dir.display()
+            );
+        }
+    }
+
+    #[test]
+    fn database_is_missing_for_an_absent_or_zero_byte_file_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("unblock.db");
+        assert!(database_is_missing(&db).expect("stat"), "absent");
+        std::fs::write(&db, b"").expect("write unblock.db");
+        assert!(database_is_missing(&db).expect("stat"), "0 bytes");
+        std::fs::write(&db, b"x").expect("write unblock.db");
+        assert!(!database_is_missing(&db).expect("stat"), "non-empty");
+        let dir = tmp.path().join("dir.db");
+        std::fs::create_dir(&dir).expect("mkdir dir.db");
+        assert!(!database_is_missing(&dir).expect("stat"), "a directory");
+    }
+
+    #[test]
+    fn orphan_sidecars_lists_present_sidecars_in_wal_shm_journal_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("tracker.db");
+        assert!(orphan_sidecars(&db).expect("stat").is_empty());
+        for suffix in ["-journal", "-wal", "-shm"] {
+            std::fs::write(tmp.path().join(format!("tracker.db{suffix}")), b"")
+                .expect("write a sidecar");
+        }
+        std::fs::write(tmp.path().join("unblock.db-wal"), b"").expect("another db's sidecar");
+        let names: Vec<String> = orphan_sidecars(&db)
+            .expect("stat")
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["tracker.db-wal", "tracker.db-shm", "tracker.db-journal"]
         );
     }
 

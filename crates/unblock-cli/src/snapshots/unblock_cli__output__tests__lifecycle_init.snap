@@ -3,9 +3,9 @@ source: crates/unblock-cli/src/output.rs
 expression: render_in_every_format(&report)
 ---
 --- json
-{"kind":"info","findings":[{"label":"workspace_dir","detail":"/ws"},{"label":"unblock_dir","detail":"/ws/.unblock"},{"label":"db_path","detail":"/ws/.unblock/unblock.db"},{"label":"config_path","detail":"/ws/.unblock/config.toml"},{"label":"id_prefix","detail":"ub"}]}
+{"kind":"info","findings":[{"label":"workspace_dir","detail":"/ws"},{"label":"unblock_dir","detail":"/ws/.unblock"},{"label":"db_path","detail":"/ws/.unblock/unblock.db"},{"label":"config_path","detail":"/ws/.unblock/config.toml"},{"label":"id_prefix","detail":"ub"},{"label":"mode","detail":"scaffold"}]}
 --- robot
-{"kind":"info","findings":[{"label":"workspace_dir","detail":"/ws"},{"label":"unblock_dir","detail":"/ws/.unblock"},{"label":"db_path","detail":"/ws/.unblock/unblock.db"},{"label":"config_path","detail":"/ws/.unblock/config.toml"},{"label":"id_prefix","detail":"ub"}]}
+{"kind":"info","findings":[{"label":"workspace_dir","detail":"/ws"},{"label":"unblock_dir","detail":"/ws/.unblock"},{"label":"db_path","detail":"/ws/.unblock/unblock.db"},{"label":"config_path","detail":"/ws/.unblock/config.toml"},{"label":"id_prefix","detail":"ub"},{"label":"mode","detail":"scaffold"}]}
 --- plain
 Diagnostics: Info
   workspace_dir: /ws
@@ -13,6 +13,7 @@ Diagnostics: Info
   db_path: /ws/.unblock/unblock.db
   config_path: /ws/.unblock/config.toml
   id_prefix: ub
+  mode: scaffold
 --- csv
 label,detail
 workspace_dir,/ws
@@ -20,6 +21,7 @@ unblock_dir,/ws/.unblock
 db_path,/ws/.unblock/unblock.db
 config_path,/ws/.unblock/config.toml
 id_prefix,ub
+mode,scaffold
 --- markdown
 ## Diagnostics: Info
 
@@ -30,4 +32,5 @@ id_prefix,ub
 | db\_path | /ws/\.unblock/unblock\.db |
 | config\_path | /ws/\.unblock/config\.toml |
 | id\_prefix | ub |
+| mode | scaffold |
 --- end

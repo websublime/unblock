@@ -2,7 +2,7 @@
 source: crates/unblock-cli/tests/help_snapshots.rs
 expression: "help(&[\"init\", \"--help\"])"
 ---
-Scaffold a new `.unblock/` workspace (config + migrated empty database, FR-14)
+Scaffold a new `.unblock/` workspace (config + migrated empty database, FR-14), or create only the database under an existing `config.toml` whose database is absent or empty (D58)
 
 Usage: unblock init [OPTIONS]
 
