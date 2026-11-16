@@ -1,0 +1,125 @@
+---
+source: crates/unblock-health/tests/classify_props.rs
+expression: "json!({ \"anomalies\": classes, \"advisories\": advisories })"
+---
+{
+  "advisories": [
+    "database_not_created",
+    "stale_recovery_artifacts",
+    "write_lock_held"
+  ],
+  "anomalies": [
+    {
+      "action": "manual",
+      "code": "database_lost",
+      "manual_text": "Stop every unblock process. Restore the database file from a backup or from the newest .unblock/.recovery/<run>/snapshot.db by copying it to the configured database path; the snapshot is a complete VACUUM INTO copy carrying its schema stamp. Before restoring, with every unblock process stopped, move any -wal, -shm or -journal file left beside the database path into a new directory under .unblock/.recovery/, because a stale -wal is replayed into a restored file on its first open. Otherwise, after moving those files aside the same way, run `unblock init`, whose database-only mode creates an empty database under the configured db_filename, keeps config.toml and refuses while any such file remains, then import the last export through an MCP client's `sync` tool `import` action; the CLI has no import command.",
+      "path": "manual",
+      "severity": "unsafe",
+      "target": null
+    },
+    {
+      "action": "manual",
+      "code": "database_unreadable",
+      "manual_text": "Fix the database file's permissions or ownership so unblock can read it, then run `unblock doctor` again. unblock never moves an unreadable database file.",
+      "path": "manual",
+      "severity": "unsafe",
+      "target": null
+    },
+    {
+      "action": "manual",
+      "code": "database_not_sqlite",
+      "manual_text": "No in-product repair exists, and `unblock doctor --repair` moves nothing. Stop every unblock process, every `unblock mcp` server and every CLI command. Move the invalid database file and any -wal, -shm or -journal file beside it by hand into a new directory under .unblock/.recovery/. Then run `unblock init`, whose database-only mode creates an empty database under the configured db_filename and keeps config.toml, and import the last export through an MCP client's `sync` tool `import` action; the CLI has no import command.",
+      "path": "manual",
+      "severity": "unsafe",
+      "target": null
+    },
+    {
+      "action": "quarantine_sidecar",
+      "code": "sidecar_mismatch",
+      "manual_text": null,
+      "path": "preopen-exclusive",
+      "severity": "recoverable",
+      "target": null
+    },
+    {
+      "action": "checkpoint_truncate",
+      "code": "truncated_wal",
+      "manual_text": null,
+      "path": "preopen-exclusive",
+      "severity": "recoverable",
+      "target": null
+    },
+    {
+      "action": "quarantine_journal",
+      "code": "journal_sidecar_present",
+      "manual_text": null,
+      "path": "preopen-exclusive",
+      "severity": "recoverable",
+      "target": null
+    },
+    {
+      "action": "regenerate_export",
+      "code": "jsonl_conflict_markers",
+      "manual_text": null,
+      "path": "online",
+      "severity": "recoverable",
+      "target": null
+    },
+    {
+      "action": "regenerate_export",
+      "code": "jsonl_unscannable",
+      "manual_text": null,
+      "path": "online",
+      "severity": "recoverable",
+      "target": null
+    },
+    {
+      "action": "reindex",
+      "code": "index_corruption",
+      "manual_text": null,
+      "path": "online",
+      "severity": "recoverable",
+      "target": "idx_issues_status"
+    },
+    {
+      "action": "manual",
+      "code": "page_corruption",
+      "manual_text": "No in-product repair exists. Stop every unblock process and copy the database file aside. Salvage it outside unblock with the sqlite3 shell's `.recover` command, or restore it from a backup. Otherwise move the database file and any -wal, -shm or -journal file beside it into a new directory under .unblock/.recovery/, run `unblock init` to create an empty database, and import the last export through an MCP client's `sync` tool `import` action.",
+      "path": "manual",
+      "severity": "unsafe",
+      "target": null
+    },
+    {
+      "action": "raise_child_counter",
+      "code": "child_counter_drift",
+      "manual_text": null,
+      "path": "online",
+      "severity": "drifted",
+      "target": "ub-1"
+    },
+    {
+      "action": "dedupe_metadata_key",
+      "code": "duplicate_metadata_key",
+      "manual_text": null,
+      "path": "online",
+      "severity": "drifted",
+      "target": "k"
+    },
+    {
+      "action": "migrate",
+      "code": "schema_stamp_behind",
+      "manual_text": null,
+      "path": "online",
+      "severity": "drifted",
+      "target": null
+    },
+    {
+      "action": "manual",
+      "code": "schema_stamp_ahead",
+      "manual_text": "A newer unblock binary migrated this database. Run `unblock update` to install a binary that reads this schema.",
+      "path": "manual",
+      "severity": "unsafe",
+      "target": null
+    }
+  ]
+}

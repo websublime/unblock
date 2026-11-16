@@ -23,8 +23,9 @@ pub struct WorkspacePaths {
     pub db: PathBuf,
     /// The JSONL export file, or `None` when export is not configured.
     pub jsonl: Option<PathBuf>,
-    /// The recovery-evidence directory (`.unblock/.recovery/`). Reserved for the v1.1 evidence
-    /// writer; unused by v1-lite, but carried so the v1.1 layout needs no signature change.
+    /// The recovery-evidence root (`.unblock/.recovery/`), the root
+    /// [`RunDir::create`](crate::recovery::RunDir::create) and
+    /// [`scan_recovery_root`](crate::recovery::scan_recovery_root) take.
     pub recovery_dir: PathBuf,
 }
 

@@ -1,42 +1,48 @@
-//! `unblock-health` (L3) — workspace health/integrity diagnostics.
+//! `unblock-health` (L3) — workspace health classification and the recovery evidence layout.
 //!
-//! # Scope: v1-lite (T3.3 / D29) vs v1.1-full
+//! The four [`HealthLevel`]s are defined by repair path (PRD §4 D58). `Drifted` means derived state
+//! inside the database disagrees with its base rows and an online recompute fixes it. `Recoverable`
+//! means an in-product repair exists. `Unsafe` means none does, and the report names the manual
+//! path.
 //!
-//! **v1-lite (this build)** ships the storage-free doctor: an [`integrity_check`] passthrough (the
-//! engine runs the PRAGMA and passes the `Vec<String>` rows in), pure [`classify_file_state`]
-//! file-state diagnostics, and the [`run_doctor`] aggregation into a [`DoctorReport`]. It holds NO
-//! `Storage` handle and never names a libsql type (F3/D29, NFR-15); no git (NFR-6), no network.
-//!
-//! **v1.1-full** adds the active four-state taxonomy (`AnomalyClass`), the composite
-//! `classify_workspace` pipeline (db-state probes via the reserved CF-E `Storage::diagnostic_probe(s)`
-//! seams + optional JSONL drift via `unblock-sync`), the `unblock.reliability` audit record, and the
-//! `.unblock/.recovery/` evidence writer. Those module seams are **reserved but not built** here (the
-//! commented `mod` lines below) so the v1.1 layout needs no structural rewrite.
-//!
-//! The full four-variant [`HealthLevel`] ladder ships now (a stable contract from day one); v1-lite
-//! only ever *produces* `Healthy`/`Recoverable`/`Unsafe`, with `Drifted` reachable in v1.1.
+//! The crate is pure, non-async and storage-free (D29 clause F3, kept by D58 clause (4)). The engine
+//! gathers every fact and passes it in as data: [`PreOpenFacts`] from `std::fs` reads made before
+//! any libsql connection exists, [`DbFacts`] mapped from `Storage::health_facts()`, [`ExportFacts`]
+//! from [`scan_export`] and the clock in [`AdvisoryFacts`]. [`classify`] returns a
+//! [`WorkspaceClassification`] with the anomalies, the advisories, one [`PlannedRepair`] per
+//! anomaly and the composite level. The [`recovery`] module names, creates and fills the
+//! `.unblock/.recovery/` run directories; it never opens the database. Health holds no `Storage`
+//! handle, never names a libsql type (NFR-15) and uses no git (NFR-6) or network.
 //!
 //! See `docs/plans/crates/unblock-health.md`.
-//!
-//! [`integrity_check`]: run_doctor
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod anomaly;
+mod audit;
+mod classify;
 mod doctor;
 mod error;
+mod export;
+mod facts;
 mod file_state;
+mod integrity;
 mod level;
 mod paths;
+pub mod recovery;
 
-// [v1.1] mod anomaly;   // the active file-state ∪ db-state ∪ drift taxonomy (supersedes FileAnomaly)
-// [v1.1] mod classify;  // classify_workspace: db-state probes (CF-E seams) + optional JSONL drift
-// [v1.1] mod audit;     // ReliabilityAuditRecord + tracing on `unblock.reliability` (NFR-13)
-// [v1.1] mod recovery;  // `.unblock/.recovery/` evidence writer (FR-16 full)
-
+pub use anomaly::{Advisory, AnomalyClass, PlannedAction, PlannedRepair, RepairPath};
+pub use audit::ReliabilityAuditRecord;
+pub use classify::{WorkspaceClassification, classify};
 pub use doctor::{DoctorReport, HealthSummary, run_doctor};
 pub use error::HealthError;
+pub use export::scan_export;
+pub use facts::{
+    AdvisoryFacts, DbFacts, DbFileFact, ExportFacts, ExportScan, PreOpenFacts, RecoveryEntry,
+};
 pub use file_state::{
     FileAnomaly, classify_file_state, is_orphaned_lock_file, jsonl_has_conflict_markers,
 };
+pub use integrity::classify_integrity_row;
 pub use level::HealthLevel;
 pub use paths::{JOURNAL_SUFFIX, SHM_SUFFIX, WAL_SUFFIX, WorkspacePaths, sidecar};

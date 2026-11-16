@@ -1,36 +1,29 @@
-//! The workspace health severity ladder ([`HealthLevel`]).
+//! The workspace health severity ladder ([`HealthLevel`]), defined by repair path (PRD §4 D58).
 //!
-//! The **full four-state enum ships in v1** (a stable contract from day one) even though the v1-lite
-//! checks only ever *produce* `Healthy`/`Recoverable`/`Unsafe`; `Drifted` (the JSONL-export mid-tier,
-//! renamed from the original `Degraded` per PRD §12.4 / D29-F5) becomes reachable in v1.1.
-//!
-//! `Ord` is **severity ordering** (`Healthy < Drifted < Recoverable < Unsafe`), so a composite level
-//! over a set of findings is simply their `max`.
+//! `Ord` is severity order (`Healthy < Drifted < Recoverable < Unsafe`), so the composite level over a
+//! set of anomalies is their `max`.
 
 use std::fmt;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// The four-state workspace health ladder (PRD §7/§12.4; D29-F5).
+/// The four-state workspace health ladder (PRD §7/§12.4; D58 clause (1)).
 ///
-/// Variant order is **severity order** — the derived [`Ord`]/[`PartialOrd`] rank
-/// `Healthy < Drifted < Recoverable < Unsafe`, so `max` yields the worst level in a set. v1-lite
-/// never produces [`Drifted`](Self::Drifted); it is the JSONL-export drift mid-tier reserved for
-/// v1.1.
+/// Variant order is severity order, so `max` yields the worst level in a set.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum HealthLevel {
-    /// No anomalies detected — the workspace is fully healthy.
+    /// No anomaly.
     Healthy,
-    /// JSONL-export drift (only meaningful when export is enabled) — reserved for v1.1; never
-    /// produced by v1-lite.
+    /// Derived state inside the database disagrees with the base rows it derives from; the
+    /// workspace stays operable and an online recompute, dedupe or migrate fixes it.
     Drifted,
-    /// One or more recoverable anomalies (file-state problems a repair can address).
+    /// Damage or an inconsistent on-disk state for which an in-product repair exists.
     Recoverable,
-    /// A fatal anomaly (merge-conflict markers in the JSONL) — not safely recoverable.
+    /// No in-product repair exists; the report names the manual path.
     Unsafe,
 }
 
