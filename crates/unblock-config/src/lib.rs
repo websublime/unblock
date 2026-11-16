@@ -24,6 +24,9 @@
 //! `Arc<dyn Storage>`) — pass `start` as the walk-up start; their additive `_with_cli` overloads —
 //! [`open_workspace_with_cli`] / [`open_with_storage_with_cli`] — thread a full [`CliOverrides`]
 //! (`--dir`/`--db`/`--actor`/`--output-format`) through resolution (FORK-1 OVERLOAD model).
+//! [`open_with_cli`] reads the open-mode knobs (`no_db`, [`StorageOpenMode`]) and returns an
+//! [`OpenedContext`] (PRD §4 D58 clause (8)). Every storage-bearing open refuses a LOST database
+//! with [`ConfigError::DatabaseMissing`] unless `create_db` is set (PRD §4 D58 clause (7)).
 //!
 //! **Config owns workspace-open** (CF-D): it discovers `.unblock/`, resolves paths, opens/migrates
 //! libsql, and constructs the `Arc<dyn Storage>` carried by [`WorkspaceContext`]; the engine
@@ -81,11 +84,12 @@ mod reload;
 mod schema;
 mod user_config;
 
-pub use cli::CliOverrides;
+pub use cli::{CliOverrides, StorageOpenMode};
 pub use config::{ResolvedConfig, RuntimeConfig, RuntimeSources, StartupConfig, WorkspaceConfig};
 pub use context::{
-    ResolvedContext, WorkspaceContext, open_with_storage, open_with_storage_with_cli,
-    open_with_storage_with_env, open_workspace, open_workspace_with_cli, open_workspace_with_env,
+    OpenedContext, ResolvedContext, WorkspaceContext, open_with_cli, open_with_cli_with_env,
+    open_with_storage, open_with_storage_with_cli, open_with_storage_with_env, open_workspace,
+    open_workspace_with_cli, open_workspace_with_env,
 };
 pub use db_layer::decode_db_rows;
 pub use discovery::{

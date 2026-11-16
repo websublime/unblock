@@ -52,5 +52,10 @@ expression: table
     "FaultyDbConfig",
     "CONFIG_ERROR",
     7
+  ],
+  [
+    "DatabaseMissing",
+    "DATABASE_NOT_FOUND",
+    2
   ]
 ]

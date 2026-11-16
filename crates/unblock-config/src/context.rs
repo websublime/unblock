@@ -6,6 +6,8 @@
 //! - [`WorkspaceContext`] — **storage-bearing** (`storage: Arc<dyn Storage>`, NON-OPTIONAL);
 //!   returned by [`open_with_storage`] / [`open_with_storage_with_cli`], consumed by the engine's
 //!   `Session::open`. The runtime keys resolve over all SIX layers.
+//! - [`OpenedContext`] — either of the two, returned by [`open_with_cli`], the one entry that reads
+//!   the open-mode knobs `no_db` and `storage_open` (PRD §4 D58 clause (8)).
 //!
 //! Both bundle `config: ResolvedConfig` (config-owned VALUES, PARTITIONED since D57 into
 //! `startup`/`runtime` — the actor lives in `config.runtime.actor`) + `paths: ConfigPaths`
@@ -20,6 +22,20 @@
 //! keys over all six layers with the clause (2a) faults (a bad row never fails the open); (4) builds
 //! the [`ConfigReloader`] and returns the context.
 //!
+//! **THE LOST-DATABASE REFUSAL (PRD §4 D58 clause (7)).** Between phases (1) and (2) of every
+//! storage-bearing open, a database that [`unblock_storage::lost_database`] reports lost (absent or
+//! 0 bytes beside the `.write.lock` marker) is refused with [`ConfigError::DatabaseMissing`] and
+//! nothing is created, unless [`CliOverrides::create_db`] is set. The runtime keys are validated
+//! first over the empty DB layer a lost database has, so a malformed or invalid config file still
+//! fails exit 7 first.
+//!
+//! **OPEN MODES (PRD §4 D58 clause (8)).** [`StorageOpenMode::Migrate`] is phase (2) as above.
+//! [`StorageOpenMode::ReadOnly`] opens through [`LibsqlStorage::open_local_read_only`] and
+//! [`StorageOpenMode::NoMigrate`] through [`LibsqlStorage::open_local`]; neither migrates, both read
+//! the `config` rows only on a stamp of 3 or more (an older database
+//! has no `config` table, so its DB layer is empty), and both open a stamp above
+//! [`unblock_storage::CURRENT_SCHEMA_VERSION`].
+//!
 //! **Facade model (FORK-1).** The `&Path` facades are PERMANENT; they pass `start` as the WALK-UP
 //! START — NOT as `cli.dir` (MF-2). The shared body takes its [`EnvSource`] as an internal parameter
 //! (the D39 `discover_unblock_dir` precedent); production passes [`ProcessEnv`], and the
@@ -29,13 +45,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use snafu::ResultExt;
-use unblock_storage::{LibsqlStorage, Storage};
+use unblock_storage::{LibsqlStorage, Storage, lost_database};
 
-use crate::cli::CliOverrides;
+use crate::cli::{CliOverrides, StorageOpenMode};
 use crate::config::{ResolvedConfig, WorkspaceConfig, resolve_runtime, resolve_startup};
 use crate::discovery::{WorkspaceSource, discover_workspace};
 use crate::env::{EnvOverrides, EnvSource, ProcessEnv};
-use crate::error::{ConfigError, DbOpenFailedSnafu, MigrationFailedSnafu};
+use crate::error::{ConfigError, DbOpenFailedSnafu, IoSnafu, MigrationFailedSnafu};
 use crate::paths::ConfigPaths;
 use crate::reload::ConfigReloader;
 use crate::schema::{CONFIG_FILENAME, ProjectConfig};
@@ -93,6 +109,24 @@ pub struct WorkspaceContext {
     /// context; the engine IGNORES it (`Session::open` destructures it to `_`), so no L4→L5 contract
     /// moves — the same additive shape D39's `source` takes.
     pub schema_version_before_migrate: i64,
+}
+
+/// The schema stamp at which the D57 `config` table exists (schema step 3). A non-migrating open
+/// reads the DB layer only at or above it.
+const CONFIG_TABLE_SCHEMA_VERSION: i64 = 3;
+
+/// The D31 advisory lock marker beside the database file, the one storage's `lost_database` checks.
+const WRITE_LOCK_FILE_NAME: &str = ".write.lock";
+
+/// What [`open_with_cli`] opened: the resolve-only context when `cli.no_db` is set, else the
+/// storage-bearing one (PRD §4 D58 clause (8)).
+#[derive(Clone)]
+#[allow(clippy::large_enum_variant)] // the spine §4 shape; one value per open, never stored in bulk.
+pub enum OpenedContext {
+    /// Discovery and the resolved config only; the database is untouched (`cli.no_db`).
+    Resolved(ResolvedContext),
+    /// The storage-bearing context, opened per `cli.storage_open`.
+    Storage(WorkspaceContext),
 }
 
 /// Phase (1) of every open, fully resolved and OWNED (no borrow of the [`EnvSource`] survives it,
@@ -174,6 +208,9 @@ pub async fn open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError
 /// # Errors
 ///
 /// As [`open_workspace`], plus:
+/// - [`ConfigError::DatabaseMissing`] if the database is lost (absent or 0 bytes beside the
+///   `.write.lock` marker; PRD §4 D58 clause (7)); nothing is created.
+/// - [`ConfigError::Io`] if the lost-database check cannot stat the database or the marker.
 /// - [`ConfigError::DbOpenFailed`] if `open_local` — or the D46 pre-migration `schema_version()`
 ///   read, or the D57 `read_config()` read — fails (forwards the inner storage code and hint).
 /// - [`ConfigError::MigrationFailed`] if `migrate()` fails (forwards the inner storage code + hint).
@@ -182,7 +219,12 @@ pub async fn open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError
 /// `config.runtime.db_faults`, and a blocking one fail-closes the engine `Session` instead.
 pub async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError> {
     let resolution = resolve_workspace(Some(start), &CliOverrides::default(), &ProcessEnv)?;
-    open_resolved(resolution, &CliOverrides::default()).await
+    open_resolved(
+        resolution,
+        &CliOverrides::default(),
+        StorageOpenMode::Migrate,
+    )
+    .await
 }
 
 /// The additive CLI overload of [`open_workspace`] (FORK-1) — threads `--dir`/`--db`/`--actor`/
@@ -196,7 +238,8 @@ pub async fn open_workspace_with_cli(cli: &CliOverrides) -> Result<ResolvedConte
     open_workspace_from(None, cli, &ProcessEnv)
 }
 
-/// The additive CLI overload of [`open_with_storage`] (FORK-1).
+/// The additive CLI overload of [`open_with_storage`] (FORK-1). It always migrates; it ignores
+/// `cli.no_db` and `cli.storage_open`, which only [`open_with_cli`] reads.
 ///
 /// # Errors
 ///
@@ -205,7 +248,27 @@ pub async fn open_with_storage_with_cli(
     cli: &CliOverrides,
 ) -> Result<WorkspaceContext, ConfigError> {
     let resolution = resolve_workspace(None, cli, &ProcessEnv)?;
-    open_resolved(resolution, cli).await
+    open_resolved(resolution, cli, StorageOpenMode::Migrate).await
+}
+
+/// Open a workspace per the open-mode knobs of `cli` (PRD §4 D58 clause (8)).
+///
+/// - `cli.no_db` → [`OpenedContext::Resolved`], exactly [`open_workspace_with_cli`]: discovery and
+///   the resolved config; the database is never touched (the `doctor` pre-open phase).
+/// - Otherwise [`OpenedContext::Storage`], opened per `cli.storage_open`:
+///   [`StorageOpenMode::Migrate`] is exactly [`open_with_storage_with_cli`];
+///   [`StorageOpenMode::ReadOnly`] opens read-only (no migrate, no `.write.lock`, no write);
+///   [`StorageOpenMode::NoMigrate`] opens read-write without migrating. In the two non-migrating
+///   modes `schema_version_before_migrate` is the stamp as found, the `config` rows are read only on
+///   a stamp of 3 or more, and a stamp above this build's opens instead of failing.
+///
+/// # Errors
+///
+/// `cli.no_db`: as [`open_workspace`]. Otherwise as [`open_with_storage`]; `MigrationFailed` only in
+/// `Migrate` mode. A read-only open that meets a hot journal fails with [`ConfigError::DbOpenFailed`]
+/// for which [`ConfigError::is_read_only_rollback`] is true.
+pub async fn open_with_cli(cli: &CliOverrides) -> Result<OpenedContext, ConfigError> {
+    open_with_cli_from(None, cli, &ProcessEnv).await
 }
 
 /// **Test entry (NFR-16) — production code never calls it.** The resolve-only open with an
@@ -238,7 +301,38 @@ pub async fn open_with_storage_with_env(
     env: &dyn EnvSource,
 ) -> Result<WorkspaceContext, ConfigError> {
     let resolution = resolve_workspace(start, cli, env)?;
-    open_resolved(resolution, cli).await
+    open_resolved(resolution, cli, StorageOpenMode::Migrate).await
+}
+
+/// **Test entry (NFR-16) — production code never calls it.** [`open_with_cli`] with an injected
+/// [`EnvSource`]; `start` as in [`open_workspace_with_env`].
+///
+/// # Errors
+///
+/// As [`open_with_cli`].
+#[doc(hidden)]
+pub async fn open_with_cli_with_env(
+    start: Option<&Path>,
+    cli: &CliOverrides,
+    env: &dyn EnvSource,
+) -> Result<OpenedContext, ConfigError> {
+    open_with_cli_from(start, cli, env).await
+}
+
+/// Shared body of [`open_with_cli`]: `no_db` selects the resolve-only open, else the storage-bearing
+/// one in `cli.storage_open` mode.
+async fn open_with_cli_from(
+    start: Option<&Path>,
+    cli: &CliOverrides,
+    env: &dyn EnvSource,
+) -> Result<OpenedContext, ConfigError> {
+    if cli.no_db {
+        return open_workspace_from(start, cli, env).map(OpenedContext::Resolved);
+    }
+    let resolution = resolve_workspace(start, cli, env)?;
+    open_resolved(resolution, cli, cli.storage_open)
+        .await
+        .map(OpenedContext::Storage)
 }
 
 /// Shared resolve-only body (no DB): phase (1), then the runtime keys over FIVE layers.
@@ -271,10 +365,47 @@ fn open_workspace_from(
     })
 }
 
-/// Shared storage-bearing body: phases (2)–(4) over an already-resolved phase (1).
+/// The lost-database refusal (PRD §4 D58 clause (7)): `DatabaseMissing` when `db_path` is lost and
+/// `cli.create_db` is unset. A lost database has an empty DB layer, so the runtime keys are first
+/// validated over exactly that layer — a config file that would fail the open with exit 7 still does.
+fn refuse_lost_database(
+    db_path: &Path,
+    cli: &CliOverrides,
+    env: &EnvOverrides,
+    project: &ProjectConfig,
+    user: &ProjectConfig,
+    os_user: Option<&str>,
+) -> Result<(), ConfigError> {
+    if cli.create_db {
+        return Ok(());
+    }
+    // A database `stat` failure names the database. A later `lost_database` failure is the
+    // `.write.lock` check beside it, so that error names the marker.
+    if let Err(source) = std::fs::metadata(db_path)
+        && source.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(source).context(IoSnafu { path: db_path });
+    }
+    let marker = db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(WRITE_LOCK_FILE_NAME);
+    let lost = lost_database(db_path).context(IoSnafu { path: marker })?;
+    if !lost {
+        return Ok(());
+    }
+    resolve_runtime(cli, env, project, user, &[], os_user)?;
+    Err(ConfigError::DatabaseMissing {
+        path: db_path.to_path_buf(),
+    })
+}
+
+/// Shared storage-bearing body: the lost-database refusal, then phases (2)–(4) over an
+/// already-resolved phase (1), opening the database in `mode`.
 async fn open_resolved(
     resolution: Resolution,
     cli: &CliOverrides,
+    mode: StorageOpenMode,
 ) -> Result<WorkspaceContext, ConfigError> {
     let Resolution {
         workspace_dir,
@@ -288,15 +419,29 @@ async fn open_resolved(
         user_file,
     } = resolution;
 
+    refuse_lost_database(
+        &paths.db_path,
+        cli,
+        &env,
+        &project,
+        &user,
+        os_user.as_deref(),
+    )?;
+
     // open_local creates the db FILE inside the existing `.unblock/` but does NOT migrate. The
     // resolved `write_lock_timeout_ms` (D31) is threaded DOWN here (L4→L2); the `.write.lock` PATH is
-    // derived inside storage from the db-file parent, so there is no L2→L4 back-edge.
-    let storage = LibsqlStorage::open_local(&paths.db_path, startup.write_lock_timeout_ms())
-        .await
-        .context(DbOpenFailedSnafu)?;
+    // derived inside storage from the db-file parent, so there is no L2→L4 back-edge. The read-only
+    // open takes no `.write.lock` and so needs no timeout.
+    let storage = match mode {
+        StorageOpenMode::Migrate | StorageOpenMode::NoMigrate => {
+            LibsqlStorage::open_local(&paths.db_path, startup.write_lock_timeout_ms()).await
+        }
+        StorageOpenMode::ReadOnly => LibsqlStorage::open_local_read_only(&paths.db_path).await,
+    }
+    .context(DbOpenFailedSnafu)?;
     // D46 clause (10) — RECORD THE PRE-REPAIR STAMP. This is the ONE place it is still observable:
-    // the next line migrates, so every later reader (including `Session::migrate`) sees the
-    // POST-repair value. It is the EXISTING pure `Storage::schema_version()` read, wrapped with the
+    // the `Migrate` mode migrates next, so every later reader (including `Session::migrate`) sees
+    // the POST-repair value. It is the EXISTING pure `Storage::schema_version()` read, wrapped with the
     // SAME `DbOpenFailedSnafu` `open_local` uses one line above: it belongs to that same "establish
     // a usable handle" step and runs BEFORE the ladder, so `MigrationFailed` would mis-label it. A
     // `.unwrap_or(0)`-style fallback is FORBIDDEN: a read failure laundered into `0` is
@@ -304,12 +449,25 @@ async fn open_resolved(
     let schema_version_before_migrate =
         storage.schema_version().await.context(DbOpenFailedSnafu)?;
     // migrate() sets up the schema (two explicit calls — DbOpenFailed wraps open, MigrationFailed
-    // wraps migrate). Schema step 3 (the D57 `config` table) runs here on a stamp-2 database.
-    storage.migrate().await.context(MigrationFailedSnafu)?;
+    // wraps migrate). Schema step 3 (the D57 `config` table) runs here on a stamp-2 database. The
+    // non-migrating modes leave the stamp as found, so below step 3 there is no `config` table.
+    let has_config_table = match mode {
+        StorageOpenMode::Migrate => {
+            storage.migrate().await.context(MigrationFailedSnafu)?;
+            true
+        }
+        StorageOpenMode::ReadOnly | StorageOpenMode::NoMigrate => {
+            schema_version_before_migrate >= CONFIG_TABLE_SCHEMA_VERSION
+        }
+    };
     // D57 clause (6) phase (3): the DB layer. A read failure forwards the storage code and hint as
     // `DbOpenFailed` (no new variant); the rows themselves are decoded TOLERANTLY, so a faulty row
     // never fails the open — it becomes a `db_faults` entry.
-    let rows = storage.read_config().await.context(DbOpenFailedSnafu)?;
+    let rows = if has_config_table {
+        storage.read_config().await.context(DbOpenFailedSnafu)?
+    } else {
+        Vec::new()
+    };
     let runtime = resolve_runtime(cli, &env, &project, &user, &rows, os_user.as_deref())?;
     let reloader = ConfigReloader::new(
         cli.clone(),

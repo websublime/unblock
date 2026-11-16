@@ -95,7 +95,8 @@ pub enum ConfigError {
     /// Reading a config file from disk failed (spine §2.1 additive set).
     ///
     /// Maps to [`ErrorCode::IoError`] (exit 8). Wraps the underlying [`std::io::Error`] together
-    /// with the offending path for a diagnostic message.
+    /// with the offending path for a diagnostic message. Also carries a failed `stat` of the
+    /// database or its `.write.lock` marker in the lost-database check (PRD §4 D58 clause (7)).
     #[snafu(display("failed to read {}: {source}", path.display()))]
     Io {
         /// The underlying I/O failure.
@@ -171,7 +172,33 @@ pub enum ConfigError {
         /// The blocking faulty rows.
         faults: Vec<DbConfigFault>,
     },
+
+    /// The workspace database is LOST: the file is absent or 0 bytes while the `.write.lock` marker
+    /// beside it records that a database existed (PRD §4 D58 clause (7),
+    /// [`unblock_storage::lost_database`]).
+    ///
+    /// Maps to [`ErrorCode::DatabaseNotFound`] (exit 2). Every storage-bearing open refuses it and
+    /// creates nothing, unless [`crate::CliOverrides::create_db`] is set. The hint names
+    /// `unblock doctor` and the recovery path.
+    #[snafu(display(
+        "the workspace database {} is missing: the file is absent or empty while .write.lock \
+         records that a database existed here, so it is not recreated",
+        path.display()
+    ))]
+    DatabaseMissing {
+        /// The configured database path.
+        path: PathBuf,
+    },
 }
+
+/// The `DatabaseMissing` recovery hint (PRD §4 D58 clause (7), the recovery path).
+const DATABASE_MISSING_HINT: &str = "run `unblock doctor` to inspect the workspace. To recover, \
+     stop every unblock process first. Then restore the database file from a backup or from the \
+     newest .unblock/.recovery/<run>/snapshot.db by copying it to the configured database path; \
+     before restoring, move any -wal, -shm or -journal file left beside that path into a new \
+     directory under .unblock/.recovery/. Otherwise, after moving those files aside the same way, \
+     run `unblock init`, which creates an empty database under the configured db_filename and \
+     keeps config.toml, then import the last export through an MCP client's `sync` tool.";
 
 /// The wire spelling of a [`ConfigSource`] (its serde `snake_case` name) — `"user"`, `"db"`, … — so
 /// the layer has ONE name in messages, `context` and the published schema.
@@ -307,6 +334,8 @@ impl CodedError for ConfigError {
             | Self::StartupKeyInRuntimeLayer { .. }
             | Self::UnknownKey { .. }
             | Self::FaultyDbConfig { .. } => ErrorCode::ConfigError,
+            // D58: a lost database rides the EXISTING `DATABASE_NOT_FOUND` (exit 2).
+            Self::DatabaseMissing { .. } => ErrorCode::DatabaseNotFound,
         }
     }
 
@@ -328,6 +357,7 @@ impl CodedError for ConfigError {
         match self {
             Self::DbOpenFailed { source } | Self::MigrationFailed { source } => source.hint(),
             Self::FaultyDbConfig { faults } => Some(faulty_db_config_hint(faults)),
+            Self::DatabaseMissing { .. } => Some(DATABASE_MISSING_HINT.to_string()),
             // Enumerated rather than a catch-all `_`, for the same reason `code()` is: a future
             // variant must DECLARE whether it carries a hint.
             Self::WorkspaceNotFound { .. }
@@ -369,9 +399,26 @@ impl CodedError for ConfigError {
             | Self::ActorUnresolved
             | Self::Parse { .. }
             | Self::Io { .. }
-            | Self::InvalidValue { .. } => {}
+            | Self::InvalidValue { .. }
+            | Self::DatabaseMissing { .. } => {}
         }
         map
+    }
+}
+
+impl ConfigError {
+    /// Whether this is a read-only open that met a hot journal: exactly
+    /// [`ConfigError::DbOpenFailed`] wrapping [`StorageError::ReadOnlyRollback`] (PRD §4 D58 clause
+    /// (8)). The cli has no `unblock-storage` dependency and recognises the case through this
+    /// predicate.
+    #[must_use]
+    pub fn is_read_only_rollback(&self) -> bool {
+        matches!(
+            self,
+            Self::DbOpenFailed {
+                source: StorageError::ReadOnlyRollback
+            }
+        )
     }
 }
 
@@ -554,7 +601,7 @@ mod tests {
         assert_eq!(err.code().exit_code(), 7);
     }
 
-    /// Golden snapshot of the full `(variant -> code -> exit)` table (now 7 variants, spine §2.3 /
+    /// Golden snapshot of the full `(variant -> code -> exit)` table (11 variants, spine §2.3 /
     /// FR-11). Drift in any variant's mapping or the addition/removal of a variant fails the check.
     #[test]
     fn error_variant_code_exit_table_golden() {
@@ -597,6 +644,9 @@ mod tests {
                 key: "nope".to_string(),
             },
             ConfigError::FaultyDbConfig { faults: Vec::new() },
+            ConfigError::DatabaseMissing {
+                path: PathBuf::from("/ws/.unblock/unblock.db"),
+            },
         ];
 
         let table: Vec<(String, String, u8)> = variants
@@ -613,6 +663,7 @@ mod tests {
                     ConfigError::StartupKeyInRuntimeLayer { .. } => "StartupKeyInRuntimeLayer",
                     ConfigError::UnknownKey { .. } => "UnknownKey",
                     ConfigError::FaultyDbConfig { .. } => "FaultyDbConfig",
+                    ConfigError::DatabaseMissing { .. } => "DatabaseMissing",
                 };
                 (
                     variant.to_string(),
@@ -688,5 +739,62 @@ mod tests {
         };
         assert_eq!(err.code(), ErrorCode::ConfigError);
         assert_eq!(err.hint(), None);
+    }
+
+    /// **D58 clause (7)** — a lost database is `DATABASE_NOT_FOUND` (exit 2), its message names the
+    /// path, and its hint names `unblock doctor` and both recovery routes.
+    #[test]
+    fn database_missing_maps_to_database_not_found_with_the_recovery_hint() {
+        let err = ConfigError::DatabaseMissing {
+            path: PathBuf::from("/ws/.unblock/unblock.db"),
+        };
+        assert_eq!(err.code(), ErrorCode::DatabaseNotFound);
+        assert_eq!(err.code().exit_code(), 2);
+        assert!(err.to_string().contains("/ws/.unblock/unblock.db"), "{err}");
+        let hint = err.hint().expect("DatabaseMissing carries a hint");
+        for needle in [
+            "unblock doctor",
+            "unblock init",
+            ".unblock/.recovery/<run>/snapshot.db",
+            "backup",
+            "stop every unblock process",
+        ] {
+            assert!(hint.contains(needle), "hint must name {needle:?}: {hint}");
+        }
+        assert!(err.context().is_empty());
+        assert!(!err.is_read_only_rollback());
+    }
+
+    /// **D58 clause (8)** — `is_read_only_rollback` is true exactly for `DbOpenFailed` wrapping
+    /// `ReadOnlyRollback`, and false for any other source or variant.
+    #[test]
+    fn is_read_only_rollback_is_true_exactly_for_db_open_failed_read_only_rollback() {
+        assert!(
+            ConfigError::DbOpenFailed {
+                source: StorageError::ReadOnlyRollback
+            }
+            .is_read_only_rollback()
+        );
+        assert!(
+            !ConfigError::DbOpenFailed {
+                source: StorageError::ReadOnlyStore
+            }
+            .is_read_only_rollback()
+        );
+        assert!(
+            !ConfigError::DbOpenFailed {
+                source: StorageError::IntegrityFailed {
+                    messages: vec!["x".to_string()],
+                },
+            }
+            .is_read_only_rollback()
+        );
+        assert!(
+            !ConfigError::MigrationFailed {
+                source: StorageError::ReadOnlyRollback
+            }
+            .is_read_only_rollback()
+        );
+        assert!(!ConfigError::ActorUnresolved.is_read_only_rollback());
     }
 }
