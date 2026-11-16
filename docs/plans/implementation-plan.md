@@ -752,7 +752,7 @@
   query, `StorageError::{RecoveryPathOutsideWorkspace, RecoveryIo, ReadOnlyStore}`, `src/libsql/health.rs` with
   `lost_database`, `live_connections_to` (a per-file registry `CloseOnceConnection::connect(db, path)` joins and
   leaves after its close guard; canonical path on Windows), `probe_write_lock` (no `create`) and `exclusive_window`
-  (private-field `ExclusiveRequest` with the testkit-only `with_after_raw_copies` setter, raw-code `SQLITE_NOTADB`,
+  (private-field `ExclusiveRequest` with the testkit-only `with_after_raw_copies` setter, raw-code `SQLITE_NOTADB` [withdrawn with `quarantine_database`, D58 amendment, tracker comment 389],
   the Windows size/`last_write_time`/`creation_time` + re-hash evidence check), `StorageError::ReadOnlyRollback`, the in-repair migrate on the held
   write connection,
   `LibsqlStorage::open_local_read_only`, the testkit `health_facts`/`integrity_check` call counters on

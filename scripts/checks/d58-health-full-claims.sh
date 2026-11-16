@@ -141,6 +141,12 @@ N2@crates/*/src/*.rs@$VACUUM_STMT_RE@NEGATIVE: no production source spells a VAC
 # Q243..Q245 (the docs(d58) AMENDMENT commit, tracker comment 385) the inline amendment measured on
 #      2026-11-13: SQLite unlinks the rolled-back -journal at close, so the rollback is the repair and
 #      its raw/ copy the evidence — PRD clause (6)(e), criterion (g) and spine §3.3 step (e).
+# Q258..Q259 pin criterion (j)'s exporter path; N4 its no-own-scanner rule. Q260..Q267 pin the Unsafe gate
+#      (engine and cli lines and cells) and the bounded capture (tracker comments 389, 390).
+# Q268..Q272 (docs(d58), tracker comment 393) the hot-journal exception, the 64 MiB cap, the uncaptured
+#      journal and the original-facts plan; Q273..Q277 their code line and cells.
+# Q246..Q257 (the docs(d58) amendment for tracker comments 389, 388 and 390: Unsafe gate, capture before touch) the gate in PRD clause (6),
+#      criteria (a), (b) and (h), spine §4.1 recover() and §5b, and the clause (9) confinement hardening.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@scripts/checks/d44-create-deps-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D44 sibling's live-range knob carries the SAME range as this script — anchored on the knob line, so the file's own prose about the knob cannot satisfy the pin
@@ -284,7 +290,7 @@ Q138@docs/PRD.md@^\| \*\*D58\*\* \|@a run that repaired nothing is never reporte
 Q139@docs/PRD.md@^\| \*\*D58\*\* \|@ONE predicate, .unblock_storage::lost_database\(db_path\)., decides it for every caller@clause (7): one lost-database predicate keyed on the .write.lock marker (Miguel, 2026-11-13)
 Q140@docs/PRD.md@^\| \*\*D58\*\* \|@THE ACCEPTED LIMITS\*\*, each with its in-product fix: deleting BOTH the database and .\.write\.lock. reads as a fresh clone@clause (7): the accepted limit of the marker is stated
 Q141@docs/PRD.md@^\| \*\*D58\*\* \|@opens the database READ-ONLY WITHOUT migrating@plain doctor is a read-only, non-migrating dry run (Miguel, 2026-11-13)
-Q142@docs/PRD.md@^\| \*\*D58\*\* \|@must fail with EXACTLY .SQLITE_NOTADB.@clause (6): a file is quarantined only after exactly SQLITE_NOTADB
+Q142@docs/PRD.md@^\| \*\*D58\*\* \|@must fail with EXACTLY .SQLITE_NOTADB.@clause (6) record (withdrawn by the Unsafe gate, ruling 389): a file would be quarantined only after exactly SQLITE_NOTADB
 Q143@docs/PRD.md@^\| \*\*D58\*\* \|@require .live_connections_to\(db_path\) == 0.@clause (6) step (a2): the window refuses while this process holds a connection to that database file, before any file is read
 Q144@docs/PRD.md@^\| \*\*D58\*\* \|@WINDOWS, whose locking takes another VFS path, is DOCUMENTED AS UNMEASURED@criterion (f) is measured on Linux and macOS; Windows is documented as unmeasured
 Q145@docs/PRD.md@^\| \*\*D58\*\* \|@.unblock init. gains a DATABASE-ONLY mode@clause (7): the in-product recovery path for a lost database or a changed db_filename (Miguel, 2026-11-13)
@@ -326,6 +332,23 @@ Q180@docs/PRD.md@^\| \*\*D58\*\* \|@lock-byte range at offset .0x40000000.@claus
 Q243@docs/PRD.md@^\| \*\*D58\*\* \|@\[D58 amendment, measured 2026-11-13 on macOS with libsql's SQLite 3\.45\.1 and SQLite 3\.50\.4: SQLite unlinks the rolled-back journal at close@clause (6)(e) as amended (tracker comment 385): the hot-journal rollback is the quarantine_journal repair, its evidence the raw/ copy, and no journal_mode=PERSIST
 Q244@docs/PRD.md@^\| \*\*D58\*\* \|@the \`-journal\` is ABSENT after the close, like the \`-wal\` \*\*\[D58 amendment@criterion (g) as amended: the rolled-back -journal is absent after the close
 Q245@docs/plans/01-design-spine.md@^- \*\*Pre-open health primitives and the read-only open@SQLite likewise unlinks a hot \`-journal\` it rolled back in \(c\), so \`quarantine_journal\` renames nothing@spine §3.3 step (e) as amended: the rolled-back journal is never renamed
+Q246@docs/PRD.md@^\| \*\*D58\*\* \|@THE UNSAFE GATE \[D58 amendment, Miguel's ruling 2026-11-16, tracker comment 389\]:\*\* when ANY .Unsafe. class is present@clause (6) as amended (tracker comment 389): any Unsafe class makes doctor --repair repair and write nothing
+Q247@docs/PRD.md@^\| \*\*D58\*\* \|@the .quarantine_database. exception is withdrawn@criterion (a) as amended: no Unsafe class has any executable action
+Q248@docs/PRD.md@^\| \*\*D58\*\* \|@THE UNSAFE GATE:\*\* page corruption together with child-counter drift, and .schema_stamp_ahead. together with drift@criterion (b) as amended: the two Unsafe-gate cells the amendment names
+Q249@docs/PRD.md@^\| \*\*D58\*\* \|@and .--repair. moves nothing, creates no run directory and exits 2@criterion (h) as amended: a non-SQLite database is never moved by --repair
+Q250@docs/plans/01-design-spine.md@\(3\) classify the ONLINE classes@\(3b\) \*\*\[D58 amendment, tracker comment 389\] THE UNSAFE GATE:\*\*@spine §4.1 recover() as amended: the online Unsafe gate before any run directory
+Q251@docs/plans/01-design-spine.md@^\*\*doctor — FR-16 full \(D58@\*\*\(i-b\) \[D58 amendment, tracker comment 389\] THE UNSAFE GATE\.\*\*@spine §5b as amended: --repair runs the plain-doctor classification first and stops on any Unsafe class
+Q252@docs/PRD.md@^\| \*\*D58\*\* \|@\[D58 amendment, Verify round 1, tracker comment 388:\*\* .\.unblock/\.recovery/. and every directory under it must be a real directory@clause (9) as amended: the lstat/identity confinement, 0700/0600 evidence and the guarded export copy
+Q253@docs/PRD.md@^\| \*\*D58\*\* \|@\(i-a\) \*\*\[D58 amendment, Miguel's ruling 2026-11-16, tracker comment 390\] CAPTURE BEFORE TOUCH:\*\* with NO libsql connection open@clause (8) as amended (tracker comment 390): --repair captures the anomalous sidecars in memory before the gate's read-only open
+Q254@docs/PRD.md@^\| \*\*D58\*\* \|@the window quarantines the REBUILT copy and the manifest records the original bytes and the rebuild@clause (8) as amended: a lone -shm is resolved by SQLite's wal-index rebuild, with the original kept as evidence
+Q255@docs/PRD.md@^\| \*\*D58\*\* \|@whose SHA-256 equals the .-shm. as it was before the run, and the cell fails if the capture moves after that open@criterion (g) as amended: the lone -shm original is the pre-run bytes
+Q256@docs/plans/01-design-spine.md@^    //   pub async fn capture_sidecars\(@capture_sidecars\(paths: &ConfigPaths, facts: &PreOpenFacts\) -> Result<SidecarCapture, EngineError>;@spine §4.1 as amended: the capture-before-touch entry
+Q257@docs/plans/01-design-spine.md@^    //   pub async fn repair_preopen\(@repair_preopen\(paths: &ConfigPaths, planned: &\[PlannedRepair\], capture: SidecarCapture\)@spine §4.1 as amended: repair_preopen takes the pre-gate capture
+Q268@docs/PRD.md@^\| \*\*D58\*\* \|@no mutation beyond SQLite's own rollback of a hot journal\. A hot .-journal. is the documented exception@clause (6) as amended (tracker comment 393): the hot-journal exception to the Unsafe gate — raw/ evidence, then the rollback, then recover()'s gate
+Q269@docs/PRD.md@^\| \*\*D58\*\* \|@the .-journal. is NOT captured in memory@clause (8) as amended (tracker comment 393): only the anomalous -shm/-wal are captured; the journal's evidence is raw/
+Q270@docs/PRD.md@^\| \*\*D58\*\* \|@the capture cap is 64 MiB \(.preopen::CAPTURE_CAP_BYTES.\)@clause (8) as amended (tracker comment 393): the 64 MiB capture cap
+Q271@docs/plans/01-design-spine.md@^\*\*doctor — FR-16 full \(D58@Step \(ii\) plans the exclusive actions from the ORIGINAL phase \(i\) facts and does NOT gather them again@spine §5b as amended (tracker comment 393): step (ii) plans from the original facts
+Q272@docs/plans/01-design-spine.md@^    //   pub const CAPTURE_CAP_BYTES@pub const CAPTURE_CAP_BYTES: u64 = 64 \* 1024 \* 1024;@spine §4.1 as amended (tracker comment 393): the capture cap constant
 "
 
 blocked=0
@@ -410,7 +433,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 2 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 183 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 200 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."
