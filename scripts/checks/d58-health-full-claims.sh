@@ -340,16 +340,29 @@ Q188@crates/unblock-storage/src/libsql/health.rs@^    let file = match OpenOptio
 Q189@crates/unblock-storage/src/libsql/health.rs@^pub async fn exclusive_window\(@pub async fn exclusive_window\(\$@clause (6): the pre-open exclusive window is a local-file primitive outside the trait
 Q190@crates/unblock-storage/src/libsql/health.rs@^    let mut rows = conn\.query\(\"PRAGMA locking_mode=@\"PRAGMA locking_mode=EXCLUSIVE\", \(\)@clause (6): the window's first executed statement is locking_mode=EXCLUSIVE — BEGIN EXCLUSIVE alone proves nothing in WAL mode
 Q191@crates/unblock-storage/src/libsql/mod.rs@^    pub async fn open_local_read_only\(@\(path: &Path\) -> Result<Self, StorageError> \{\$@clause (8): the read-only, non-migrating open plain doctor uses exists on LibsqlStorage
+Q192@crates/unblock-health/src/classify.rs@^pub fn classify\(@pub fn classify\(\$@clause (4): the ONE classifier is a plain (non-async) pub fn in unblock-health
+Q193@crates/unblock-health/src/integrity.rs@^pub fn classify_integrity_row\(@\(row: &str, index_names: &\[String\]\) -> AnomalyClass \{\$@clause (3): the integrity-row classifier takes the sqlite_schema index names
+Q194@crates/unblock-health/src/integrity.rs@^    let index = if let Some\(rest\) = message\.strip_prefix\(@\"wrong # of entries in index \"@clause (3): the index-only shape wrong # of entries in index <I>
+Q195@crates/unblock-health/src/integrity.rs@^    \} else if let Some\(rest\) = message\.strip_prefix\(\"rowid@\"rowid not at end-of-record for row \"@clause (3): the index-only shape rowid not at end-of-record for row <N> of index <I>
+Q196@crates/unblock-health/src/integrity.rs@^        after_row_number\(rest, \" missing@\" missing from index \"@clause (3): the index-only shape row <N> missing from index <I>
+Q197@crates/unblock-health/src/integrity.rs@^            \.or_else\(\|\| after_row_number\(rest, \" values@\" values differ from index \"@clause (3): the index-only shape row <N> values differ from index <I>
+Q198@crates/unblock-health/src/export.rs@^    let scan = match scan_conflict_markers\(@scan_conflict_markers\(path\)@clause (4): health's export scan calls unblock-sync's ONE conflict-marker scanner
 Q199@crates/unblock-config/src/error.rs@^    DatabaseMissing \{@    DatabaseMissing \{\$@clause (7): the lost-database refusal is a typed ConfigError variant
 Q200@crates/unblock-config/src/error.rs@^            Self::DatabaseMissing \{ \.\. \} => ErrorCode::@=> ErrorCode::DatabaseNotFound,\$@clause (7): DatabaseMissing rides the EXISTING DATABASE_NOT_FOUND code — no ErrorCode minted
 Q201@crates/unblock-config/src/cli.rs@^pub enum StorageOpenMode \{@pub enum StorageOpenMode \{\$@clause (8): the open modes (Migrate, ReadOnly, NoMigrate) exist on the config facade
 Q202@crates/unblock-config/src/cli.rs@^    pub create_db: @    pub create_db: bool,\$@clause (7): init's create-over-the-marker flag exists on CliOverrides
 Q203@crates/unblock-config/src/context.rs@^    if cli\.no_db \{@    if cli\.no_db \{\$@clause (8): open_with_cli is the FIRST reader of the reserved no_db seam
+Q211@crates/unblock-health/tests/classify_props.rs@fn class_table_golden\(@fn class_table_golden\(\)@criterion (a): the golden class table cell
+Q212@crates/unblock-health/tests/classify_props.rs@fn adding_a_class_never_lowers_the_level\(@fn adding_a_class_never_lowers_the_level\(@criterion (a): the composite never drops when a class is added
+Q213@crates/unblock-health/tests/classify_props.rs@fn no_unsafe_class_plans_an_executable_action\(@fn no_unsafe_class_plans_an_executable_action\(@criterion (a) as amended (tracker comment 389): no Unsafe class plans any executable action
+Q214@crates/unblock-health/tests/integrity_rows.rs@fn each_index_only_shape_with_and_without_prefix_is_index_corruption\(@fn each_index_only_shape_with_and_without_prefix_is_index_corruption\(@criterion (b): the four index-only shapes, prefixed and bare
+Q215@crates/unblock-health/tests/integrity_rows.rs@fn every_other_row_is_page_corruption_and_unsafe\(@fn every_other_row_is_page_corruption_and_unsafe\(@criterion (b): the fail-safe Unsafe for every other row
 Q224@crates/unblock-storage/tests/exclusive_window.rs@fn f1_second_process_reader_refuses_database_open_elsewhere\(@fn f1_second_process_reader_refuses_database_open_elsewhere\(@criterion (f1): a live reader in another process is refused, MEASURED
 Q225@crates/unblock-storage/tests/exclusive_window.rs@fn f5_control_begin_exclusive_without_locking_mode_misses_a_wal_reader\(@fn f5_control_begin_exclusive_without_locking_mode_misses_a_wal_reader\(@criterion (f5): the control cell proving BEGIN EXCLUSIVE alone misses a WAL reader
 Q226@crates/unblock-storage/tests/exclusive_window.rs@fn f4_same_process_store_refuses_process_holds_connection_and_creates_no_raw\(@fn f4_same_process_store_refuses_process_holds_connection_and_creates_no_raw\(@criteria (f4)/(n): a same-process connection refuses before any raw copy
 Q235@crates/unblock-storage/src/testkit.rs@^    contract_repair_never_lowers_a_counter\(@contract_repair_never_lowers_a_counter\(factory\(\)\.await\)\.await;\$@criterion (l): the never-lowering repair cell is REGISTERED in run_storage_contract_suite
 Q236@crates/unblock-storage/src/testkit.rs@^    contract_health_facts_reports_drift_and_duplicates_in_key_order\(@contract_health_facts_reports_drift_and_duplicates_in_key_order\(factory\(\)\.await\)\.await;\$@criterion (l): the key-ordered health facts cell is REGISTERED in run_storage_contract_suite
+Q237@crates/unblock-health/tests/classify_props.rs@^\) -> WorkspaceClassification = classify;@WorkspaceClassification = classify;\$@criterion (m): classify is a non-async fn, pinned by a const function-pointer binding
 Q240@.github/workflows/ci.yml@^  exclusivity-macos:@exclusivity-macos:\$@criterion (q): the exclusivity-macos job exists
 Q241@.github/workflows/ci.yml@^    runs-on: macos-15@runs-on: macos-15\$@criterion (q): it runs on the pinned macos-15 image
 Q242@.github/workflows/ci.yml@--test exclusive_window@run: cargo test -p unblock-storage --features testkit --locked --test exclusive_window\$@criterion (q): every step naming the exclusive_window file RUNS it (storage-testkit on Linux, exclusivity-macos on macOS)
@@ -457,7 +470,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 2 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 224 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 237 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."

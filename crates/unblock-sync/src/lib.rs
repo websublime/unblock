@@ -31,7 +31,8 @@ pub use import::{CollisionPolicy, ImportOptions, import_jsonl};
 
 // Preflight + scanning primitives (also consumed by `unblock-health` lite + the fuzz targets).
 pub use conflict::{
-    ConflictMarker, ConflictMarkerType, ensure_no_conflict_markers, scan_conflict_markers,
+    ConflictMarker, ConflictMarkerType, MAX_IMPORT_FILE_BYTES, ensure_no_conflict_markers,
+    scan_conflict_markers,
 };
 pub use jsonl::{parse_issue_line, serialize_issue_line};
 pub use path::validate_sync_path;
