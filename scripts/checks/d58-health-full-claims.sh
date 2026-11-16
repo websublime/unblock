@@ -128,6 +128,19 @@ N2@crates/*/src/*.rs@$VACUUM_STMT_RE@NEGATIVE: no production source spells a VAC
 #      ExclusiveRequest with its testkit-only hook setter.
 # Q175..   (Round 3 delta) the ConfigError::is_read_only_rollback seam (spine, config plan, D58 row),
 #      the stop-every-process instruction in the OrphanSidecars message, and the Windows lock-byte skip.
+# Q181..   (IMPLEMENTATION commit) the mechanism rows on production lines: the two trait methods and
+#      RecordingStorage's recording repair, RecoveryPathOutsideWorkspace, the four pre-open primitives
+#      with the no-create probe and the locking_mode=EXCLUSIVE statement, the read-only open, classify
+#      and classify_integrity_row with the four index-only shapes, the one scanner call,
+#      DatabaseMissing onto DATABASE_NOT_FOUND, StorageOpenMode, create_db and the no_db reader.
+#      Q204..Q210 the engine pre-open functions, HealthReport, the typed doctor signature and the cli
+#      --repair flag.
+# Q211..   (TEST commit) one cell declaration per criterion (a)..(o), the contract cells REGISTERED in
+#      run_storage_contract_suite, and the exclusivity-macos job (criterion (q)). N3 is the cli half of
+#      criterion (d): no integrity_check( call in the cli doctor command.
+# Q243..Q245 (the docs(d58) AMENDMENT commit, tracker comment 385) the inline amendment measured on
+#      2026-11-13: SQLite unlinks the rolled-back -journal at close, so the rollback is the repair and
+#      its raw/ copy the evidence — PRD clause (6)(e), criterion (g) and spine §3.3 step (e).
 # =================================================================================================
 REQUIRE_ROW="
 Q1@scripts/checks/d44-create-deps-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D44 sibling's live-range knob carries the SAME range as this script — anchored on the knob line, so the file's own prose about the knob cannot satisfy the pin
@@ -310,6 +323,9 @@ Q177@docs/PRD.md@^\| \*\*D58\*\* \|@detects it through the new config-side predi
 Q178@docs/PRD.md@^\| \*\*D58\*\* \|@stop EVERY unblock process on the workspace \(every .unblock mcp. server and every CLI command\) FIRST@clause (7) step (6): the OrphanSidecars message tells the user to stop every unblock process before moving files
 Q179@docs/plans/crates/unblock-cli.md@^\| .src/commands/init\.rs. \|@stop every unblock process \(every .unblock mcp. server and CLI\) BEFORE moving them@the cli plan carries the stop-first instruction in the OrphanSidecars message
 Q180@docs/PRD.md@^\| \*\*D58\*\* \|@lock-byte range at offset .0x40000000.@clause (6): the Windows re-hash skips SQLite's lock-byte page
+Q243@docs/PRD.md@^\| \*\*D58\*\* \|@\[D58 amendment, measured 2026-11-13 on macOS with libsql's SQLite 3\.45\.1 and SQLite 3\.50\.4: SQLite unlinks the rolled-back journal at close@clause (6)(e) as amended (tracker comment 385): the hot-journal rollback is the quarantine_journal repair, its evidence the raw/ copy, and no journal_mode=PERSIST
+Q244@docs/PRD.md@^\| \*\*D58\*\* \|@the \`-journal\` is ABSENT after the close, like the \`-wal\` \*\*\[D58 amendment@criterion (g) as amended: the rolled-back -journal is absent after the close
+Q245@docs/plans/01-design-spine.md@^- \*\*Pre-open health primitives and the read-only open@SQLite likewise unlinks a hot \`-journal\` it rolled back in \(c\), so \`quarantine_journal\` renames nothing@spine §3.3 step (e) as amended: the rolled-back journal is never renamed
 "
 
 blocked=0
@@ -394,7 +410,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 2 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 180 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 183 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."
