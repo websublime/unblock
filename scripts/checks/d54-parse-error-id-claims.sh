@@ -51,6 +51,13 @@
 #         satisfy it; Q1..Q12 read only wire.rs's lines before its `mod tests {`, so no test body
 #         can satisfy them either (a missing or duplicated `mod tests {` line is exit 2).
 #
+# [D59] NOTE (PRD §4 D59 clauses (2), (12) and (19)). D54 is KEPT on rmcp 3.10: a readable id still gets
+# `-32700` on that id and a line that is not strict JSON the id-less `-32700`. A strict-JSON line with no
+# readable id now gets rmcp 3.10's id-less `-32600`, and rmcp's own reader no longer writes `-32700`, so
+# D59's IMPLEMENTATION commit RE-POINTS Q6 (the absent/unusable arm, to rule (γ)), Q16 and Q17 (the
+# differential, to the `Silenced`/`IdInserted` tiers graded against rmcp 3.10's live bytes), each with
+# its one-line reason here. Q7 (`ErrorData::parse_error("Parse error", None)`) stays.
+#
 # Exit: 0 = pass · 1 = BLOCK (a required landing is missing) · 2 = cannot evaluate (fail-closed).
 set -u
 
@@ -63,16 +70,16 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; e
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
 # The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
-# the day a D59 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# the day a D60 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
 # goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves, the
-# prose range `(D1..D58)` and the tokenizer's regex ALTERNATION `\bD(58|57|56|55|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D59 finding — the lint would stop tokenizing
+# prose range `(D1..D59)` and the tokenizer's regex ALTERNATION `\bD(59|58|57|56|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D60 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D58'
-RANGE_ALT_RE='D\(58\|57\|'
+RANGE_RE='D1\.\.D59'
+RANGE_ALT_RE='D\(59\|58\|'
 
 # The LIVE published contract version. D54 does NOT move it, so this row is the affirmative record of
 # that. It tracks the LIVE id, so a later decision's bump moves it in that decision's implementation
@@ -128,11 +135,11 @@ P1@.unblock/issues.jsonl@\"id\":\"ub-788\"@the tracker record names the work D54
 #      — its new bullet and the corrected D47 and D50 bullets.
 # Q64..Q67 are the SIBLING ROW TEXT this change corrects: `d47`'s P8 and success line, `d50`'s P3, and
 #      `d53`'s newest-pointer row, which names the NEWEST gate (retargeted when D54, then D55, then D56, then D57, then D58,
-#      took the pointer).
+#      then D59, took the pointer).
 # Q68 is the implementation-plan task.
 # Q69..Q73 are this gate's wiring: SPECIFIED, RUNNING, LISTED in PROCESS.md §3, and in ci-cd §2.1(a);
 #      Q72 pins PROCESS.md §3's newest-reference sentence naming the NEWEST gate, which pins this
-#      script's knobs (retargeted when D55, then D56, then D57, then D58, took the pointer).
+#      script's knobs (retargeted when D55, then D56, then D57, then D58, then D59, took the pointer).
 # =================================================================================================
 REQUIRE_ROW="
 Q1@crates/unblock-mcp/src/wire.rs@^enum ParseFailure \{@enum ParseFailure \{@the Err arm's failure is still CLASSIFIED; without the type the strict-JSON verdict cannot reach the reply. The anchor is the teeth
@@ -201,12 +208,12 @@ Q63@docs/roadmap.html@^ +<li>Fix: a first frame that is neither@closed by D54 be
 Q64@scripts/checks/d47-envelope-id-claims.sh@^P8@D54@the D47 sibling's P8 pins the closure beside the id, not the open residual
 Q65@scripts/checks/d47-envelope-id-claims.sh@^say \"OK@closed by D54@the D47 sibling's success line no longer calls ub-788 still open
 Q66@scripts/checks/d50-pre-handshake-gate-claims.sh@^P3@CLOSED by D54@the D50 sibling's P3 reason no longer calls ub-788 OPEN
-Q67@scripts/checks/d53-request-integrity-claims.sh@^Q53@d58-health-full-claims@the D53 sibling's newest-pointer row is retargeted to the NEWEST gate, which pins its knobs (D54 retargeted it, then D55, then D56, then D57, then D58)
+Q67@scripts/checks/d53-request-integrity-claims.sh@^Q53@d59-rmcp3-claims@the D53 sibling's newest-pointer row is retargeted to the NEWEST gate, which pins its knobs (D54 retargeted it, then D55, then D56, then D57, then D58, then D59)
 Q68@docs/plans/implementation-plan.md@^- \*\*T3\.16 @D54@the task checklist exists and names the decision
 Q69@docs/plans/ci-cd-and-distribution.md@Named sub-check \(its D54 sibling@d54-parse-error-id-claims@this gate is SPECIFIED in its own paragraph — §2.1(a) of that same file also carries this filename, so a bare token stays green with the paragraph deleted
 Q70@.github/workflows/ci.yml@d54-parse-error-id-claims@:[0-9]+: +- run: scripts/checks/d54-parse-error-id-claims\.sh@this gate actually RUNS in the required doc-lint job; every line naming it must BE the run step, so a commented-out step fails
 Q71@docs/PROCESS.md@d54-parse-error-id-claims\.sh. .RANGE_RE@RANGE_ALT_RE@the count-free LIST that IS the rule carries this script's own entry with BOTH knob names
-Q72@docs/PROCESS.md@always the NEWEST script@d58-health-full-claims\.sh@PROCESS.md §3 names D58's gate as the newest reference — a script that pins THIS one's knobs, which this script cannot pin itself (retargeted when D55, then D56, then D57, then D58, took the pointer; the next mint retargets it again)
+Q72@docs/PROCESS.md@always the NEWEST script@d59-rmcp3-claims\.sh@PROCESS.md §3 names D59's gate as the newest reference — a script that pins THIS one's knobs, which this script cannot pin itself (retargeted when D55, then D56, then D57, then D58, then D59, took the pointer; the next mint retargets it again)
 Q73@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@since the D54 implementation commit, .scripts/checks/d54-parse-error-id-claims\.sh.@ci-cd §2.1(a)'s enumeration carries this script's knobs
 "
 

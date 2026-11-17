@@ -65,16 +65,16 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; e
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
 # The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
-# the day a D59 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# the day a D60 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
 # goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves, the
-# prose range `(D1..D58)` and the tokenizer's regex ALTERNATION `\bD(58|57|56|55|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D59 finding — the lint would stop tokenizing
+# prose range `(D1..D59)` and the tokenizer's regex ALTERNATION `\bD(59|58|57|56|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D60 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D58'
-RANGE_ALT_RE='D\(58\|57\|'
+RANGE_RE='D1\.\.D59'
+RANGE_ALT_RE='D\(59\|58\|'
 
 # The LIVE published contract version. D55 does NOT move it, so this row is the affirmative record of
 # that. It tracks the LIVE id, so a later decision's bump moves it in that decision's implementation
@@ -129,9 +129,9 @@ P1@.unblock/issues.jsonl@\"id\":\"ub-e47\"@the tracker record names the work D55
 #      headers, the `update-smoke.yml` env comment, `README.md`, both roadmaps and the T3.17 task.
 # Q75..Q79 are this gate's wiring: SPECIFIED, RUNNING, LISTED in PROCESS.md §3, and in ci-cd §2.1(a);
 #      Q78 pins PROCESS.md §3's newest-reference sentence naming the NEWEST gate, which pins this
-#      script's knobs (retargeted when D56, then D57, then D58, took the pointer).
+#      script's knobs (retargeted when D56, then D57, then D58, then D59, took the pointer).
 # Q80..Q82 are the SIBLING ROWS the D55 spec commit retargeted to this script: `d53`'s Q53 and `d54`'s
-#      Q67 and Q72 — and which the D56 spec commit retargeted again, to D56's gate, the D57 spec commit to D57's, and the D58 spec commit to D58's.
+#      Q67 and Q72 — and which the D56 spec commit retargeted again, to D56's gate, the D57 spec commit to D57's, the D58 spec commit to D58's, and the D59 spec commit to D59's.
 # Q83 is the tokenless-401 `update_refusal_` cell, a cell row kept at the end so no row is renumbered.
 # =================================================================================================
 REQUIRE_ROW="
@@ -212,11 +212,11 @@ Q74@docs/plans/implementation-plan.md@^- \*\*T3\.17 @D55@the task checklist exis
 Q75@docs/plans/ci-cd-and-distribution.md@Named sub-check \(its D55 sibling@d55-update-refusal-claims@this gate is SPECIFIED in its own paragraph — §2.1(a) of that same file also carries this filename, so a bare token stays green with the paragraph deleted
 Q76@.github/workflows/ci.yml@d55-update-refusal-claims@:[0-9]+: +- run: scripts/checks/d55-update-refusal-claims\.sh@this gate actually RUNS in the required doc-lint job; every line naming it must BE the run step, so a commented-out step fails
 Q77@docs/PROCESS.md@d55-update-refusal-claims\.sh. .RANGE_RE@RANGE_ALT_RE@the count-free LIST that IS the rule carries this script's own entry with BOTH knob names
-Q78@docs/PROCESS.md@always the NEWEST script@d58-health-full-claims\.sh@PROCESS.md §3 names D58's gate as the newest reference — a script that pins THIS one's knobs, which this script cannot pin itself (retargeted when D56, then D57, then D58, took the pointer; the next mint retargets it again)
+Q78@docs/PROCESS.md@always the NEWEST script@d59-rmcp3-claims\.sh@PROCESS.md §3 names D59's gate as the newest reference — a script that pins THIS one's knobs, which this script cannot pin itself (retargeted when D56, then D57, then D58, then D59, took the pointer; the next mint retargets it again)
 Q79@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@the .ci\(d55\). commit that mints it, .scripts/checks/d55-update-refusal-claims\.sh.@ci-cd §2.1(a)'s enumeration carries this script's knobs
-Q80@scripts/checks/d53-request-integrity-claims.sh@^Q53@d58-health-full-claims@the D53 sibling's newest-pointer row names the NEWEST gate (this one until D56 took the pointer, D57's from D57, D58's since D58 took it)
-Q81@scripts/checks/d54-parse-error-id-claims.sh@^Q67@d58-health-full-claims@the D54 sibling's row pinning d53's Q53 follows the retarget (to D56's gate when D56 took the pointer, to D57's from D57, D58's since D58 took it)
-Q82@scripts/checks/d54-parse-error-id-claims.sh@^Q72@d58-health-full-claims@the D54 sibling's newest-pointer row names the NEWEST gate (this one until D56 took the pointer, D57's from D57, D58's since D58 took it)
+Q80@scripts/checks/d53-request-integrity-claims.sh@^Q53@d59-rmcp3-claims@the D53 sibling's newest-pointer row names the NEWEST gate (this one until D56 took the pointer, D57's from D57, D58's when D58 took it, D59's since D59 took it)
+Q81@scripts/checks/d54-parse-error-id-claims.sh@^Q67@d59-rmcp3-claims@the D54 sibling's row pinning d53's Q53 follows the retarget (to D56's gate when D56 took the pointer, to D57's from D57, D58's when D58 took it, D59's since D59 took it)
+Q82@scripts/checks/d54-parse-error-id-claims.sh@^Q72@d59-rmcp3-claims@the D54 sibling's newest-pointer row names the NEWEST gate (this one until D56 took the pointer, D57's from D57, D58's when D58 took it, D59's since D59 took it)
 Q83@crates/unblock-cli/tests/update_verify.rs@^async fn update_refusal_401_unset@async fn update_refusal_401_unset_is_config_error\(\)@the tokenless 401 cell is still declared, pinning CONFIG_ERROR and the whole tokenless text end to end. Mutant: a tokenless 401 falling through to INTERNAL_ERROR
 "
 

@@ -88,16 +88,16 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; e
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
 # The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
-# the day a D59 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# the day a D60 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
 # goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves, the
-# prose range `(D1..D58)` and the tokenizer's regex ALTERNATION `\bD(58|57|56|55|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D59 finding — the lint would stop tokenizing
+# prose range `(D1..D59)` and the tokenizer's regex ALTERNATION `\bD(59|58|57|56|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D60 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D58'
-RANGE_ALT_RE='D\(58\|57\|'
+RANGE_RE='D1\.\.D59'
+RANGE_ALT_RE='D\(59\|58\|'
 
 # The LIVE published contract version. D57 MOVES it (`unblock.mcp.v1.11` -> `unblock.mcp.v1.12`), so
 # this knob is LIVE from this file's first commit. It tracks the LIVE id, so a later decision's bump
@@ -174,13 +174,13 @@ N1@*Cargo.toml@$DIRECTORIES_RE@NEGATIVE: no manifest in the tree names the direc
 #      markdown roadmap's FR-13 note and the RENDERED v1.1 card's bullet; README's tool-table line;
 #      the T4.2 task and its acceptance list citing D57's criteria by letter.
 # Q146..Q150 are this gate's wiring: SPECIFIED, RUNNING, LISTED in PROCESS.md §3 with both knob
-#      names, PROCESS.md §3's NEWEST sentence (which names the NEWEST gate — D58's since D58 took the
-#      pointer), and ci-cd §2.1(a)'s enumeration carrying its knobs (Q150 stopped requiring it to be
+#      names, PROCESS.md §3's NEWEST sentence (which names the NEWEST gate — D58's when D58 took the
+#      pointer, D59's since D59 took it), and ci-cd §2.1(a)'s enumeration carrying its knobs (Q150 stopped requiring it to be
 #      called the newest when D58 took the pointer).
 # Q151..Q166 are the SIBLING ROWS the D57 spec commit retargeted to this script: d53's Q53, d54's Q67
 #      and Q72, d55's Q78, Q80, Q81 and Q82, and d56's Q101, Q102 (reworded so it stops calling d56
 #      the newest) and Q103..Q109 — retargeted again by the D58 spec commit to the NEWEST gate, D58's,
-#      except Q159, whose requirement names no gate.
+#      and by the D59 spec commit to D59's, except Q159, whose requirement names no gate.
 # Q167 (Verify round 1) pins the run_storage_contract_suite CALL of the config-cell runner, so the
 #      four contract_config_ cells cannot be orphaned with their registrations intact.
 # =================================================================================================
@@ -333,24 +333,24 @@ Q145@docs/plans/implementation-plan.md@^  D57 clause \(12\) \(a\) ORDER@\(d4\) I
 Q146@docs/plans/ci-cd-and-distribution.md@Named sub-check \(its D57 sibling@d57-config-layers-claims@this gate is SPECIFIED in its own paragraph — §2.1(a) of that same file also carries this filename, so a bare token stays green with the paragraph deleted
 Q147@.github/workflows/ci.yml@d57-config-layers-claims@:[0-9]+: +- run: scripts/checks/d57-config-layers-claims\.sh@this gate actually RUNS in the required doc-lint job; every line naming it must BE the run step, so a commented-out step fails
 Q148@docs/PROCESS.md@d57-config-layers-claims\.sh. .RANGE_RE@RANGE_ALT_RE@the count-free LIST that IS the rule carries this script's own entry with BOTH knob names
-Q149@docs/PROCESS.md@always the NEWEST script@d58-health-full-claims\.sh@PROCESS.md §3 names D58's gate as the newest reference — a script that pins THIS one's knobs, which this script cannot pin itself (retargeted when D58 took the pointer; the next mint retargets it again)
+Q149@docs/PROCESS.md@always the NEWEST script@d59-rmcp3-claims\.sh@PROCESS.md §3 names D59's gate as the newest reference — a script that pins THIS one's knobs, which this script cannot pin itself (retargeted when D58, then D59, took the pointer; the next mint retargets it again)
 Q150@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@the .ci\(d57\). commit that mints it, .scripts/checks/d57-config-layers-claims\.sh. .RANGE_RE. \*\*and\*\* .RANGE_ALT_RE.@ci-cd §2.1(a)'s enumeration carries this script's knobs (it stopped naming this script the newest when D58's gate took the pointer)
-Q151@scripts/checks/d53-request-integrity-claims.sh@^Q53[^0-9]@d58-health-full-claims@the D53 sibling's newest-pointer row names the NEWEST gate (this one until D58 took the pointer)
-Q152@scripts/checks/d54-parse-error-id-claims.sh@^Q67[^0-9]@d58-health-full-claims@the D54 sibling's row pinning d53's Q53 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
-Q153@scripts/checks/d54-parse-error-id-claims.sh@^Q72[^0-9]@d58-health-full-claims@the D54 sibling's newest-pointer row names the NEWEST gate (this one until D58 took the pointer)
-Q154@scripts/checks/d55-update-refusal-claims.sh@^Q78[^0-9]@d58-health-full-claims@the D55 sibling's newest-pointer row names the NEWEST gate (this one until D58 took the pointer)
-Q155@scripts/checks/d55-update-refusal-claims.sh@^Q80[^0-9]@d58-health-full-claims@the D55 sibling's row pinning d53's Q53 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
-Q156@scripts/checks/d55-update-refusal-claims.sh@^Q81[^0-9]@d58-health-full-claims@the D55 sibling's row pinning d54's Q67 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
-Q157@scripts/checks/d55-update-refusal-claims.sh@^Q82[^0-9]@d58-health-full-claims@the D55 sibling's row pinning d54's Q72 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
-Q158@scripts/checks/d56-organization-claims.sh@^Q101[^0-9]@d58-health-full-claims@the D56 sibling's newest-pointer row names the NEWEST gate (this one until D58 took the pointer)
+Q151@scripts/checks/d53-request-integrity-claims.sh@^Q53[^0-9]@d59-rmcp3-claims@the D53 sibling's newest-pointer row names the NEWEST gate (this one until D58 took the pointer, D58's until D59 took it)
+Q152@scripts/checks/d54-parse-error-id-claims.sh@^Q67[^0-9]@d59-rmcp3-claims@the D54 sibling's row pinning d53's Q53 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
+Q153@scripts/checks/d54-parse-error-id-claims.sh@^Q72[^0-9]@d59-rmcp3-claims@the D54 sibling's newest-pointer row names the NEWEST gate (this one until D58 took the pointer, D58's until D59 took it)
+Q154@scripts/checks/d55-update-refusal-claims.sh@^Q78[^0-9]@d59-rmcp3-claims@the D55 sibling's newest-pointer row names the NEWEST gate (this one until D58 took the pointer, D58's until D59 took it)
+Q155@scripts/checks/d55-update-refusal-claims.sh@^Q80[^0-9]@d59-rmcp3-claims@the D55 sibling's row pinning d53's Q53 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
+Q156@scripts/checks/d55-update-refusal-claims.sh@^Q81[^0-9]@d59-rmcp3-claims@the D55 sibling's row pinning d54's Q67 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
+Q157@scripts/checks/d55-update-refusal-claims.sh@^Q82[^0-9]@d59-rmcp3-claims@the D55 sibling's row pinning d54's Q72 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
+Q158@scripts/checks/d56-organization-claims.sh@^Q101[^0-9]@d59-rmcp3-claims@the D56 sibling's newest-pointer row names the NEWEST gate (this one until D58 took the pointer, D58's until D59 took it)
 Q159@scripts/checks/d56-organization-claims.sh@^Q102[^0-9]@stopped naming this script the newest@the D56 sibling's Q102 is reworded so it stops calling d56 the newest
-Q160@scripts/checks/d56-organization-claims.sh@^Q103[^0-9]@d58-health-full-claims@the D56 sibling's row pinning d53's Q53 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
-Q161@scripts/checks/d56-organization-claims.sh@^Q104[^0-9]@d58-health-full-claims@the D56 sibling's row pinning d54's Q67 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
-Q162@scripts/checks/d56-organization-claims.sh@^Q105[^0-9]@d58-health-full-claims@the D56 sibling's row pinning d54's Q72 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
-Q163@scripts/checks/d56-organization-claims.sh@^Q106[^0-9]@d58-health-full-claims@the D56 sibling's row pinning d55's Q78 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
-Q164@scripts/checks/d56-organization-claims.sh@^Q107[^0-9]@d58-health-full-claims@the D56 sibling's row pinning d55's Q80 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
-Q165@scripts/checks/d56-organization-claims.sh@^Q108[^0-9]@d58-health-full-claims@the D56 sibling's row pinning d55's Q81 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
-Q166@scripts/checks/d56-organization-claims.sh@^Q109[^0-9]@d58-health-full-claims@the D56 sibling's row pinning d55's Q82 follows the retarget (to D57's gate when D57 took the pointer, to D58's since D58 took it)
+Q160@scripts/checks/d56-organization-claims.sh@^Q103[^0-9]@d59-rmcp3-claims@the D56 sibling's row pinning d53's Q53 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
+Q161@scripts/checks/d56-organization-claims.sh@^Q104[^0-9]@d59-rmcp3-claims@the D56 sibling's row pinning d54's Q67 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
+Q162@scripts/checks/d56-organization-claims.sh@^Q105[^0-9]@d59-rmcp3-claims@the D56 sibling's row pinning d54's Q72 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
+Q163@scripts/checks/d56-organization-claims.sh@^Q106[^0-9]@d59-rmcp3-claims@the D56 sibling's row pinning d55's Q78 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
+Q164@scripts/checks/d56-organization-claims.sh@^Q107[^0-9]@d59-rmcp3-claims@the D56 sibling's row pinning d55's Q80 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
+Q165@scripts/checks/d56-organization-claims.sh@^Q108[^0-9]@d59-rmcp3-claims@the D56 sibling's row pinning d55's Q81 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
+Q166@scripts/checks/d56-organization-claims.sh@^Q109[^0-9]@d59-rmcp3-claims@the D56 sibling's row pinning d55's Q82 follows the retarget (to D57's gate when D57 took the pointer, to D58's when D58 took it, D59's since D59 took it)
 Q167@crates/unblock-storage/src/testkit.rs@^    run_config_contract_cells\(@run_config_contract_cells\(&factory\)\.await;@run_storage_contract_suite still CALLS the config-cell runner, so every backend runs the four contract_config_ cells
 "
 

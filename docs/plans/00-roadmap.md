@@ -51,7 +51,7 @@ pass as hard gates; unblock dogfoods its own repo (issues imported from `bd` via
 | FR-15 | Pure-DB diagnostics: stats/info/where/version/lint; `changelog` (closed-issue metadata) + `orphans` (`external_ref` pattern) — **no git** |
 | FR-16 (lite) | `doctor` + libsql `integrity_check` + basic diagnostics |
 | FR-17 | Cooperative shutdown (SIGINT/SIGTERM/SIGHUP → atomic flag; clean libsql flush/close) |
-| FR-20 | **MCP stdio server (PRIMARY)** on rmcp 1.7: ≤8 consolidated tools, resources, prompts |
+| FR-20 | **MCP stdio server (PRIMARY)** on rmcp (1.7 at v1; **[D59]** 3.10 from v1.1, serving MCP 2026-07-28 beside `initialize`): ≤8 consolidated tools, resources, prompts |
 | FR-25 | **Self-update** (`unblock update`) via `axoupdater`; verified by the dist-installer SHA256 checksum before swap; attestations = publish-side provenance (NFR-17, D17/D35) |
 
 ### Key NFR gates
@@ -273,6 +273,9 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   one that first measured it replicated the loss in its regime — none on an idle connection, growing with fast
   requests in flight to most of them at eight (83–95 % in the Understand runs, 65–93 % on re-measure), the same for both arms wherever both were driven — while the rate at
   four in flight proved unstable from run to run.
+  **[D59] (v1.1):** this class is RETIRED on rmcp 3.10, which types every `method`+`id` frame as a Request; such a
+  frame runs when it types, and otherwise gets D54's `-32700` on a readable id or rmcp's id-less `-32600` (PRD §4 D59
+  clauses (2) and (3)).
 - **The mcp startup-failure report lands on the JSON-RPC FRAMING channel** (P1, tracker `ub-og3`, PRD §4
   **D48**) — the residual D47 clause 8(iii) named and did not design, now closed in the same cut and minting its
   own D-id because it REVERSES a shipped D38 clause (`docs/PROCESS.md` section 3). When `unblock mcp` fails, the
@@ -383,6 +386,10 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   and its own pipes and blocks no other writer, because the D31 cross-process lock is taken per mutation and
   released with that mutation's guard — so the gate is argued from availability and from what the client can
   observe, never from lock pressure.
+  **[D59] (v1.1):** on rmcp 3.10 the gate PASSES every premature Request to rmcp, which answers it itself, keeps
+  DROPPING the other three shapes, writes nothing, and also opens on a stateless MCP 2026-07-28 session's first
+  request; the version clamp beside it is RETIRED, and a reply rmcp cannot write to a closed stdout still exits 0
+  (D40 kept) (PRD §4 D59 clauses (10), (11) and (13)).
 - **The wire advertised Tier-1 attribution it silently discarded** (P2, tracker `ub-lp9.22`, PRD §4 **D52**) —
   found by the D42 Verify gate. Every mutating tool accepts the optional `agent_name`/`harness`/`model`, every
   arm drops them, and the `events` attribution columns read back `NULL`, yet the published schema called the
@@ -408,6 +415,9 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   `ErrorCode`, moves no published byte, and carries **no `contract_version` bump and no `CONTRACT_HASH` re-pin** —
   `unblock.mcp.v1.10` stands. **What it does NOT close:** the stdio read still accepts a line of any length
   (`ub-o8s`).
+  **[D59] (v1.1):** an unterminated final line at EOF is now DROPPED, as rmcp 3.10 does, the partial-line keep
+  is now rmcp's own behaviour, and a read error keeps the half-read line for the re-call, as rmcp 3.10 does (PRD §4
+  D59 clause (7)).
 - **A parse error on a READABLE id was answered with no id, so the caller waited forever** (P1, `ub-788`, PRD §4 **D54**).
   This is the residual D47 named and Miguel scoped out of it, closed in the same cut; it mints its own D-id because
   it is a separate decision to depart from the `-32700` reply rmcp writes. A line that fails rmcp's typed parse (a
@@ -426,6 +436,9 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   put an id on it waits (PRD D54 (10)(iii)). A response-shaped client line that carries a readable id is answered on
   that id too, which only a non-conforming peer can cause. The stdio read still accepts a line of any length
   (`ub-o8s`).
+  **[D59] (v1.1):** D54 is KEPT on rmcp 3.10, whose own reader now writes nothing for invalid JSON and an id-less
+  `-32600` for a wrong-shape line; only the strict-JSON line with no readable id moves, to rmcp 3.10's id-less `-32600`
+  (PRD §4 D59 clause (2)).
 - **`unblock update` end-to-end smoke** (tracked as `ub-lp9.26`): the self-update path (FR-25, axoupdater → dist
   installer → SHA256 check-before-swap) had only been unit-asserted, never run end-to-end against a real
   published release. The smoke is now the manual `workflow_dispatch` workflow `.github/workflows/update-smoke.yml`
@@ -542,6 +555,7 @@ shape (only additive `contract_version` bumps).
 | FR-19 | **Workflow gates:** policy-driven (`.unblock/policy.toml`) transition gates (ci_green / min_reviewers / security_sign_off) | policy, config, engine, mcp |
 | FR-13 (full) | DB config-table + user-config layers; full startup/runtime partitioning. **[D57]** Specified by PRD §4 D57 (`ub-lp9.2`, implementation-plan T4.2): six layers in ONE order, CLI > env > project > user (`$XDG_CONFIG_HOME/unblock/config.toml` else `~/.config/unblock/config.toml`, every OS) > DB `config` table (schema step 3, `CURRENT_SCHEMA_VERSION` `2` → `3`) > defaults; the user and DB layers carry the runtime keys `actor`, `output_format` and `search_cap` only (`jsonl_export` stays CLI/env/project-only and inert until `ub-p1h`) — a startup key in the user file is refused (`CONFIG_ERROR`), and a bad DB row fail-closes every command but the `config` action, which repairs it in-product (`config unset`); the DB layer's writer is the `issue` action `config` (`get`/`set`/`unset`/`list`) — no new tool, no CLI verb — with one contract bump `unblock.mcp.v1.11` → `unblock.mcp.v1.12`; a successful `config set`/`unset` reloads the live session's runtime keys | model, storage, config, engine, mcp, cli |
 | FR-16 (full) | Full Healthy/Drifted/Recoverable/Unsafe taxonomy redefined for a libsql-authoritative world; evidence under `.unblock/.recovery/`. **[D58]** Specified by PRD §4 D58 (`ub-lp9.3`, implementation-plan T4.3): the levels are defined by repair path (`Drifted` = derived-state drift inside the database — no JSONL export needed, `ub-p1h` is not a prerequisite; `Recoverable` = an in-product repair exists; `Unsafe` = none does); plain `doctor` lists the planned repairs and exits 0 on `Healthy`/`Drifted`, 2 on `Recoverable`/`Unsafe`, from ONE `integrity_check`; `doctor --repair` runs file and sidecar repairs in a pre-open exclusive window that refuses unless it proves no other connection holds the database, and `REINDEX`, child-counter, `metadata` and export repairs online through `Session::recover()`, after evidence under `.unblock/.recovery/`; plain `doctor` opens the database read-only without migrating and writes nothing; a LOST database (absent or empty while the D31 `.write.lock` marker exists) is refused (`DATABASE_NOT_FOUND`) instead of recreated — its recovery is plain `unblock init`, whose database-only mode creates only the database under the configured `db_filename` (refusing while an orphan `-wal`/`-shm`/`-journal` remains) — while a fresh clone without the marker is created as before. CLI only, local mode only, contract unchanged (`unblock.mcp.v1.12`). | health, engine, cli, storage, config, sync |
+| FR-20 (SDK) | **[D59]** The MCP SDK moves from rmcp 1.7.0 to 3.10.0 (RUSTSEC-2026-0462), with the semver-compatible `quinn-udp` 0.5.16 (RUSTSEC-2026-0538) and `rustix` 1.1.6 (RUSTSEC-2026-0486) lock bumps. Specified by PRD §4 D59 (`ub-9ov`, implementation-plan T4.4): the server serves BOTH MCP lifecycles, `initialize` (answers unchanged) and the stateless 2026-07-28 one with `server/discover`; the wire converges on rmcp 3 except D54, which is KEPT; the D47 arm and the CD-4 clamp are RETIRED; the D50 gate drops only non-Request frames; `params.task` is ignored and unmeasured while `inputResponses`/`requestState` are measured; the tool `inputSchema` roots and the bundle lose `title`/`description`, so the contract bumps `unblock.mcp.v1.12` → `unblock.mcp.v1.13` (additive, RULED by Miguel in tracker comment 406; the four narrowings for clients that do not follow the MCP spec are documented client-visible behaviour, D59 clause (15)). The 16 MiB line bound stays out (`ub-o8s`). | mcp, cli (wire tests, `AGENTS.md` renderer, `instructions()`), fuzz |
 | FR-21 | Saved queries (named reusable `list` filter sets) | policy, storage, engine, mcp |
 | FR-22 | Audit / flight recorder: append-only `interactions.jsonl`, Tier-1 attribution (capture-only) | engine, sync, mcp |
 | FR-23 | Shell completions (bash/zsh/fish/powershell/elvish) | cli |
@@ -558,7 +572,7 @@ DB config layer's writer is the `issue` action `config`; `unblock-storage` takes
 three trait methods, and `unblock-sync` only forwards them in its three test doubles. **[D58]** FR-16 full adds NO MCP surface
 (`doctor --repair` is a CLI flag, D3): `unblock-storage` takes two trait methods (`health_facts`, `repair`) and four
 local-file primitives, `unblock-health` becomes a pure classifier over engine-gathered facts, `unblock-config` refuses a
-LOST database and gives `no_db` its reader, `unblock-cli`'s `init` gains a database-only mode, and `unblock-sync`'s scanner gets its health consumer.
+LOST database and gives `no_db` its reader, `unblock-cli`'s `init` gains a database-only mode, and `unblock-sync`'s scanner gets its health consumer. **[D59]** The rmcp 3.10 move (`ub-9ov`) touches `unblock-mcp` (code), `unblock-cli` (wire tests, the D40 closed-stdout exit, the managed-block renderer in `src/commands/agents.rs` with the regenerated `AGENTS.md` and `init_agents` snapshot, and the cancel sentence in `src/commands/mcp.rs` `instructions()`) and `unblock-fuzz` (the oracle's types), and adds no tool, because the MCP 2026-07-28 lifecycle and `server/discover` are rmcp's and serve the same eight tools.
 
 ---
 

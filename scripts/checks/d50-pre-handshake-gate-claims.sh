@@ -74,6 +74,18 @@
 # classification. D50 rests on a decorator that is either installed or not, which `Q1` reads directly
 # off the composition line, and on dispositions its cells assert frame by frame.
 #
+# [D59] NOTE (PRD §4 D59 clauses (10), (11) and (19)). On rmcp 3.10 the gate PASSES every premature
+# Request (rmcp answers it itself) and keeps DROPPING the other three shapes; the clamp above it is
+# RETIRED. D59's IMPLEMENTATION commit re-anchors Q1 on the clamp-free composition line and RETIRES or
+# RE-POINTS Q8 (the reply constant), Q9 (the answered-Request cell), Q18 (the untypeable-initialize
+# cell) and Q20 (the D47-frame composition cell, re-pointed to d54's existing Q21 cell), each with its
+# one-line reason here, in the commit that changes the line it pins. Q19 (the failed-reply-write cell)
+# RE-POINTS to D59 criterion (t)'s closed-stdout cells: the gate no longer writes, rmcp answers the
+# premature request, and a reply write that fails on a closed stdout exits 0 through D40's path, which
+# D59 clause (13) KEEPS for all six pre-lifecycle sends (Miguel's ruling, tracker comment 411). Every
+# successor lands in the SAME implementation commit as the row change, (t)'s cells included, so no row
+# here is red on any commit. Until then they pin shipped code.
+#
 # Exit: 0 = pass · 1 = BLOCK (a required landing is missing) · 2 = cannot evaluate (fail-closed).
 set -u
 
@@ -86,16 +98,16 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; e
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
 # The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
-# the day a D59 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# the day a D60 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
 # goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
 # five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves, the
-# prose range `(D1..D58)` and the tokenizer's regex ALTERNATION `\bD(58|57|56|55|…)\b`. Pinning only the
-# prose is exactly how that site rots into an undefined-D59 finding — the lint would stop tokenizing
+# prose range `(D1..D59)` and the tokenizer's regex ALTERNATION `\bD(59|58|57|56|…)\b`. Pinning only the
+# prose is exactly how that site rots into an undefined-D60 finding — the lint would stop tokenizing
 # the id it is being told exists.
-RANGE_RE='D1\.\.D58'
-RANGE_ALT_RE='D\(58\|57\|'
+RANGE_RE='D1\.\.D59'
+RANGE_ALT_RE='D\(59\|58\|'
 
 # The LIVE published contract version. D50 does NOT move it (see the header), so this row is the
 # affirmative record of that and a silent bump riding this decision goes red. It tracks the LIVE id,
@@ -217,7 +229,7 @@ P7@.unblock/issues.jsonl@\"id\":\"ub-wx3\"@sibling residual, unmoved by D50 — 
 #      this filename with `RANGE_RE`, and requires the `RANGE_ALT_RE` half beside it. A bare token was
 #      satisfied by §3's other mention of this script (the NEWEST pointer, until D53's gate took it),
 #      so dropping the entry left it green — MEASURED then. Anchoring on the entry rather than on
-#      the list's last line keeps the row correct the day a D59 entry is appended after it.
+#      the list's last line keeps the row correct the day a D60 entry is appended after it.
 # Q44  is the `d48` HALF of the SIBLING ROW TEXT clause (14) corrects, and it is the only executable
 #      pin that clause has. `d48`'s `P9` reason string said the premature frame still kills the
 #      server, which this decision makes false; nothing else in the tree would notice a later edit
