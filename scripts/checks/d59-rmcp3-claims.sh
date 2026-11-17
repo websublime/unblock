@@ -181,7 +181,8 @@ N10@.cargo@$DEPRECATED_FLAG_RE@NEGATIVE: no cargo configuration under .cargo/ pa
 #      standard lists, the gate's pass-through and stateless predicate, the clamp-free composition, the
 #      RequestMetaObject quota, get_info's ServerConfig, the io::ErrorKind disconnect predicate, the
 #      criterion-(s) AGENTS.md/instructions()/README landings and the cells the implementation commit
-#      lands. P3..P7 and N11..N14 pin the lockfile by registry checksum (a version string sits on a line
+#      lands. Q271..Q290 (TEST commit) the cells criteria (e)-(m) and (s) add, the hold seam and the
+#      returned signal. P3..P7 and N11..N14 pin the lockfile by registry checksum (a version string sits on a line
 #      of its own and cannot be row-anchored to its package); N15..N18 are criteria (d), (g) and (h).
 # =================================================================================================
 REQUIRE_ROW="
@@ -460,6 +461,29 @@ Q267@crates/unblock-mcp/tests/protocol_version.rs@^fn known_versions_latest@fn k
 Q268@crates/unblock-cli/tests/error_channel.rs@^fn a_task_param_is_ignored@fn a_task_param_is_ignored_and_the_call_runs\\(\\)@criterion (i): the inverted params.task cell
 Q269@crates/unblock-cli/tests/mcp_lifecycle.rs@^fn a_closed_stdout_before_either_lifecycle@fn a_closed_stdout_before_either_lifecycle_exits_0\\(\\)@criterion (t): the closed-stdout real-binary cell
 Q270@crates/unblock-mcp/src/error.rs@^ +fn the_disconnect_predicate_keys_on_the_error_kind@fn the_disconnect_predicate_keys_on_the_error_kind_never_on_the_context\\(\\)@criterion (t): the context-independence pair
+Q271@crates/unblock-mcp/tests/lifecycle_2026.rs@^ *(pub )?(async )?fn a_first_frame_server_discover_is_answered_and_initialize_still_completes\\(@fn a_first_frame_server_discover_is_answered_and_initialize_still_completes\\(@criterion (f2): a first-frame server/discover gets the DiscoverResult and initialize still completes
+Q272@crates/unblock-mcp/tests/lifecycle_2026.rs@^ *(pub )?(async )?fn a_first_frame_stateless_tools_call_starts_the_2026_session\\(@fn a_first_frame_stateless_tools_call_starts_the_2026_session\\(@criterion (f3): a complete-_meta first request starts the stateless 2026-07-28 session
+Q273@crates/unblock-mcp/tests/lifecycle_2026.rs@^ *(pub )?(async )?fn an_unsupported_inline_version_gets_32022_and_leaves_the_latch_shut\\(@fn an_unsupported_inline_version_gets_32022_and_leaves_the_latch_shut\\(@criteria (f4) and (g): an unsupported inline version gets -32022 and the latch stays shut
+Q274@crates/unblock-mcp/tests/lifecycle_2026.rs@^ *(pub )?(async )?fn a_premature_request_without_meta_gets_32602_and_the_handshake_completes\\(@fn a_premature_request_without_meta_gets_32602_and_the_handshake_completes\\(@criterion (g): a premature Request is answered -32602 by rmcp and the handshake completes
+Q275@crates/unblock-mcp/tests/lifecycle_2026.rs@^ *(pub )?(async )?fn a_cancelled_write_commits_and_gets_no_reply\\(@fn a_cancelled_write_commits_and_gets_no_reply\\(@criterion (m): a cancelled write held in its storage write commits and gets no reply, on the returned signal plus the EOF drain
+Q276@crates/unblock-mcp/src/server.rs@^ *(pub )?(async )?fn the_gate_predicate_agrees_with_rmcps_pre_lifecycle_loop\\(@fn the_gate_predicate_agrees_with_rmcps_pre_lifecycle_loop\\(@criterion (g): the gate predicate differential against rmcp 3.10s pre-lifecycle loop
+Q277@crates/unblock-mcp/src/server.rs@^ *(pub )?(async )?fn mcp_server_duplex_with_returned_signal_for_test<@fn mcp_server_duplex_with_returned_signal_for_test<R, W>\\(@criterion (17): the held-handler-returned signal seam
+Q278@crates/unblock-mcp/tests/common/mod.rs@^ *(pub )?(async )?fn session_create_gated\\(@fn session_create_gated\\(@criterion (17): the hold inside the storage write
+Q279@crates/unblock-mcp/src/pre_handshake.rs@^ *(pub )?(async )?fn a_stateless_session_start_opens_the_latch\\(@fn a_stateless_session_start_opens_the_latch\\(@criterion (g): a stateless start opens the latch, so a later cancellation reaches rmcp
+Q280@crates/unblock-mcp/src/pre_handshake.rs@^ *(pub )?(async )?fn an_unsupported_inline_version_leaves_the_latch_shut\\(@fn an_unsupported_inline_version_leaves_the_latch_shut\\(@criterion (g): an unsupported inline version leaves the latch shut
+Q281@crates/unblock-mcp/src/pre_handshake.rs@^ *(pub )?(async )?fn a_server_discover_leaves_the_latch_shut\\(@fn a_server_discover_leaves_the_latch_shut\\(@criterion (g): server/discover leaves the latch shut
+Q282@crates/unblock-cli/src/commands/agents.rs@^ *(pub )?(async )?fn managed_block_documents_the_client_visible_behaviour\\(@fn managed_block_documents_the_client_visible_behaviour\\(@criterion (s): the renderer unit cell
+Q283@crates/unblock-cli/src/commands/mcp.rs@^ *(pub )?(async )?fn instructions_carry_the_cancel_sentence\\(@fn instructions_carry_the_cancel_sentence\\(@criterion (s): the instructions() cell
+Q284@crates/unblock-cli/tests/error_channel.rs@^ *(pub )?(async )?fn oversized_mrtr_members_are_measured_by_the_quota\\(@fn oversized_mrtr_members_are_measured_by_the_quota\\(@criterion (i): the 300 KiB requestState and object inputResponses are measured
+Q285@crates/unblock-cli/tests/error_channel.rs@^ *(pub )?(async )?fn wrongly_typed_mrtr_members_get_32601_and_null_runs\\(@fn wrongly_typed_mrtr_members_get_32601_and_null_runs\\(@criterion (i): the wrongly typed MRTR -32601 and the null-runs cells
+Q286@crates/unblock-cli/tests/error_channel.rs@^ *(pub )?(async )?fn meta_protocol_versions_get_rmcps_out_of_band_errors\\(@fn meta_protocol_versions_get_rmcps_out_of_band_errors\\(@criterion (j): the _meta out-of-band cells
+Q287@crates/unblock-cli/tests/mcp_lifecycle.rs@^ *(pub )?(async )?fn an_unterminated_final_tools_call_at_eof_is_dropped\\(@fn an_unterminated_final_tools_call_at_eof_is_dropped\\(@criterion (l): the real-binary EOF drop
+Q288@crates/unblock-mcp/tests/contract_suite.rs@^ *(pub )?(async )?fn input_roots_carry_no_title_or_description_and_outputs_keep_theirs\\(@fn input_roots_carry_no_title_or_description_and_outputs_keep_theirs\\(@criterion (k): the root-annotation cell
+Q289@crates/unblock-mcp/tests/envelope_id_duplex.rs@^ *(pub )?(async )?fn float_ids_run_and_unreadable_floats_get_rule_gamma\\(@fn float_ids_run_and_unreadable_floats_get_rule_gamma\\(@criterion (e): float ids run, unreadable floats get rule (γ)
+Q290@crates/unblock-mcp/tests/envelope_id_duplex.rs@^ *(pub )?(async )?fn a_cancelled_notification_with_an_id_is_a_request_and_cancels_nothing\\(@fn a_cancelled_notification_with_an_id_is_a_request_and_cancels_nothing\\(@criterion (e): an id-carrying notifications/cancelled gets -32601 and cancels nothing
+Q296@crates/unblock-mcp/tests/lifecycle_2026.rs@^ *(pub )?(async )?fn a_cancellation_after_a_stateless_start_reaches_rmcp\\(@fn a_cancellation_after_a_stateless_start_reaches_rmcp\\(@criterion (g): a cancellation after a stateless start reaches rmcp (hold seam, returned signal, EOF drain)
+Q297@crates/unblock-cli/tests/mcp_lifecycle.rs@^ *(pub )?(async )?fn initialize_answers_every_version_with_the_pre_d59_bytes\\(@fn initialize_answers_every_version_with_the_pre_d59_bytes\\(@criterion (f1) over the real binary: the seven answers, the pre-D59 bytes, a legacy tools/list and ping
+Q298@crates/unblock-cli/tests/mcp_lifecycle.rs@^ *(pub )?(async )?fn a_stateless_first_request_over_stdio_starts_the_2026_session\\(@fn a_stateless_first_request_over_stdio_starts_the_2026_session\\(@criterion (f3) over the real binary: the stateless lifecycle
 "
 
 blocked=0
@@ -544,7 +568,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 8 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 20 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 275 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 298 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D59 row and its reciprocal notes on D2, D25, D27, D38, D40, D42, D43, D47, D48, D49, D50, D53 and D54, FR-20, NFR-18 and PRD §9/§10/§13/RK-2, the spine's rmcp 3.10 notes and D59 ledger entry, the crate plans, both roadmaps and the T4.4 task are in the tree; no advisory is ignored and no deprecation is allowed; the contract knobs agree with the code constant; the tracker names ub-9ov and ub-o8s; the live range sits at every prose site and every SIBLING script's knob — including d58's two — and every newest-pointer row names this gate."

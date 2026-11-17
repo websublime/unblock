@@ -333,6 +333,17 @@ impl RawDuplexClient {
         .await
     }
 
+    /// Close the client's write half: the server reads EOF (D59 criterion (17)'s drain step).
+    pub async fn close_write(&mut self) {
+        use tokio::io::AsyncWriteExt as _;
+        let _ = self.writer.shutdown().await;
+    }
+
+    /// Hand back the buffered read half, to read whatever the server still writes up to EOF.
+    pub fn into_reader(self) -> tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>> {
+        self.reader
+    }
+
     /// Was a response with `id` ever observed? (The deterministic, timeout-free "no response at
     /// all" probe: send the frame, then a known-good SENTINEL request, read the sentinel, then ask
     /// this.)
@@ -352,7 +363,7 @@ impl RawDuplexClient {
     }
 
     /// Drive the `initialize` handshake by hand.
-    async fn initialize(&mut self) -> Value {
+    pub async fn initialize(&mut self) -> Value {
         let id = self.next_request_id();
         let frame = serde_json::json!({
             "jsonrpc": "2.0",
@@ -849,6 +860,41 @@ pub async fn session_gated(n: usize) -> (Arc<Session>, gated::Gate) {
     (session, gate)
 }
 
+/// The titles of every issue, read over the raw client with `query list`.
+pub async fn store_titles(client: &mut RawDuplexClient) -> Vec<String> {
+    let listed = client
+        .call_tool("query", serde_json::json!({"kind": "list"}))
+        .await;
+    listed["result"]["structuredContent"]["issues"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i["title"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Build an `Arc<Session>` whose `create_issue` BLOCKS inside the storage write on a one-party
+/// [`gated::Gate`] until the test releases it — PRD §4 D59 criterion (17)'s deterministic hold seam
+/// "inside the storage write". `list_issues` is NOT gated on this double.
+pub async fn session_create_gated() -> (Arc<Session>, gated::Gate) {
+    let inner = LibsqlStorage::open_in_memory()
+        .await
+        .expect("open in-memory");
+    inner.migrate().await.expect("migrate");
+    let inner: Arc<dyn Storage> = Arc::new(inner);
+    let gate = gated::Gate::new(1);
+    let storage: Arc<dyn Storage> =
+        Arc::new(gated::GateStorage::new_create_gate(inner, gate.clone()));
+    let ctx = tester_ctx(storage);
+    let session = Arc::new(
+        Session::open(ctx, SessionConfig::default())
+            .await
+            .expect("open session"),
+    );
+    (session, gate)
+}
+
 /// A `Storage` decorator that BLOCKS every `list_issues` call in-flight on a shared [`gated::Gate`]
 /// (a REAL barrier/semaphore handoff — never a `sleep`) so the NFR-18 rate-limit AC can hold exactly
 /// N reads occupying N permits simultaneously, then prove the (N+1)th is rejected. Every other call
@@ -907,13 +953,29 @@ pub mod gated {
     pub struct GateStorage {
         inner: Arc<dyn Storage>,
         gate: Gate,
+        /// `true` gates `create_issue` (the D59 write hold) instead of `list_issues`.
+        gate_creates: bool,
     }
 
     impl GateStorage {
         /// Wrap `inner`, gating `list_issues` on `gate`.
         #[must_use]
         pub fn new(inner: Arc<dyn Storage>, gate: Gate) -> Self {
-            Self { inner, gate }
+            Self {
+                inner,
+                gate,
+                gate_creates: false,
+            }
+        }
+
+        /// Wrap `inner`, gating `create_issue` (inside the storage write) on `gate` instead.
+        #[must_use]
+        pub fn new_create_gate(inner: Arc<dyn Storage>, gate: Gate) -> Self {
+            Self {
+                inner,
+                gate,
+                gate_creates: true,
+            }
         }
     }
 
@@ -923,8 +985,10 @@ pub mod gated {
             // Signal "in-flight" (this call now holds a rate-limit permit), then block until the test
             // releases us (the barrier's `n + 1`th party) — so all `n` permits stay held while the
             // test fires the over-cap `(n + 1)`th call.
-            self.gate.entered.add_permits(1);
-            self.gate.release.wait().await;
+            if !self.gate_creates {
+                self.gate.entered.add_permits(1);
+                self.gate.release.wait().await;
+            }
             self.inner.list_issues(filters).await
         }
 
@@ -944,6 +1008,11 @@ pub mod gated {
             self.inner.acquire_write_lock().await
         }
         async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError> {
+            if self.gate_creates {
+                // D59 criterion (17): park INSIDE the storage write until the test releases it.
+                self.gate.entered.add_permits(1);
+                self.gate.release.wait().await;
+            }
             self.inner.create_issue(issue, actor).await
         }
         async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError> {

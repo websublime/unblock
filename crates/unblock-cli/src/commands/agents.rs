@@ -587,4 +587,32 @@ mod tests {
             "the hand-written bytes are untouched"
         );
     }
+
+    /// **D59 criterion (s)** — the managed block carries the `### MCP client-visible behaviour`
+    /// heading AFTER the error-code table, with clause (15)'s six lines verbatim; the cancelled-
+    /// request line ends with the re-read duty (ruling 406).
+    #[test]
+    fn managed_block_documents_the_client_visible_behaviour() {
+        let block = managed_block(&unblock_mcp::agents_digest());
+        let heading = block
+            .find("### MCP client-visible behaviour")
+            .expect("the client-visible-behaviour heading is rendered");
+        assert!(
+            heading > block.find("### Error codes").expect("error codes"),
+            "the section follows the four tables"
+        );
+        for line in [
+            "- A request whose _meta names an unsupported io.modelcontextprotocol/protocolVersion gets the JSON-RPC error -32022 and does not run.",
+            "- A final line without a terminating newline at end of input is dropped and does not run.",
+            "- A cancelled request gets no reply, and a write it started may still have happened; the client must re-read the state before acting on it.",
+            "- A tool's inputSchema root carries no title and no description.",
+            "- A tools/call whose inputResponses is present and neither null nor an object, or whose requestState is present and neither null nor a string, gets the JSON-RPC error -32601 and does not run.",
+            "- A request that reuses the id of a request still in flight may get no reply; 1 and 1.0 are the same id.",
+        ] {
+            assert!(
+                block[heading..].lines().any(|l| l == line),
+                "missing verbatim line: {line}"
+            );
+        }
+    }
 }

@@ -864,3 +864,47 @@ async fn live_tools_input_schema_body_equals_the_bundle() {
     let _ = client.cancel().await;
     let _ = server.cancel().await;
 }
+
+/// **D59 criterion (k)** — no root of the eight LIVE `inputSchema`s and of the eight bundle `input`
+/// schemas carries `title` or `description` (rmcp 3.10's `schema_for_input`), while the eight bundle
+/// `output` roots keep their `title`. Mutant: a bundle that stops following the live strip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_roots_carry_no_title_or_description_and_outputs_keep_theirs() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+    let tools = client.list_all_tools().await.expect("list_tools");
+    assert_eq!(tools.len(), 8);
+    for tool in &tools {
+        for key in ["title", "description"] {
+            assert!(
+                !tool.input_schema.contains_key(key),
+                "live `{}` inputSchema root carries `{key}`",
+                tool.name
+            );
+        }
+    }
+    let bundle = serde_json::to_value(schema_bundle()).expect("bundle");
+    for name in [
+        "issue",
+        "claim",
+        "defer",
+        "query",
+        "dep",
+        "sync",
+        "diagnostics",
+        "comment",
+    ] {
+        for key in ["title", "description"] {
+            assert!(
+                bundle[name]["input"].get(key).is_none(),
+                "bundle `{name}` input root carries `{key}`"
+            );
+        }
+        assert!(
+            bundle[name]["output"].get("title").is_some(),
+            "bundle `{name}` output root keeps its title"
+        );
+    }
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}

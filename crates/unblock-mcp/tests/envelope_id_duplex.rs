@@ -126,3 +126,98 @@ async fn the_arm_is_installed_on_the_real_serve_path() {
         "neither candidate id may be answered on — the bytes are ambiguous, so the id is OMITTED"
     );
 }
+
+/// **D59 criterion (e)** — a `tools/call` `issue create` with `"id":1.0`, and again with `"id":1e2`,
+/// each creates exactly one issue and is answered on `1` and `100`; with `"id":1.5` or
+/// `"id":9007199254740992.0` it creates nothing and gets rule (γ)'s id-less `-32600`.
+/// Mutant: a fork that refuses float-form ids (nothing created) or that answers them id-less.
+#[tokio::test]
+async fn float_ids_run_and_unreadable_floats_get_rule_gamma() {
+    let session = common::session().await;
+    let (mut client, _server, _cancel) = common::connect_raw(session, Quotas::default()).await;
+    let create = |id: &str, title: &str| {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"issue","arguments":{{"action":"create","title":"{title}"}}}}}}"#
+        )
+    };
+    let one = client.request_raw(1, &create("1.0", "float-one")).await;
+    assert_ne!(one["result"]["isError"], true, "{one}");
+    let hundred = client
+        .request_raw(100, &create("1e2", "float-hundred"))
+        .await;
+    assert_ne!(hundred["result"]["isError"], true, "{hundred}");
+
+    for id in ["1.5", "9007199254740992.0"] {
+        client.write_raw_line(&create(id, "never")).await;
+    }
+    let sentinel = client.next_request_id();
+    let pong = client
+        .request_raw(
+            sentinel,
+            &format!(r#"{{"jsonrpc":"2.0","id":{sentinel},"method":"ping"}}"#),
+        )
+        .await;
+    assert!(pong.get("result").is_some());
+    let gamma = client
+        .seen_lines
+        .iter()
+        .filter(|l| {
+            l.as_str() == r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid request"}}"#
+        })
+        .count();
+    assert_eq!(
+        gamma, 2,
+        "both unreadable floats get rule (γ): {:?}",
+        client.seen_lines
+    );
+    let titles = common::store_titles(&mut client).await;
+    for title in ["float-one", "float-hundred"] {
+        assert_eq!(
+            titles.iter().filter(|t| *t == title).count(),
+            1,
+            "EXACTLY one issue per float id ({title}): {titles:?}"
+        );
+    }
+    assert!(!titles.contains(&"never".to_string()), "{titles:?}");
+}
+
+/// **D59 criterion (e)** — a `notifications/cancelled` carrying `"id":7` is a REQUEST on rmcp 3.10: it
+/// gets `-32601` on id 7 and cancels nothing — an in-flight request it names, held inside its storage
+/// write and released after that `-32601` arrives, still gets its response.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_notification_with_an_id_is_a_request_and_cancels_nothing() {
+    let (session, gate) = common::session_create_gated().await;
+    let (server_io, client_io) = tokio::io::duplex(1024 * 1024);
+    let (server_read, server_write) = tokio::io::split(server_io);
+    tokio::spawn(async move {
+        // A started lifecycle returns the RunningService; keep it alive (its drop cancels the server).
+        if let Ok(running) = unblock_mcp::mcp_server_duplex_for_test(
+            session,
+            Quotas::default(),
+            None,
+            server_read,
+            server_write,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        {
+            let _ = running.waiting().await;
+        }
+    });
+    let mut client = common::raw_client(client_io);
+    client.initialize().await;
+    client
+        .write_raw_line(r#"{"jsonrpc":"2.0","id":55,"method":"tools/call","params":{"name":"issue","arguments":{"action":"create","title":"held"}}}"#)
+        .await;
+    gate.await_all_entered(1).await;
+    let refused = client
+        .request_raw(7, r#"{"jsonrpc":"2.0","id":7,"method":"notifications/cancelled","params":{"requestId":55}}"#)
+        .await;
+    assert_eq!(refused["error"]["code"], -32601, "{refused}");
+    gate.release().await;
+    let held = client.read_response(55).await;
+    assert_ne!(
+        held["result"]["isError"], true,
+        "the named request still gets its response: {held}"
+    );
+}

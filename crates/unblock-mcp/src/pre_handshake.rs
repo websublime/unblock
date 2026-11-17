@@ -657,4 +657,53 @@ mod tests {
             log(&written)
         );
     }
+
+    /// The complete 2026-07-28 `_meta` on a `tools/list`, at `version`.
+    fn stateless(id: i64, version: &str) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/list","params":{{"_meta":{{"io.modelcontextprotocol/protocolVersion":"{version}","io.modelcontextprotocol/clientCapabilities":{{}}}}}}}}"#
+        )
+    }
+
+    /// **(g) — the latch opens on a STATELESS start**, so a `notifications/cancelled` after it reaches
+    /// rmcp. A latch that opened only on `InitializeResult` drops that notification and turns this red.
+    #[tokio::test]
+    async fn a_stateless_session_start_opens_the_latch() {
+        let start = stateless(1, "2026-07-28");
+        let (mut gate, written) = gate(&[&start, CANCELLED]);
+        assert!(matches!(
+            gate.receive()
+                .await
+                .expect("the session start reaches rmcp"),
+            JsonRpcMessage::Request(_)
+        ));
+        assert!(
+            matches!(
+                gate.receive().await.expect("the cancellation is delivered"),
+                JsonRpcMessage::Notification(_)
+            ),
+            "after a stateless start every notification reaches rmcp's serve loop"
+        );
+        assert!(log(&written).is_empty());
+    }
+
+    /// **(g) — an UNSUPPORTED inline version leaves the latch shut**: rmcp answers it `-32022` and
+    /// stays before either lifecycle, so the notification behind it is still dropped.
+    #[tokio::test]
+    async fn an_unsupported_inline_version_leaves_the_latch_shut() {
+        let refused = stateless(1, "2030-01-01");
+        let (mut gate, _written) = gate(&[&refused, CANCELLED, INITIALIZE]);
+        gate.receive().await.expect("the request reaches rmcp");
+        assert_is_initialize(&gate.receive().await.expect("the notification is dropped"));
+    }
+
+    /// **(g) — `server/discover` with complete `_meta` leaves the latch shut**: rmcp answers it and
+    /// stays open to either lifecycle.
+    #[tokio::test]
+    async fn a_server_discover_leaves_the_latch_shut() {
+        let discover = r#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+        let (mut gate, _written) = gate(&[discover, CANCELLED, INITIALIZE]);
+        gate.receive().await.expect("discover reaches rmcp");
+        assert_is_initialize(&gate.receive().await.expect("the notification is dropped"));
+    }
 }

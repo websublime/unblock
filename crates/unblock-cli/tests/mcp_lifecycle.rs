@@ -1226,3 +1226,129 @@ fn a_pre_handshake_client_disconnect_records_the_disconnect_at_debug_level() {
         "even at -vv it is a debug record, NOT an `error[CODE]` line. Child stderr:\n{stderr}"
     );
 }
+
+/// **D59 criterion (l)** — a complete `tools/call` `issue create` written with NO terminating newline
+/// and followed by EOF is DROPPED: it creates nothing, writes no byte, and the process exits 0.
+///
+/// Mutant: the EOF arm processing the unterminated final line (the pre-D59 shape) — the issue
+/// appears in the store.
+#[test]
+fn an_unterminated_final_tools_call_at_eof_is_dropped() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+    client.initialize();
+    let lines_before = client.seen_lines.len();
+    client.capture_stdout();
+    client.write_without_newline(
+        r#"{"jsonrpc":"2.0","id":4242,"method":"tools/call","params":{"name":"issue","arguments":{"action":"create","title":"unterminated"}}}"#,
+    );
+    client.close_stdin();
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(status.code(), Some(0), "{}", client.stderr_snapshot());
+    assert_eq!(client.seen_lines.len(), lines_before);
+    assert!(
+        client.stdout_snapshot().trim().is_empty(),
+        "no byte is written for the dropped line: {}",
+        client.stdout_snapshot()
+    );
+
+    let mut reader = McpClient::spawn(ws.root());
+    reader.initialize();
+    let (_, listed) = reader.call_tool("query", &json!({"kind":"list"}));
+    assert!(
+        id_set(&listed).is_empty(),
+        "the unterminated create executed nothing: {listed}"
+    );
+}
+
+/// **D59 criterion (f1), over the real binary's stdio** — `initialize` naming each of the four
+/// handshake versions is answered with that version, and naming 2026-07-28, `1999-01-01` or
+/// `2099-01-01` with 2025-11-25; the `capabilities` and `serverInfo` bytes equal the pre-D59 answer;
+/// that session's `tools/list` carries no `resultType`, `ttlMs` or `cacheScope`, and `ping` answers
+/// `{}`. Mutant: a negotiation that echoes an unsupported version, or a legacy session served on
+/// 2026-07-28 semantics.
+#[test]
+fn initialize_answers_every_version_with_the_pre_d59_bytes() {
+    let ws = Workspace::init();
+    for (requested, answered) in [
+        ("2024-11-05", "2024-11-05"),
+        ("2025-03-26", "2025-03-26"),
+        ("2025-06-18", "2025-06-18"),
+        ("2025-11-25", "2025-11-25"),
+        ("2026-07-28", "2025-11-25"),
+        ("1999-01-01", "2025-11-25"),
+        ("2099-01-01", "2025-11-25"),
+    ] {
+        let mut client = McpClient::spawn(ws.root());
+        let response = client.request(
+            "initialize",
+            &json!({
+                "protocolVersion": requested,
+                "capabilities": {},
+                "clientInfo": {"name": "unblock-cli-test", "version": "0.0.0"}
+            }),
+        );
+        let result = &response["result"];
+        assert_eq!(
+            result["protocolVersion"], answered,
+            "{requested}: {response}"
+        );
+        assert_eq!(
+            serde_json::to_string(&result["capabilities"]).expect("json"),
+            r#"{"prompts":{},"resources":{},"tools":{}}"#,
+            "{requested}: the capabilities bytes are the pre-D59 answer"
+        );
+        assert_eq!(
+            serde_json::to_string(&result["serverInfo"]).expect("json"),
+            format!(
+                r#"{{"name":"unblock","version":"{}"}}"#,
+                env!("CARGO_PKG_VERSION")
+            ),
+            "{requested}: the serverInfo bytes are the pre-D59 answer"
+        );
+        client.notify("notifications/initialized", &json!({}));
+
+        let listed = client.request("tools/list", &json!({}));
+        for key in ["resultType", "ttlMs", "cacheScope"] {
+            assert!(
+                listed["result"].get(key).is_none(),
+                "{requested}: a legacy session's tools/list carries no {key}: {listed}"
+            );
+        }
+        let pong = client.request("ping", &json!({}));
+        assert_eq!(pong["result"], json!({}), "{requested}: ping answers {{}}");
+        client.close_stdin();
+        let status = client.wait_for(Duration::from_secs(20));
+        assert_eq!(status.code(), Some(0), "{}", client.stderr_snapshot());
+    }
+}
+
+/// **D59 criterion (f3), over the real binary's stdio** — a FIRST-frame `tools/call` carrying complete
+/// 2026-07-28 `_meta` starts the stateless session and executes with `"resultType":"complete"`; a
+/// later request without `_meta` gets out-of-band `-32602`. Mutant: a gate that answers or drops the
+/// first Request, or a latch that never opens on the stateless edge.
+#[test]
+fn a_stateless_first_request_over_stdio_starts_the_2026_session() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    let created = client.request(
+        "tools/call",
+        &json!({"name": "issue", "arguments": {"action": "create", "title": "stdio-stateless"}, "_meta": meta}),
+    );
+    assert_eq!(created["result"]["resultType"], "complete", "{created}");
+    assert_ne!(created["result"]["isError"], true, "{created}");
+    let bare = client.request("tools/list", &json!({}));
+    assert_eq!(bare["error"]["code"], -32602, "{bare}");
+    let listed = client.request("tools/list", &json!({"_meta": meta}));
+    assert!(
+        listed["result"].get("ttlMs").is_some() && listed["result"].get("cacheScope").is_some(),
+        "{listed}"
+    );
+    client.close_stdin();
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(status.code(), Some(0), "{}", client.stderr_snapshot());
+}

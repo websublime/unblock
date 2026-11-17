@@ -439,3 +439,104 @@ fn a_task_param_is_ignored_and_the_call_runs() {
     );
     assert_eq!(resp["result"], plain["result"]);
 }
+
+// --- D59 criteria (i) and (j): the MRTR members and the `_meta` protocol-version keys ------------
+
+/// Count the issues a fresh `query list` returns.
+fn issue_count(c: &mut McpClient) -> usize {
+    common::id_set(&c.call_tool("query", &json!({"kind":"list"})).1).len()
+}
+
+/// **(i)** A 300 KiB `requestState` (a string) and a 300 KiB `inputResponses` sent as an OBJECT are
+/// MEASURED by the D42 quota (D59 clause (4)): each fails in-band `VALIDATION_FAILED` with zero
+/// writes. Mutant: a quota that measures `name` + `arguments` + `_meta` only.
+#[test]
+fn oversized_mrtr_members_are_measured_by_the_quota() {
+    let ws = Workspace::init();
+    let mut c = client(&ws);
+    let big = "s".repeat(300 * 1024);
+    let create = json!({"action":"create","title":"quota-target"});
+    for (cell, extra) in [
+        ("requestState", json!({"requestState": big})),
+        ("inputResponses", json!({"inputResponses": {"r1": big}})),
+    ] {
+        let mut params = json!({"name": "issue", "arguments": create});
+        params[cell] = extra[cell].clone();
+        let resp = c.call_tool_raw_params(&params);
+        assert_in_band_validation_failure(&resp, cell);
+    }
+    assert_eq!(issue_count(&mut c), 0, "zero writes");
+}
+
+/// **(i)** A wrongly typed MRTR member (`inputResponses` an array, `requestState` a number) fails the
+/// typed decode and falls back to rmcp's `CustomRequest`, which answers out-of-band `-32601` on the
+/// id with zero writes; both `null` decode as absent and the call RUNS (D59 clause (4)).
+#[test]
+fn wrongly_typed_mrtr_members_get_32601_and_null_runs() {
+    let ws = Workspace::init();
+    let mut c = client(&ws);
+    let create = json!({"action":"create","title":"mrtr"});
+    for (cell, member, value) in [
+        ("inputResponses []", "inputResponses", json!([])),
+        ("requestState 7", "requestState", json!(7)),
+    ] {
+        let mut params = json!({"name": "issue", "arguments": create});
+        params[member] = value;
+        let resp = c.call_tool_raw_params(&params);
+        assert_eq!(resp["error"]["code"], -32601, "{cell}: {resp}");
+    }
+    assert_eq!(issue_count(&mut c), 0, "a -32601 executes nothing");
+
+    let resp = c.call_tool_raw_params(&json!({
+        "name": "issue", "arguments": create, "inputResponses": null, "requestState": null
+    }));
+    assert!(
+        resp.get("error").is_none() && resp["result"]["isError"] != true,
+        "null members decode as absent and the call runs: {resp}"
+    );
+    assert_eq!(issue_count(&mut c), 1);
+}
+
+/// **(j)** In an `initialize` session a `_meta` protocol version is read before any handler: an
+/// unsupported one gets out-of-band `-32022`, 2026-07-28 without `clientCapabilities` gets
+/// out-of-band `-32602` (both create nothing); 2025-11-25 runs in-band; 2026-07-28 WITH
+/// `clientCapabilities` runs on 2026-07-28 semantics for that request alone (`resultType`), and the
+/// next request without `_meta` carries none (D59 clause (5)). These two out-of-band members join
+/// the out-of-band faults listed above.
+#[test]
+fn meta_protocol_versions_get_rmcps_out_of_band_errors() {
+    let ws = Workspace::init();
+    let mut c = client(&ws);
+    let create = |title: &str| json!({"action":"create","title": title});
+    let pv = "io.modelcontextprotocol/protocolVersion";
+    let caps = "io.modelcontextprotocol/clientCapabilities";
+
+    let unsupported = c.call_tool_raw_params(&json!({
+        "name": "issue", "arguments": create("v1999"), "_meta": {pv: "1999-01-01"}
+    }));
+    assert_eq!(unsupported["error"]["code"], -32022, "{unsupported}");
+    let no_caps = c.call_tool_raw_params(&json!({
+        "name": "issue", "arguments": create("v2026-nocaps"), "_meta": {pv: "2026-07-28"}
+    }));
+    assert_eq!(no_caps["error"]["code"], -32602, "{no_caps}");
+    assert_eq!(issue_count(&mut c), 0, "neither out-of-band arm executes");
+
+    let legacy = c.call_tool_raw_params(&json!({
+        "name": "issue", "arguments": create("v2025"), "_meta": {pv: "2025-11-25"}
+    }));
+    assert!(
+        legacy.get("error").is_none() && legacy["result"]["isError"] != true,
+        "{legacy}"
+    );
+    assert_eq!(issue_count(&mut c), 1);
+
+    let modern = c.call_tool_raw_params(&json!({
+        "name": "issue", "arguments": create("v2026"), "_meta": {pv: "2026-07-28", caps: {}}
+    }));
+    assert_eq!(modern["result"]["resultType"], "complete", "{modern}");
+    let next = c.call_tool_raw_params(&json!({"name": "issue", "arguments": create("plain")}));
+    assert!(
+        next["result"].get("resultType").is_none(),
+        "the next request without _meta is legacy again: {next}"
+    );
+}

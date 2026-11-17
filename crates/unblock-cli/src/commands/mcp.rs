@@ -924,4 +924,25 @@ mod tests {
             "a genuine transport fault is NOT demoted"
         );
     }
+
+    /// **D59 criterion (s)** — `instructions()` carries clause (8)'s cancel sentence beside the
+    /// contract id, so an agent with no `AGENTS.md` learns the re-read duty from `initialize` and
+    /// `server/discover`.
+    #[test]
+    fn instructions_carry_the_cancel_sentence() {
+        const CANCEL_SENTENCE: &str = concat!(
+            "Cancelling a write request does not guarantee the write did not happen; ",
+            "the client must re-read the state before acting on it."
+        );
+        let text = instructions();
+        assert_eq!(
+            text,
+            format!(
+                "Connect to unblock over MCP stdio (contract {}). Issue-data verbs are MCP tools; \
+                 the CLI is lifecycle/ops only. {}",
+                unblock_mcp::CONTRACT_VERSION,
+                CANCEL_SENTENCE
+            )
+        );
+    }
 }
