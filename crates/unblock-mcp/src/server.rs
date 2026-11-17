@@ -820,4 +820,87 @@ mod tests {
         // A compile-witness that the server's quota type is constructible here.
         let _q = Quotas::default();
     }
+
+    /// **Criterion (g) — the gate's stateless edge agrees with rmcp 3.10's pre-lifecycle loop.**
+    ///
+    /// For every frame of a corpus naming each branch of D59 clause (11), the gate's verdict
+    /// ([`crate::pre_handshake::starts_the_stateless_lifecycle`]) is compared with what rmcp's OWN loop
+    /// does with that frame as the first one on the RAW serve path (no gate, no scan): the frame is
+    /// followed by an id-less notification, which rmcp's pre-lifecycle loop answers with
+    /// `ExpectedInitializeRequest` and a started session serves. A disagreement is the STOP condition
+    /// of T4.4 and turns this cell red.
+    #[tokio::test]
+    async fn the_gate_predicate_agrees_with_rmcps_pre_lifecycle_loop() {
+        use crate::pre_handshake::starts_the_stateless_lifecycle;
+        use rmcp::model::{ClientJsonRpcMessage, ProtocolVersion};
+
+        let full = r#"{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}"#;
+        let corpus = [
+            ("ping", r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.to_string()),
+            ("initialize", r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"d","version":"0"}}}"#.to_string()),
+            ("discover with meta", format!(r#"{{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{{"_meta":{full}}}}}"#)),
+            ("no meta", r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#.to_string()),
+            ("version only", r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#.to_string()),
+            ("caps only", r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#.to_string()),
+            ("complete 2026", format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{{"_meta":{full}}}}}"#)),
+            ("complete 2025-11-25", r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientCapabilities":{}}}}"#.to_string()),
+            ("unsupported 2030", r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2030-01-01","io.modelcontextprotocol/clientCapabilities":{}}}}"#.to_string()),
+            ("custom request, complete meta", format!(r#"{{"jsonrpc":"2.0","id":1,"method":"x/y","params":{{"_meta":{full}}}}}"#)),
+            ("numeric version", r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":7,"io.modelcontextprotocol/clientCapabilities":{}}}}"#.to_string()),
+        ];
+        let mut opened = 0;
+        for (label, frame) in corpus {
+            let message: ClientJsonRpcMessage =
+                serde_json::from_str(&frame).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let gate_opens =
+                starts_the_stateless_lifecycle(&message, ProtocolVersion::KNOWN_VERSIONS);
+
+            let (mut client, server_io) = tokio::io::duplex(64 * 1024);
+            client.write_all(frame.as_bytes()).await.unwrap();
+            client
+                .write_all(b"\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+                .await
+                .unwrap();
+            client.shutdown().await.unwrap();
+            let outcome = crate::server::mcp_server_duplex_raw_for_test(
+                session().await,
+                Quotas::default(),
+                None,
+                server_io,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+            let rmcp_started = match outcome {
+                Ok(running) => {
+                    let _ = running.cancel().await;
+                    true
+                }
+                Err(err) => {
+                    assert!(
+                        format!("{err}").contains("expected the initialize request")
+                            || err.is_pre_handshake_disconnect(),
+                        "{label}: unexpected rmcp outcome {err}"
+                    );
+                    false
+                }
+            };
+            // `initialize` starts the OTHER lifecycle, which the gate opens on its outbound
+            // InitializeResult rather than on the inbound frame; rmcp starts it either way.
+            let expected = if label == "initialize" {
+                !gate_opens
+            } else {
+                gate_opens
+            };
+            assert_eq!(
+                expected, rmcp_started,
+                "{label}: the gate's stateless edge ({gate_opens}) disagrees with rmcp's loop"
+            );
+            opened += usize::from(gate_opens);
+        }
+        assert_eq!(
+            opened, 3,
+            "non-vacuity: the corpus starts exactly three stateless sessions (complete 2026, complete \
+             2025-11-25, and a custom request with complete _meta)"
+        );
+    }
 }

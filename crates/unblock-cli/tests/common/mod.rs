@@ -763,6 +763,15 @@ impl McpClient {
         stdin.flush().expect("flush child stdin");
     }
 
+    /// Write `line` with NO terminating newline (D59 criterion (l)'s unterminated final line).
+    pub fn write_without_newline(&mut self, line: &str) {
+        let stdin = self.stdin.as_mut().expect("stdin still open");
+        stdin
+            .write_all(line.as_bytes())
+            .expect("write to child stdin");
+        stdin.flush().expect("flush child stdin");
+    }
+
     /// Close the child's stdin pipe (EOF) so the MCP server shuts down cleanly (exit 0).
     pub fn close_stdin(&mut self) {
         // Dropping the `ChildStdin` closes the write end of the pipe → the child reads EOF.
