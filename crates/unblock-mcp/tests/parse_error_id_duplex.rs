@@ -90,7 +90,7 @@ async fn an_in_class_tools_call_is_answered_on_its_id_and_executes_nothing() {
 ///
 /// Mutants: the recovered arm answering `None` (the poll finds the request still PENDING). It is
 /// also the only pin on the assumption that rmcp's client routes an error to its waiter by id
-/// (`rmcp-1.7.0/src/service.rs:1030-1041`).
+/// (`rmcp-3.10.0/src/service.rs:1765-1784`, the peer-error routing to its waiter by id).
 #[tokio::test]
 async fn an_rmcp_client_is_released_by_the_parse_error_on_its_recovered_id() {
     let (client_w, relay_r) = tokio::io::duplex(1 << 20);

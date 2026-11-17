@@ -261,10 +261,7 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
         .await
         .expect("list_resource_templates");
     assert_eq!(templates.len(), 1, "exactly 1 resource template (CD-3)");
-    let template_uris: Vec<String> = templates
-        .iter()
-        .map(|t| t.raw.uri_template.clone())
-        .collect();
+    let template_uris: Vec<String> = templates.iter().map(|t| t.uri_template.clone()).collect();
     assert_eq!(
         template_uris,
         vec!["unblock://issues/{id}".to_string()],
@@ -274,9 +271,9 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
     // concrete URIs that were mis-registered as templates before CD-3).
     for template in &templates {
         assert!(
-            template.raw.uri_template.contains('{'),
+            template.uri_template.contains('{'),
             "a resources/templates/list entry MUST be parameterized, got `{}` (CD-3)",
-            template.raw.uri_template
+            template.uri_template
         );
     }
 
@@ -295,7 +292,7 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
          `agents_digest` row, the `src/server.rs` row, and the conformance row that splits it as \
          `4 concrete + 1 template`). Historical/amendment lines stay frozen."
     );
-    let mut concrete_uris: Vec<String> = resources.iter().map(|r| r.raw.uri.clone()).collect();
+    let mut concrete_uris: Vec<String> = resources.iter().map(|r| r.uri.clone()).collect();
     concrete_uris.sort();
     assert_eq!(
         concrete_uris,
@@ -310,9 +307,9 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
     // No concrete URI may carry a `{` (they are fully resolved, not templates).
     for resource in &resources {
         assert!(
-            !resource.raw.uri.contains('{'),
+            !resource.uri.contains('{'),
             "a resources/list entry MUST be concrete, got `{}` (CD-3)",
-            resource.raw.uri
+            resource.uri
         );
     }
 
@@ -360,8 +357,9 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
 // --------------------------------------------------------------------------------------------------
 
 /// CD-1 (spine §5.2a, NORMATIVE): every LIVE `tools/list` entry's `inputSchema` root MUST carry
-/// `"type": "object"`. rmcp 1.7 guards the tool *output* schema root (`schema_for_output`) but NOT the
-/// input, so this invariant is unblock-owned: the six tagged-enum inputs earn it via
+/// `"type": "object"`. rmcp 3.10's `#[tool]` now enforces it too — `schema_for_input` PANICS unless the
+/// root `type` is `"object"` (`rmcp-3.10.0/src/handler/server/common.rs:73-110`) — but the invariant
+/// stays pinned here over the live router: the six tagged-enum inputs earn it via
 /// `#[schemars(extend("type" = "object"))]`; `ClaimInput` already conforms. A strict TS-SDK client
 /// rejects the WHOLE `tools/list` if any single element omits the root `type`, so this asserts it for
 /// ALL 8 tools over the real router (not just the pure bundle builder).

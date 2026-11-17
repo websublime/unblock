@@ -14,15 +14,13 @@ use rmcp::ServerHandler;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
-    AnnotateAble, CallToolRequestParams, CallToolResult, ClientJsonRpcMessage, ClientRequest,
-    ErrorData, GetPromptRequestParams, GetPromptResult, Implementation, JsonRpcMessage,
-    JsonRpcRequest, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
-    PaginatedRequestParams, ProtocolVersion, RawResource, RawResourceTemplate,
-    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
-    ServerInfo,
+    CallToolRequestParams, CallToolResponse, ErrorData, Implementation,
+    ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, RequestMetaObject,
+    Resource, ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig,
 };
-use rmcp::service::{RequestContext, RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
-use rmcp::transport::{Transport, stdio};
+use rmcp::service::{RequestContext, RoleServer};
+use rmcp::transport::stdio;
 use rmcp::{Service, ServiceExt};
 use snafu::ResultExt;
 use tokio::sync::Semaphore;
@@ -61,6 +59,14 @@ pub struct UnblockServer {
     /// [`ErrorCode::RateLimited`]. `Arc` because the handler derives `Clone` and every clone MUST share
     /// the SAME permit pool (a per-clone semaphore would not bound total concurrency).
     pub(crate) rate_limit: Arc<Semaphore>,
+    /// TEST-ONLY (`test-util`): the HELD-HANDLER-RETURNED signal of PRD §4 D59 criterion (17)'s
+    /// deterministic hold seams. One permit is added as `call_tool` returns, i.e. BEFORE rmcp's
+    /// request task hands the response to the serve loop, whose send task then writes it (or drops it
+    /// for a cancelled request, `rmcp-3.10.0/src/service.rs:1528-1531` and `:1640-1651`). A cell that
+    /// needs the reply on the wire must still READ it; the signal proves only that the handler, and
+    /// the write it ran, finished.
+    #[cfg(feature = "test-util")]
+    pub(crate) returned: Option<Arc<Semaphore>>,
 }
 
 impl UnblockServer {
@@ -77,6 +83,8 @@ impl UnblockServer {
             quotas,
             instructions,
             rate_limit,
+            #[cfg(feature = "test-util")]
+            returned: None,
         }
     }
 
@@ -94,40 +102,44 @@ impl UnblockServer {
 
     /// The NFR-18 per-request quota check (D42), run **once in [`Self::call_tool`] before dispatch**.
     ///
-    /// **"per-request bytes" is DEFINED as the serialized `tools/call` `params` object** — `name` +
-    /// `arguments` + `_meta` + `task` — excluding the JSON-RPC envelope (`jsonrpc`/`id`/`method`),
-    /// which is not reachable from `ServerHandler::call_tool`.
+    /// **"per-request bytes" is DEFINED as the re-serialized `CallToolRequestParams` plus
+    /// `RequestContext.meta`** (D59 clause (4)) — on rmcp 3.10 that is `name` + `arguments` +
+    /// `inputResponses` + `requestState` + `_meta` — excluding the JSON-RPC envelope
+    /// (`jsonrpc`/`id`/`method`), which is not reachable from `ServerHandler::call_tool`.
     ///
     /// This replaces the pre-D42 `preflight`, which measured the **re-serialized typed DTO**. That
     /// was the defect (facet (c)): a payload parked under an unknown key never appeared in the typed
     /// value, so it was never measured at all, while `#[serde(default)]` padding *was* counted.
     ///
     /// **The re-serialization here is NOT that defect.** Every `CallToolRequestParams` field is raw
-    /// JSON (`name: Cow<str>`, `arguments`/`task`: `Option<JsonObject>`, `meta: Option<Meta>` where
-    /// `Meta` is `#[serde(transparent)]` over a `JsonObject`), so `to_value` is lossless by
-    /// construction — pinned by `request_measurement_is_lossless`. The struct is `#[non_exhaustive]`,
-    /// so a future rmcp field is picked up automatically: the fail-safe direction.
+    /// JSON (`name: Cow<str>`, `arguments: Option<JsonObject>`, `input_responses:
+    /// Option<InputResponses>` — a map of JSON values —, `request_state: Option<String>`, and
+    /// `meta: Option<RequestMetaObject>`, transparent over a `JsonObject`), so `to_value` is lossless
+    /// by construction — pinned by `request_measurement_is_lossless`. The struct is
+    /// `#[non_exhaustive]`, so a future rmcp field is picked up automatically: the fail-safe
+    /// direction.
     ///
     /// # `_meta` must be passed SEPARATELY — verified by execution, not assumed
     ///
-    /// `request.meta` is **always `None` here.** rmcp's serve loop `std::mem::swap`s `_meta` out of
-    /// the request and into `RequestContext.meta` *before* `handle_request`
-    /// (`rmcp-1.7.0/src/service.rs:953`, comment: *"swap meta firstly, otherwise progress token will
-    /// be lost"*). So serializing the request alone measures `name` + `arguments` and **silently
-    /// misses the live `_meta` bypass** — a 300 KB `_meta` blob would still sail past the cap. This
-    /// was caught by a test that failed for exactly that reason; it is not a hypothetical.
+    /// `request.meta` is **always `None` here.** rmcp's serve loop moves `_meta` out of the request
+    /// and into `RequestContext.meta` (a [`RequestMetaObject`], `rmcp-3.10.0/src/service.rs:1237`)
+    /// *before* `handle_request`. So serializing the request alone measures `name` + `arguments`
+    /// and **silently misses the live `_meta` bypass** — a 300 KB `_meta` blob would still sail past
+    /// the cap. This was caught by a test that failed for exactly that reason; it is not a
+    /// hypothetical.
     ///
     /// The caller therefore hands us `context.meta`, which is where the bytes actually are.
-    /// `params.task` needs no such treatment: rmcp rejects a present `task` with `-32602` before
-    /// `call_tool` (`TaskSupport::Forbidden` is the default), so it is not an exploitable channel —
-    /// we measure it anyway, for free, if a future rmcp starts admitting it.
+    /// `params.task` is NOT measured: rmcp 3.10's `CallToolRequestParams` has no `task` field and
+    /// denies no unknown key, so a present `task` is discarded during the typed decode, never reaches
+    /// `call_tool` and drives no work (D59 clause (4)); it joins every other unknown `params` key,
+    /// whose bytes cost only the parse (the `ub-o8s` residual).
     ///
     /// **Fail-closed:** an un-measurable request is rejected as an `InternalError` rather than waved
     /// through — the untrusted-input boundary must never fail open (NFR-18).
     pub(crate) fn enforce_request_quota(
         &self,
         request: &CallToolRequestParams,
-        meta: &rmcp::model::Meta,
+        meta: &RequestMetaObject,
     ) -> Result<(), StructuredError> {
         let measurement_error = |err: &serde_json::Error| {
             StructuredError::from_code(
@@ -147,6 +159,44 @@ impl UnblockServer {
             );
         }
         enforce_quota(&value, &self.quotas)
+    }
+
+    /// The rate-limited, scanned, quota-checked dispatch [`ServerHandler::call_tool`] runs (D34-F5,
+    /// D43, D42); split out only so `call_tool` can raise the `test-util` returned signal on EVERY
+    /// return path.
+    async fn call_tool_gated(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        match self.rate_limit.try_acquire() {
+            Ok(_permit) => {
+                // D43: the duplicate-JSON-key gate, FIRST — before the quota. The scan itself
+                // already ran at the transport (`crate::wire`), so this is O(1); it goes first
+                // because a frame whose MEANING is ambiguous must be reported as such, not masked
+                // as over-quota. Inside the permit for the same D34-F5 reason the quota walk is.
+                if let Err(structured) = frame_scan_gate(&context.extensions) {
+                    return Ok(err_json(&structured).into());
+                }
+                // D42: the NFR-18 quota chokepoint, over the WHOLE `params`, INSIDE the permit and
+                // BEFORE dispatch. Inside the permit because the walk is O(request bytes) of CPU —
+                // running it above `try_acquire` would let unbounded concurrent oversized requests
+                // burn CPU outside the D34-F5 bound, inverting the invariant documented above.
+                // `try_acquire` is non-blocking, so a rejected request holds a permit for
+                // microseconds.
+                //
+                // `context.meta` is passed explicitly: rmcp SWAPS `_meta` out of the request into
+                // the RequestContext before this method is called, so `request.meta` is always
+                // `None` here and measuring the request alone would miss the `_meta` channel
+                // entirely — which is the live bypass this piece exists to close.
+                if let Err(structured) = self.enforce_request_quota(&request, &context.meta) {
+                    return Ok(err_json(&structured).into());
+                }
+                let tcc = ToolCallContext::new(self, request, context);
+                Self::aggregate_tool_router().call(tcc).await
+            }
+            Err(_) => Ok(err_json(&rate_limited_error()).into()),
+        }
     }
 
     /// Build the `ReadResourceResult` text body for a parsed resource URI (read-only, FR-10).
@@ -171,7 +221,7 @@ impl UnblockServer {
 impl ServerHandler for UnblockServer {
     /// Dispatch a tool call — HAND-WRITTEN to install the NFR-18 rate-limit chokepoint (D34-F5, spine
     /// §5.6). Because this method is present, `#[rmcp::tool_handler]` does NOT emit its own `call_tool`
-    /// (it only generates one when absent — `rmcp-macros-1.7.0/src/tool_handler.rs:44`, verified). The
+    /// (it only generates one when absent — `rmcp-macros-3.10.0/src/tool_handler.rs:44`, verified). The
     /// `rate_limit_chokepoint_is_the_live_tool_dispatch_path` assumption pin (`tests/rate_limit.rs`)
     /// fails LOUDLY if a future rmcp stops honouring that suppression, pointing maintainers straight here.
     ///
@@ -190,35 +240,13 @@ impl ServerHandler for UnblockServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        match self.rate_limit.try_acquire() {
-            Ok(_permit) => {
-                // D43: the duplicate-JSON-key gate, FIRST — before the quota. The scan itself
-                // already ran at the transport (`crate::wire`), so this is O(1); it goes first
-                // because a frame whose MEANING is ambiguous must be reported as such, not masked
-                // as over-quota. Inside the permit for the same D34-F5 reason the quota walk is.
-                if let Err(structured) = frame_scan_gate(&context.extensions) {
-                    return Ok(err_json(&structured));
-                }
-                // D42: the NFR-18 quota chokepoint, over the WHOLE `params`, INSIDE the permit and
-                // BEFORE dispatch. Inside the permit because the walk is O(request bytes) of CPU —
-                // running it above `try_acquire` would let unbounded concurrent oversized requests
-                // burn CPU outside the D34-F5 bound, inverting the invariant documented above.
-                // `try_acquire` is non-blocking, so a rejected request holds a permit for
-                // microseconds.
-                //
-                // `context.meta` is passed explicitly: rmcp SWAPS `_meta` out of the request into
-                // the RequestContext before this method is called, so `request.meta` is always
-                // `None` here and measuring the request alone would miss the `_meta` channel
-                // entirely — which is the live bypass this piece exists to close.
-                if let Err(structured) = self.enforce_request_quota(&request, &context.meta) {
-                    return Ok(err_json(&structured));
-                }
-                let tcc = ToolCallContext::new(self, request, context);
-                Self::aggregate_tool_router().call(tcc).await
-            }
-            Err(_) => Ok(err_json(&rate_limited_error())),
+    ) -> Result<CallToolResponse, ErrorData> {
+        let response = self.call_tool_gated(request, context).await;
+        #[cfg(feature = "test-util")]
+        if let Some(returned) = &self.returned {
+            returned.add_permits(1);
         }
+        response
     }
 
     /// Advertise tools + prompts + resources, the server identity, and the instructions.
@@ -231,7 +259,12 @@ impl ServerHandler for UnblockServer {
     /// `CARGO_PKG_VERSION` — instead of rmcp's `from_build_env()` default (which would advertise the
     /// `rmcp` crate). The instructions honor `McpServerOptions::instructions` when the caller set one,
     /// else fall back to a generated capability summary.
-    fn get_info(&self) -> ServerInfo {
+    ///
+    /// It returns [`ServerConfig`], the name rmcp 3.4 gave this type when it deprecated `ServerInfo`
+    /// (D59 clause (14)). Its `protocol_version` stays rmcp's default; rmcp 3.10's
+    /// `negotiate_protocol_version` answers an `initialize` with the client's version when it is a
+    /// supported handshake version and with 2025-11-25 otherwise (D59 clause (9)).
+    fn get_info(&self) -> ServerConfig {
         let capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_prompts()
@@ -250,7 +283,7 @@ impl ServerHandler for UnblockServer {
                 caps.prompts.len(),
             )
         });
-        ServerInfo::new(capabilities)
+        ServerConfig::new(capabilities)
             .with_server_info(Implementation::new("unblock", env!("CARGO_PKG_VERSION")))
             .with_instructions(instructions)
     }
@@ -292,17 +325,12 @@ impl ServerHandler for UnblockServer {
         ]
         .into_iter()
         .map(|(uri, name, description)| {
-            RawResource::new(uri, name)
+            Resource::new(uri, name)
                 .with_description(description)
                 .with_mime_type("application/json")
-                .no_annotation()
         })
         .collect();
-        Ok(ListResourcesResult {
-            resources,
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(resources))
     }
 
     /// Advertise the ONE genuine RFC-6570 resource template — `unblock://issues/{id}` (CD-3, spine
@@ -317,30 +345,27 @@ impl ServerHandler for UnblockServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, ErrorData> {
         let templates = vec![
-            RawResourceTemplate::new("unblock://issues/{id}", "issue-by-id")
+            ResourceTemplate::new("unblock://issues/{id}", "issue-by-id")
                 .with_description("A single issue by id.")
-                .with_mime_type("application/json")
-                .no_annotation(),
+                .with_mime_type("application/json"),
         ];
-        Ok(ListResourceTemplatesResult {
-            resource_templates: templates,
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourceTemplatesResult::with_all_items(templates))
     }
 
-    /// Read a resource by URI (read-only, FR-10). A miss → `resource_not_found` (-32002); a domain
-    /// error is surfaced as `ErrorData` (resources have no in-band channel like tools do).
+    /// Read a resource by URI (read-only, FR-10). A miss → `resource_not_found` (-32002, which rmcp
+    /// 3.10 rewrites to `-32602` with the same `data` for a request on the 2026-07-28 revision, D59
+    /// clause (9)); a domain error is surfaced as `ErrorData` (resources have no in-band channel like
+    /// tools do).
     ///
     /// The body is stamped `mimeType: application/json` (CD-5) — the same type `resources/list` and
-    /// `resources/templates/list` advertise. rmcp's [`ResourceContents::text`] hardcodes the
-    /// non-IANA `"text"`, so we override it via [`ResourceContents::with_mime_type`]; the body bytes
-    /// are unchanged.
+    /// `resources/templates/list` advertise. rmcp's [`ResourceContents::text`] defaults to
+    /// `"text/plain"` (`rmcp-3.10.0/src/model/resource.rs:193-199`), so we override it via
+    /// [`ResourceContents::with_mime_type`]; the body bytes are unchanged.
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, ErrorData> {
+    ) -> Result<ReadResourceResponse, ErrorData> {
         // NFR-18 rate-limit chokepoint (D34-F5, MF-5): resources have NO in-band channel like tools
         // do, so a saturated cap surfaces OUT-OF-BAND as `ErrorData` (asymmetric to `call_tool`). The
         // permit is held for the whole read (dropped on return).
@@ -351,7 +376,8 @@ impl ServerHandler for UnblockServer {
             Ok(body) => Ok(ReadResourceResult::new(vec![
                 ResourceContents::text(body.to_string(), request.uri)
                     .with_mime_type("application/json"),
-            ])),
+            ])
+            .into()),
             Err(structured) => Err(crate::error::to_rmcp_error_data(&structured)),
         }
     }
@@ -371,7 +397,7 @@ impl ServerHandler for UnblockServer {
 /// **All three non-`Clean` arms reject, INCLUDING the absent one.** `Extensions` starts empty, so
 /// treating absent as clean would make any un-scanned path fail OPEN. The one in-tree path that
 /// reaches a handler with no verdict is the test-only, `test-util`-gated
-/// [`mcp_server_duplex_unclamped_for_test`] (deliberately raw — see its docs); that path is what
+/// [`mcp_server_duplex_raw_for_test`] (deliberately raw — see its docs); that path is what
 /// makes this arm executably testable instead of merely asserted.
 ///
 /// Reads `context.extensions` DIRECTLY rather than through rmcp's `Extension<T>` extractor: that
@@ -444,16 +470,17 @@ pub async fn run_mcp_server(
 /// — `receive()` hands a decorator an already-parsed message. So this function now OWNS the read
 /// framing, via [`DupScanningTransport`].
 ///
-/// The wrappers compose **scan innermost, gate above it, clamp outermost**, so the receive order is
-/// scan, gate, clamp and the send order is clamp, gate, scan. The CD-4 clamp only mutates
-/// `initialize` params and passes the message through, so the `Extensions` the scan stamped survive
-/// it, and that order keeps the clamp reading exactly the message rmcp's serve loop will. The D50
-/// gate sits ABOVE the scan because a D47 frame's id lives only in the raw bytes, so a gate below
-/// that arm would see the frame as a plain premature notification and drop it with no reply — see
-/// [`PreHandshakeGateTransport`].
+/// The composition is `PreHandshakeGateTransport<DupScanningTransport<R, W>>` (D59 clause (10)):
+/// scan innermost, the D50 gate above it, so the receive order is scan, then gate. The gate sits
+/// ABOVE the scan because a line that fails the typed parse is answered by the scanner's three
+/// rules (D59 clause (2)), and a readable id lives only in the raw bytes. The CD-4 version clamp
+/// that once wrapped both is RETIRED: rmcp 3.10 negotiates the `initialize` version per the
+/// specification itself (`rmcp-3.10.0/src/service/server.rs:478-509`). The gate is built with
+/// [`UnblockServer`]'s own `supported_protocol_versions()`, the set rmcp checks an inline version
+/// against, so the gate's stateless edge and rmcp's agree on it.
 ///
 /// [`run_mcp_server`]'s public 2-argument signature is UNCHANGED by this — the byte-level bound is
-/// confined to this private function and the two `test-util` duplex helpers.
+/// confined to this private function and the `test-util` duplex helper.
 async fn run_mcp_server_handler<R, W>(
     server: UnblockServer,
     read: R,
@@ -465,104 +492,13 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let transport = VersionClampingTransport::new(PreHandshakeGateTransport::new(
-        DupScanningTransport::new(read, write),
-    ));
+    let supported = ServerHandler::supported_protocol_versions(&server);
+    let transport =
+        PreHandshakeGateTransport::new(DupScanningTransport::new(read, write), supported);
     server
         .serve_with_ct(transport, cancel)
         .await
         .context(TransportSnafu)
-}
-
-/// A [`Transport`] decorator that clamps an UNSUPPORTED inbound `initialize` `protocolVersion` to the
-/// server's latest supported [`ProtocolVersion`] BEFORE rmcp's serve-loop negotiation sees it (CD-4,
-/// MCP lifecycle spec: an unsupported requested version MUST be answered with a version the server
-/// supports — SHOULD be its latest — never echoed back).
-///
-/// ## Why a transport wrapper and NOT a `ServerHandler::initialize` override
-///
-/// rmcp 1.7's server serve-loop (`serve_server_with_ct_inner`) RE-DERIVES the wire `protocolVersion`
-/// AFTER the handler returns: it takes `min(client_requested, handler_response)` by a purely LEXICAL
-/// string compare and echoes the client's value whenever it sorts below the handler's. So a handler
-/// that returns `LATEST` is overridden right back to a bogus client-sent `"1999-01-01"` (it sorts
-/// below `LATEST`) — and there is NO handler return value `R` that can force `LATEST` for a
-/// below-latest unsupported version (the loop yields the client whenever `client < R`, and `R` cannot
-/// be simultaneously `LATEST` and `<= "1999-01-01"`; verified empirically). The only place we can
-/// enforce conformance is BEFORE that negotiation, by clamping the inbound request. SUPPORTED (older)
-/// versions are left untouched so the loop still echoes them, exactly as the spec requires.
-///
-/// ## Assumption pin (CD-6) — this clamp is COUPLED to an UNDOCUMENTED rmcp internal
-///
-/// The correctness of this wrapper depends entirely on rmcp 1.7's serve-loop deriving the wire version
-/// as a lexical `min(client, handler)` (above). That is an rmcp implementation detail, not a documented
-/// contract, so a future rmcp bump could change it and silently make this clamp wrong or redundant.
-/// Two `tests/protocol_version.rs` pins fail LOUDLY if that happens, pointing maintainers straight here:
-/// - `rmcp_serve_loop_echoes_unsupported_below_latest_version_verbatim` drives the RAW, UNCLAMPED serve
-///   path ([`mcp_server_duplex_unclamped_for_test`]) and asserts rmcp still echoes an unsupported
-///   below-latest version verbatim — the exact misbehaviour this wrapper compensates for;
-/// - `known_versions_and_latest_match_the_clamp_key_set` pins rmcp's [`ProtocolVersion::KNOWN_VERSIONS`]
-///   / [`ProtocolVersion::LATEST`] (the set this clamp keys on) to their expected values.
-///
-/// If either pin fails, an rmcp upgrade changed the version-negotiation assumption — re-evaluate (and
-/// possibly REMOVE) this transport before touching the pin. The eventual CD-6 endgame is an UPSTREAM
-/// rmcp fix making unsupported-version clamping a first-class `ServerHandler` contract, after which this
-/// wrapper can be deleted; that upstream work is OUT OF SCOPE here (this crate only pins the assumption).
-struct VersionClampingTransport<T> {
-    /// The wrapped transport; every call delegates to it, `receive` after the clamp.
-    inner: T,
-}
-
-impl<T> VersionClampingTransport<T> {
-    /// Wrap `inner`.
-    fn new(inner: T) -> Self {
-        Self { inner }
-    }
-}
-
-impl<T> Transport<RoleServer> for VersionClampingTransport<T>
-where
-    T: Transport<RoleServer>,
-{
-    type Error = T::Error;
-
-    fn send(
-        &mut self,
-        item: TxJsonRpcMessage<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
-        self.inner.send(item)
-    }
-
-    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
-        let mut message = self.inner.receive().await?;
-        clamp_unsupported_initialize_version(&mut message);
-        Some(message)
-    }
-
-    fn close(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        self.inner.close()
-    }
-}
-
-/// Rewrite an UNSUPPORTED `initialize` `protocolVersion` to [`ProtocolVersion::LATEST`] in place;
-/// leave every other message — and every SUPPORTED requested version — untouched (CD-4).
-///
-/// "Supported" is rmcp's [`ProtocolVersion::KNOWN_VERSIONS`] set (the versions this SDK, and thus this
-/// server, actually speaks). A version outside that set is clamped to `LATEST`; a version inside it is
-/// preserved so rmcp's serve-loop still echoes it (spec: a supported requested version MUST be echoed).
-///
-/// The `KNOWN_VERSIONS`/`LATEST` set this keys on is pinned by
-/// `known_versions_and_latest_match_the_clamp_key_set` (`tests/protocol_version.rs`); an rmcp bump that
-/// adds, removes, or re-orders supported versions fails that pin — see [`VersionClampingTransport`] for
-/// the full CD-6 coupling.
-fn clamp_unsupported_initialize_version(message: &mut ClientJsonRpcMessage) {
-    if let JsonRpcMessage::Request(JsonRpcRequest {
-        request: ClientRequest::InitializeRequest(request),
-        ..
-    }) = message
-        && !ProtocolVersion::KNOWN_VERSIONS.contains(&request.params.protocol_version)
-    {
-        request.params.protocol_version = ProtocolVersion::LATEST;
-    }
 }
 
 /// Build and run the server over an arbitrary in-memory byte-stream pair (TEST-ONLY, `test-util`).
@@ -596,30 +532,24 @@ where
     run_mcp_server_handler(server, read, write, cancel).await
 }
 
-/// Build and run the server over an arbitrary in-memory transport WITHOUT the
-/// [`VersionClampingTransport`] — the RAW rmcp serve path (TEST-ONLY, `test-util` feature).
+/// Build and run the server over an arbitrary in-memory transport on the RAW rmcp serve path
+/// (TEST-ONLY, `test-util` feature).
 ///
-/// This is the CD-6 assumption-pin seam. Unlike [`mcp_server_duplex_for_test`] (which routes through
-/// [`run_mcp_server_handler`] and therefore wraps the transport in [`VersionClampingTransport`]), this helper
-/// calls `serve_with_ct` on the caller's transport DIRECTLY, installing NO clamp. It exists ONLY so the
-/// `protocol_version` pin (`tests/protocol_version.rs`) can observe — and fail loudly on a change to —
-/// rmcp 1.7's UN-guarded serve-loop version negotiation that [`clamp_unsupported_initialize_version`]
-/// compensates for. NEVER route a shipped path through this: it deliberately reproduces the
-/// spec-non-conformant echo of an unsupported requested version — **and, since D43, it also installs
-/// NO duplicate-key scan**, so every request reaching a handler through it carries NO
-/// [`ParamsScan`] verdict at all. It installs **NO D50 pre-handshake gate** either, for the same
-/// reason it installs neither the clamp nor the scan, so a premature frame sent through it still
-/// reaches rmcp's initialize slot.
+/// Unlike [`mcp_server_duplex_for_test`] (which routes through [`run_mcp_server_handler`]), this
+/// helper calls `serve_with_ct` on the caller's transport DIRECTLY. It installs **NO
+/// duplicate-key scan**, so every request reaching a handler through it carries NO [`ParamsScan`]
+/// verdict at all, and **NO pre-lifecycle gate**, so a premature frame sent through it still reaches
+/// rmcp's pre-lifecycle loop. NEVER route a shipped path through this.
 ///
-/// That second property is deliberate and kept: this helper's whole purpose is to be the RAW rmcp
-/// serve path, and wrapping it would both destroy the CD-6 pin and remove the only honest in-tree
-/// witness that [`frame_scan_gate`]'s fail-closed ABSENT arm actually fires (`tests/`).
+/// Its one remaining use is D43's fail-closed absent-verdict cell: it is the only honest in-tree
+/// witness that [`frame_scan_gate`]'s ABSENT arm actually fires (`tests/`). It took this name when
+/// the CD-4 clamp it once bypassed was retired (D59 clause (10)).
 ///
 /// # Errors
 /// - [`McpServerError::Transport`] if the rmcp service fails to initialize over the transport.
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
-pub async fn mcp_server_duplex_unclamped_for_test<T, E, A>(
+pub async fn mcp_server_duplex_raw_for_test<T, E, A>(
     session: Arc<Session>,
     quotas: Quotas,
     instructions: Option<String>,
@@ -637,6 +567,31 @@ where
         .context(TransportSnafu)
 }
 
+/// Like [`mcp_server_duplex_for_test`], but every returned `call_tool` adds one permit to `returned`
+/// — the HELD-HANDLER-RETURNED signal of PRD §4 D59 criterion (17) (TEST-ONLY, `test-util`). The
+/// permit is added before rmcp's send task writes the response; see [`UnblockServer`]'s `returned`.
+///
+/// # Errors
+/// - [`McpServerError::Transport`] if the rmcp service fails to initialize over the transport.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub async fn mcp_server_duplex_with_returned_signal_for_test<R, W>(
+    session: Arc<Session>,
+    quotas: Quotas,
+    read: R,
+    write: W,
+    cancel: tokio_util::sync::CancellationToken,
+    returned: Arc<Semaphore>,
+) -> Result<rmcp::service::RunningService<RoleServer, UnblockServer>, McpServerError>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut server = UnblockServer::new(session, quotas, None);
+    server.returned = Some(returned);
+    run_mcp_server_handler(server, read, write, cancel).await
+}
+
 /// Build the structured not-found for an unknown resource URI (→ -32002 at the boundary).
 fn unknown_resource(uri: &str) -> StructuredError {
     StructuredError::from_code(
@@ -649,9 +604,7 @@ fn unknown_resource(uri: &str) -> StructuredError {
 #[cfg(test)]
 mod tests {
     use super::{ParamsScan, UnblockServer, frame_scan_gate, run_mcp_server_handler};
-    use crate::envelope_id_corpus::{
-        ParseExpect, divergence_corpus, expected_bytes, parse_error_bytes, parse_error_corpus,
-    };
+    use crate::envelope_id_corpus::{ParseExpect, parse_error_bytes, parse_error_corpus};
     use crate::options::Quotas;
     use rmcp::model::Extensions;
     use std::sync::Arc;
@@ -701,62 +654,6 @@ mod tests {
                 .await
                 .expect("open session"),
         )
-    }
-
-    /// **The composed stack keeps D47's recovered-id answer reachable before the handshake.**
-    ///
-    /// The gate sits ABOVE the scanner, so a D47 un-decodable-`id` frame arriving before the
-    /// handshake is answered on its RECOVERED id by the scanner and never reaches the gate. A stack
-    /// with those two layers swapped would classify the frame as a plain premature notification,
-    /// drop it with no reply, and leave the peer waiting forever. The cell reads the bytes off a real
-    /// duplex through [`run_mcp_server_handler`], so it grades the INSTALLED stack rather than a
-    /// decorator built by hand.
-    #[tokio::test]
-    async fn a_d47_frame_before_the_handshake_still_gets_its_recovered_id_answer() {
-        let entry = divergence_corpus()
-            .into_iter()
-            .find(|frame| frame.id == "D01")
-            .expect("the D01 corpus entry exists");
-
-        let (mut client, server_io) = tokio::io::duplex(64 * 1024);
-        let (server_read, server_write) = tokio::io::split(server_io);
-        client
-            .write_all(&entry.frame)
-            .await
-            .expect("write the class frame");
-        client.write_all(b"\n").await.expect("terminate the frame");
-        client
-            .shutdown()
-            .await
-            .expect("close the client's write half");
-
-        let server = UnblockServer::new(session().await, Quotas::default(), None);
-        let outcome = run_mcp_server_handler(
-            server,
-            server_read,
-            server_write,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
-        assert!(
-            outcome.is_err(),
-            "the handshake never completes, so the run reports the closed connection"
-        );
-
-        let mut written = Vec::new();
-        client
-            .read_to_end(&mut written)
-            .await
-            .expect("read what the server wrote");
-        assert_eq!(
-            written,
-            expected_bytes(&entry.expect),
-            "the pre-handshake D47 answer must still ride the recovered id"
-        );
-        assert!(
-            String::from_utf8_lossy(&written).contains(r#""id":90001"#),
-            "non-vacuity: the reply really carries the recovered id"
-        );
     }
 
     /// **[v1.0.1/D54]** An in-class `-32700` line arriving as the FIRST frame is answered ON its id by

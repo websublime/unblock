@@ -27,7 +27,8 @@ use crate::tools::sync::SyncInput;
 /// The input + output `JsonSchema` pair for one tool (spine §5.4, D25).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ToolSchemas {
-    /// The tool's input schema (`schema_for!(<Tool>Input)`, draft 2020-12).
+    /// The tool's input schema (`schema_for!(<Tool>Input)`, draft 2020-12), its ROOT `title` and
+    /// `description` removed as the live `inputSchema` removes them (PRD §4 D59 clause (6)).
     pub input: Value,
     /// The tool's success-output schema (`schema_for!(<tool's §5.3 output>)`).
     pub output: Value,
@@ -68,41 +69,56 @@ pub struct SchemaBundle {
     pub error: Value,
 }
 
+/// One tool's published `input` schema: the schemars root with its `title` and `description`
+/// REMOVED, exactly as rmcp-macros 3.10's `#[tool]` publishes the live `inputSchema` through
+/// `schema_for_input` (`rmcp-macros-3.10.0/src/tool.rs:202`, `rmcp-3.10.0/src/handler/server/common.rs:73-110`,
+/// PRD §4 D59 clause (6)). Only the ROOT loses them: every nested `$defs` entry keeps its own, and
+/// output roots and the shared error schema are built without this strip.
+/// `live_tools_input_schema_body_equals_the_bundle` holds the two byte-equal.
+fn tool_input(schema: rmcp::schemars::Schema) -> Value {
+    let mut value = schema.to_value();
+    if let Some(root) = value.as_object_mut() {
+        root.remove("title");
+        root.remove("description");
+    }
+    value
+}
+
 /// Build the [`SchemaBundle`] (pure; no `Session`).
 #[must_use]
 pub fn schema_bundle() -> SchemaBundle {
     SchemaBundle {
         contract_version: CONTRACT_VERSION.to_string(),
         issue: ToolSchemas {
-            input: schema_for!(IssueInput).to_value(),
+            input: tool_input(schema_for!(IssueInput)),
             output: schema_for!(IssueOutput).to_value(),
         },
         claim: ToolSchemas {
-            input: schema_for!(ClaimInput).to_value(),
+            input: tool_input(schema_for!(ClaimInput)),
             output: schema_for!(Issue).to_value(),
         },
         defer: ToolSchemas {
-            input: schema_for!(DeferInput).to_value(),
+            input: tool_input(schema_for!(DeferInput)),
             output: schema_for!(Issue).to_value(),
         },
         query: ToolSchemas {
-            input: schema_for!(QueryInput).to_value(),
+            input: tool_input(schema_for!(QueryInput)),
             output: schema_for!(QueryOutput).to_value(),
         },
         dep: ToolSchemas {
-            input: schema_for!(DepToolInput).to_value(),
+            input: tool_input(schema_for!(DepToolInput)),
             output: schema_for!(DepOutput).to_value(),
         },
         sync: ToolSchemas {
-            input: schema_for!(SyncInput).to_value(),
+            input: tool_input(schema_for!(SyncInput)),
             output: schema_for!(SyncOutput).to_value(),
         },
         diagnostics: ToolSchemas {
-            input: schema_for!(DiagnosticsInput).to_value(),
+            input: tool_input(schema_for!(DiagnosticsInput)),
             output: schema_for!(DiagnosticReport).to_value(),
         },
         comment: ToolSchemas {
-            input: schema_for!(CommentToolInput).to_value(),
+            input: tool_input(schema_for!(CommentToolInput)),
             output: schema_for!(CommentOutput).to_value(),
         },
         error: schema_for!(StructuredError).to_value(),

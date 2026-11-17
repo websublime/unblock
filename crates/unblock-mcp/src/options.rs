@@ -142,7 +142,19 @@ use tokio_util::sync::CancellationToken;
 /// stays 36), leaves the 0–8 exit table untouched and adds no `EventType`; its schema step 3 is
 /// on-disk state outside this hash. Per D35 an additive `.M` bump is NON-breaking; it ships in the
 /// v1.1 minor release).
-pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.12";
+///
+/// `unblock.mcp.v1.13` (v1.1/D59 — the MCP SDK moves from rmcp 1.7.0 to 3.10.0. `#[tool]` in
+/// rmcp-macros 3.10 publishes `schema_for_input`, which strips each tool `inputSchema`'s ROOT
+/// `title` and `description`, so `schema_bundle()` follows: the eight tool `input` roots drop those
+/// two annotations while every output root, the shared error schema and every nested `$defs` entry
+/// keep theirs. `capabilities()` does not move; `agents_digest()`'s per-tool actions do not move.
+/// Removing two annotations changes no instance's validity, and the 2026-07-28 lifecycle,
+/// `server/discover` and float ids WIDEN what a client may do; Miguel RULED the bump ADDITIVE, not
+/// `2.0.0` (tracker comment 406), with five narrowings documented as client-visible behaviour in the
+/// managed `AGENTS.md` block. D59 mints NO `ErrorCode` (`ErrorCode::ALL` stays 36) and leaves the
+/// 0–8 exit table untouched. Per D35 an additive `.M` bump is NON-breaking; it ships in the v1.1
+/// minor release).
+pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.13";
 
 /// The pinned SHA-256 digest of the ordered two-document tuple `(capabilities(), schema_bundle())` —
 /// the HASH-COUPLED half of the FR-12 drift gate (D22 widened by D25, `tests/contract_suite.rs`).
@@ -158,12 +170,11 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.12";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-// D57 (v1.1) re-pin: the `issue` arm `config` (+ `ConfigOp`), its output arm `Config(ConfigList)`
-// with the `ConfigEntry` family, the rewritten `issue` description and `CONFIG_ERROR`'s
-// `contextual_text` hint shape move both documents. The gate fired BY DESIGN and this pin moved WITH
-// the `unblock.mcp.v1.12` bump and the two re-blessed goldens, never alone. (D56 moved it last: the
-// four FR-6 arms and the `issue`/`query` descriptions.)
-pub const CONTRACT_HASH: &str = "845456ec07477a69264a26ad603777e4f4b3b7d62fd198237ebca3bec1278ee2";
+// D59 (v1.1) re-pin: the eight tool `input` roots lose their `title` and `description` (rmcp 3.10's
+// `schema_for_input`, which `schema_bundle()` follows) and both documents carry the new version. The
+// gate fired BY DESIGN and this pin moved WITH the `unblock.mcp.v1.13` bump and the two re-blessed
+// goldens, never alone. (D57 moved it last: the `issue` arm `config` and `CONFIG_ERROR`'s hint.)
+pub const CONTRACT_HASH: &str = "1b449900d0fb2318dcb6f8d2043807bd6f4e247270caec4a15cf014327308747";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
@@ -173,11 +184,13 @@ pub const CONTRACT_HASH: &str = "845456ec07477a69264a26ad603777e4f4b3b7d62fd1982
 /// dispatch (D42). A breach is returned in-band as the shared structured error (`is_error=true`, the
 /// `SchemaBundle.error` shape) — the blast radius stays confined to the workspace.
 ///
-/// **"Per-request bytes" (NFR-18) is DEFINED as the serialized `tools/call` `params` object** —
-/// `name` + `arguments` + `_meta` + `task` — excluding the JSON-RPC envelope (`jsonrpc` / `id` /
-/// `method`), which is not reachable from `ServerHandler::call_tool`. Before D42 the check ran per
-/// tool body over the **re-serialized typed input**, so anything the client parked under an unknown
-/// key was never measured at all.
+/// **"Per-request bytes" (NFR-18) is DEFINED as the re-serialized `CallToolRequestParams` plus
+/// `RequestContext.meta`** (D59 clause (4)) — on rmcp 3.10 `name` + `arguments` + `inputResponses` +
+/// `requestState` + `_meta` — excluding the JSON-RPC envelope (`jsonrpc` / `id` / `method`), which is
+/// not reachable from `ServerHandler::call_tool`. A present `params.task` is NOT measured: rmcp 3.10
+/// discards it during the typed decode with every other unknown `params` key, so it never reaches
+/// `call_tool` and drives no work. Before D42 the check ran per tool body over the **re-serialized
+/// typed input**, so anything the client parked under an unknown key was never measured at all.
 ///
 /// **Residual, deliberately not claimed closed:** rmcp deserializes the whole
 /// `ClientJsonRpcMessage` off the transport *before* any handler runs, so these limits bound what a
@@ -267,10 +280,10 @@ mod tests {
 
     #[test]
     fn contract_version_is_the_bumped_v1_id() {
-        // v1.1/D57: the `issue` `config` arm, its output arm, the rewritten `issue` description and
-        // `CONFIG_ERROR`'s `contextual_text` hint shape move both discovery documents → v1.12
-        // (additive, D35; it follows v1.11, which D56's FR-6 arms earned).
-        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.12");
+        // v1.1/D59: rmcp 3.10's `schema_for_input` strips the eight tool input roots' `title` and
+        // `description`, `schema_bundle()` follows, and both discovery documents move → v1.13
+        // (additive, D35, RULED by Miguel in tracker comment 406; it follows D57's v1.12).
+        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.13");
     }
 
     #[test]

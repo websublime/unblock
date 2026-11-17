@@ -27,7 +27,7 @@ use unblock_mcp::Quotas;
 /// tool-dispatch path.
 ///
 /// `#[rmcp::tool_handler]` only generates a `call_tool` when the impl does NOT already define one
-/// (`rmcp-macros-1.7.0/src/tool_handler.rs:44`, `if !has_method("call_tool", ...)`); `unblock` relies
+/// (`rmcp-macros-3.10.0/src/tool_handler.rs:44`, `if !has_method("call_tool", ...)`); `unblock` relies
 /// on that suppression to install the NFR-18 rate-limit chokepoint. This pin proves the suppression
 /// still holds: with `max_concurrent_requests = 0` EVERY `try_acquire` fails, so EVERY tool call MUST
 /// reject in-band with `RATE_LIMITED`. If a future rmcp bypasses the hand-written method

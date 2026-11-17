@@ -1,6 +1,6 @@
 //! `unblock-mcp` (L7) — the PRIMARY product surface: an `rmcp` stdio MCP server (`unblock mcp`)
 //! exposing the engine as the consolidated 8-tool taxonomy + resources + prompts,
-//! duplicate-key-scanned at the transport before parse (D43) — that same transport answers an un-decodable-`id` frame `-32600` on the recovered id and DROPS it (D47) — quota-checked and strictly deserialized at the boundary
+//! duplicate-key-scanned at the transport before parse (D43) — that same transport answers a line failing the typed parse by D59's three rules, `-32700` on a readable id (D54) — quota-checked and strictly deserialized at the boundary
 //! under quotas (NFR-18), discoverable via a `contract_version`-stamped bundle (FR-12), every error
 //! mapped to the structured boundary (FR-11). A thin adapter over `Session` (no write orchestration).
 //! See `docs/plans/crates/unblock-mcp.md`.
@@ -61,8 +61,11 @@ pub use server::run_mcp_server;
 
 // Test-only seam (feature-gated, `#[doc(hidden)]`): the in-process MCP lifecycle test drives the
 // real server over an in-memory duplex transport via these. NEVER part of the shipped contract.
-// `mcp_server_duplex_unclamped_for_test` is the CD-6 assumption-pin variant that OMITS the
-// `VersionClampingTransport` so `tests/protocol_version.rs` can pin rmcp's raw serve-loop negotiation.
+// `mcp_server_duplex_raw_for_test` is the RAW rmcp serve path — no scan, no gate — whose one use is
+// D43's fail-closed absent-verdict cell.
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
-pub use server::{UnblockServer, mcp_server_duplex_for_test, mcp_server_duplex_unclamped_for_test};
+pub use server::{
+    UnblockServer, mcp_server_duplex_for_test, mcp_server_duplex_raw_for_test,
+    mcp_server_duplex_with_returned_signal_for_test,
+};

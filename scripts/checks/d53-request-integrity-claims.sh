@@ -55,6 +55,9 @@
 # cell, inverted to `…_is_dropped_at_eof`) and rewords Q7's reason and the success line, which say a read
 # error abandons the line, each with its one-line reason here. The partial-line keep
 # across a dropped `receive()` (Q6, Q7, Q9, Q15) is KEPT, and is now rmcp's own behaviour too.
+#   Q7  REASON (D59)     — a read error keeps the half-read line for the re-call (D59 clause (7)).
+#   Q8  RE-POINTED (D59) — to the EOF arm that drops an unterminated final line.
+#   Q16 RE-POINTED (D59) — to the inverted `…_is_dropped_at_eof` cell.
 #
 # Exit: 0 = pass · 1 = BLOCK (a required landing is missing) · 2 = cannot evaluate (fail-closed).
 set -u
@@ -82,7 +85,7 @@ RANGE_ALT_RE='D\(59\|58\|'
 # The LIVE published contract version. D53 does NOT move it, and neither does the D47 amendment, so
 # this row is the affirmative record of that. It tracks the LIVE id, so a later decision's bump moves
 # it in that decision's implementation commit.
-CONTRACT_RE='unblock\.mcp\.v1\.12'
+CONTRACT_RE='unblock\.mcp\.v1\.13'
 
 # The SAME two spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte rather than a regex operator. DERIVED, never hand-written a second time. `printf '%s'`
@@ -137,8 +140,8 @@ Q3@crates/unblock-mcp/src/wire.rs@^ +write_owned\(self\.write\.clone\(\), item\)
 Q4@crates/unblock-mcp/src/wire.rs@^ +self\.settle_parked_reply\(\)\.await\?;@self\.settle_parked_reply\(\)\.await\?;@[D47 8(v) amendment] receive() still SETTLES the parked reply and returns None on its failure within the same call. The anchor is the teeth; the requirement restates it
 Q5@crates/unblock-mcp/src/wire.rs@^ +let _ = self\.settle_parked_reply@let _ = self\.settle_parked_reply\(\)\.await;@[D47 8(v) amendment] close() still settles the parked reply before it takes the writer, so a reply answered before a close is not cut off by it
 Q6@crates/unblock-mcp/src/wire.rs@^ +line_complete: bool,@line_complete: bool,@[D53] the transport still records whether line_buf holds a COMPLETE line. The anchor is the teeth
-Q7@crates/unblock-mcp/src/wire.rs@^ +if self\.line_complete \{@if self\.line_complete \{@[D53] the line buffer is still cleared ONLY after a complete line (or once a read error abandons it, as rmcp does); an unconditional clear discards the bytes a cancelled read_until consumed
-Q8@crates/unblock-mcp/src/wire.rs@^ +Ok\(0\) if @Ok\(0\) if self\.line_buf\.is_empty\(\) => return None,@[D53] EOF still ends the stream only when no partial line is held; a bare Ok(0) arm drops an unterminated final line that a dropped receive() left in the buffer
+Q7@crates/unblock-mcp/src/wire.rs@^ +if self\\.line_complete \\{@if self\\.line_complete \\{@[D53] the line buffer is still cleared ONLY after a complete line; since D59 clause (7) a read error KEEPS the half-read line for the re-call, as rmcp 3.10 does, and an unconditional clear discards the bytes a cancelled or failed read_until consumed
+Q8@crates/unblock-mcp/src/wire.rs@^ +Ok\\(_\\) if !self\\.line_buf\\.ends_with@Ok\\(_\\) if !self\\.line_buf\\.ends_with\\(b.\\\\n.\\) => return None,@[D59 re-pointed] the EOF arm: an unterminated final line at EOF is DROPPED and the stream ends, as rmcp 3.10 drops it (D59 clause (7)); processing it is the pre-D59 shape
 Q9@crates/unblock-mcp/src/wire.rs@^ +Ok\(_\) => self\.line_complete@Ok\(_\) => self\.line_complete = true,@[D53] a completed read still marks the line complete, which is the only thing that lets the next loop clear it
 Q10@crates/unblock-mcp/src/wire.rs@^ +async fn an_out_of_band_reply_survives_a_dropped_receive@async fn an_out_of_band_reply_survives_a_dropped_receive\(\)@[D47 8(v) amendment] the deterministic cell (write lock held, receive() polled once and dropped, lock released, reply reaches the output) is still declared
 Q11@crates/unblock-mcp/src/wire.rs@^ +async fn a_reply_that_cannot_be_written_ends_the_same_receive@async fn a_reply_that_cannot_be_written_ends_the_same_receive\(\)@[D47 8(v) amendment] the failed-write cell is still declared — a failed reply still ends the SAME receive() with None, which D40's teardown relies on
@@ -146,7 +149,7 @@ Q12@crates/unblock-mcp/src/wire.rs@^ +async fn a_panicked_reply_task_ends_the_re
 Q13@crates/unblock-mcp/src/wire.rs@^ +async fn consecutive_bad_frames_are_answered_in_arrival_order@async fn consecutive_bad_frames_are_answered_in_arrival_order\(\)@[D47 8(v) amendment] the ordering cell is still declared — it goes red if the settle moves below the read, which no line grep can see
 Q14@crates/unblock-mcp/src/wire.rs@^ +async fn close_waits_for_a_parked_reply@async fn close_waits_for_a_parked_reply\(\)@[D47 8(v) amendment] the close cell is still declared
 Q15@crates/unblock-mcp/src/wire.rs@^ +async fn a_line_split_by_a_dropped_receive_is_delivered_whole@async fn a_line_split_by_a_dropped_receive_is_delivered_whole\(\)@[D53] the deterministic mid-line drop cell is still declared — it goes red for an added unconditional clear, which no line grep can see
-Q16@crates/unblock-mcp/src/wire.rs@^ +async fn an_unterminated_line_split_by_a_dropped_receive@async fn an_unterminated_line_split_by_a_dropped_receive_is_delivered_at_eof\(\)@[D53] the unterminated-final-line cell is still declared
+Q16@crates/unblock-mcp/src/wire.rs@^ +async fn an_unterminated_line_split_by_a_dropped_receive@async fn an_unterminated_line_split_by_a_dropped_receive_is_dropped_at_eof\\(\\)@[D59 re-pointed] the unterminated-final-line cell, inverted to the EOF drop (D59 clause (7), criterion (l))
 Q17@crates/unblock-mcp/tests/receive_cancellation.rs@^ *async fn an_out_of_band_reply_survives_pings_in_flight@async fn an_out_of_band_reply_survives_pings_in_flight\(\)@[D47 8(v) amendment] the serve-loop cell with pings in flight over a small-capacity duplex is still declared
 Q18@crates/unblock-mcp/tests/receive_cancellation.rs@^ *async fn a_frame_larger_than_one_read_survives@async fn a_frame_larger_than_one_read_survives_pings_in_flight\(\)@[D53] the serve-loop cell driving a frame larger than the 8 KiB read buffer with requests in flight is still declared
 Q19@crates/unblock-mcp/tests/common/mod.rs@^pub async fn connect_raw_with_outbound_capacity@pub async fn connect_raw_with_outbound_capacity\(@the small-capacity connect helper is still declared; the 1 MiB helper beside it never fills, so the serve-loop reply cell would assert nothing
@@ -251,5 +254,5 @@ check_table_floor 'required-landing (P)' "$p_count" 4 || blocked=1
 check_table_floor 'row-anchored (Q)' "$q_count" 54 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
-say "OK — the parked reply, its spawn, the shared write future and both settles are in the tree, the line buffer is cleared only after a complete line (or a read error) and EOF keeps an unterminated one, every cell and the small-capacity harness are declared, the tracker names ub-zja, ub-nbz and both residual ids, the D53, D47, D50 and D43 rows and the fork doctrine carry their texts, the rendered roadmap carries all three bullets, the sibling reason strings are corrected, this gate is specified, wired, listed and named as the newest reference, and the live D-range is current at every prose site and every sibling knob while the contract version stands unmoved."
+say "OK — the parked reply, its spawn, the shared write future and both settles are in the tree, the line buffer is cleared only after a complete line (a read error keeps the half-read line for the re-call, D59) and EOF drops an unterminated one, every cell and the small-capacity harness are declared, the tracker names ub-zja, ub-nbz and both residual ids, the D53, D47, D50 and D43 rows and the fork doctrine carry their texts, the rendered roadmap carries all three bullets, the sibling reason strings are corrected, this gate is specified, wired, listed and named as the newest reference, and the live D-range is current at every prose site and every sibling knob while the contract version stands unmoved."
 exit 0

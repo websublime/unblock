@@ -57,6 +57,9 @@
 # D59's IMPLEMENTATION commit RE-POINTS Q6 (the absent/unusable arm, to rule (γ)), Q16 and Q17 (the
 # differential, to the `Silenced`/`IdInserted` tiers graded against rmcp 3.10's live bytes), each with
 # its one-line reason here. Q7 (`ErrorData::parse_error("Parse error", None)`) stays.
+#   Q6  RE-POINTED (D59) — the absent/unusable arm now feeds rule (γ)'s id-less -32600 on a strict-JSON line.
+#   Q16 RE-POINTED (D59) — the differential grades Silenced, Recoded and IdInserted against rmcp 3.10.
+#   Q17 RE-POINTED (D59) — IdInserted is rule (β)'s tier (rmcp's id-less -32600 against our -32700 on the id).
 #
 # Exit: 0 = pass · 1 = BLOCK (a required landing is missing) · 2 = cannot evaluate (fail-closed).
 set -u
@@ -84,7 +87,7 @@ RANGE_ALT_RE='D\(59\|58\|'
 # The LIVE published contract version. D54 does NOT move it, so this row is the affirmative record of
 # that. It tracks the LIVE id, so a later decision's bump moves it in that decision's implementation
 # commit.
-CONTRACT_RE='unblock\.mcp\.v1\.12'
+CONTRACT_RE='unblock\.mcp\.v1\.13'
 
 # The SAME two spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte rather than a regex operator. DERIVED, never hand-written a second time. `printf '%s'`
@@ -147,7 +150,7 @@ Q2@crates/unblock-mcp/src/wire.rs@^ +NotAMessage\(serde_json::Error\),@NotAMessa
 Q3@crates/unblock-mcp/src/wire.rs@^fn parse_error_reply_id\(@fn parse_error_reply_id\(failure: &ParseFailure, line: &\[u8\]\) -> Option<RequestId>@the reply-id function is still declared with its two inputs and its optional id
 Q4@crates/unblock-mcp/src/wire.rs@^ +ParseFailure::NotJson\(_\) =>@ParseFailure::NotJson\(_\) => None,@leg (b): a line that is not strict JSON yields NO id. Mutant: scanning NotJson too, which answers trailing-garbage, non-UTF-8, lone-surrogate and over-deep lines on an id read from text that is not JSON
 Q5@crates/unblock-mcp/src/wire.rs@$RECOVERED_ARM_LINE_RE@$RECOVERED_ARM_RE@leg (c): a RECOVERED id is passed through. The anchor is the teeth: rewriting the arm to answer None makes it vanish. It is distinct from D47's arm, which opens a block, and from d47's Q12 anchor, which this line does not match
-Q6@crates/unblock-mcp/src/wire.rs@^ +EnvelopeId::Absent [|] EnvelopeId::Unusable =>@=> None,@an absent or unusable id still yields the OMITTED reply, never a fabricated one. The anchor is this arm's own two-verdict spelling, so D47's one-verdict arms cannot satisfy or break it
+Q6@crates/unblock-mcp/src/wire.rs@^ +EnvelopeId::Absent [|] EnvelopeId::Unusable =>@=> None,@[D59 re-pointed] an absent or unusable id still yields NO id, which on a strict-JSON line now selects rule (γ), rmcp 3.10's id-less -32600 (PRD §4 D59 clause (2)), never a fabricated id. The anchor is this arm's own two-verdict spelling
 Q7@crates/unblock-mcp/src/wire.rs@^ +ErrorData::parse_error\(@ErrorData::parse_error\(\"Parse error\", None\),@the code stays -32700 with rmcp's message and no data, so the id is the ONLY byte that differs from rmcp (D54 clause 5). Unchanged on purpose: it passes on the pre-fix tree
 Q8@crates/unblock-mcp/src/wire.rs@^ +let id = parse_error_reply_id\(@let id = parse_error_reply_id\(&failure, line\);@the Err arm still CALLS the recovery. A grep cannot prove the result reaches park_reply; the byte cells do
 Q9@crates/unblock-mcp/src/wire.rs@^\) -> Result<Option<T>, ParseFailure> \{@ParseFailure@the compatibility parse still RETURNS the classification instead of rmcp's bare serde error
@@ -157,8 +160,8 @@ Q12@crates/unblock-mcp/src/wire.rs@^ +\.map_err\(ParseFailure::NotJson\)@\.map_e
 Q13@crates/unblock-mcp/src/wire.rs@^ +async fn the_parse_error_corpus_is_answered_byte_for_byte@async fn the_parse_error_corpus_is_answered_byte_for_byte\(\)@every parse-error corpus entry is answered with its EXACT hand-written bytes and never delivered
 Q14@crates/unblock-mcp/src/wire.rs@^ +fn the_parse_error_corpus_is_not_vacuous@fn the_parse_error_corpus_is_not_vacuous\(\)@every entry still REACHES the arm it is declared to grade — a tidied row grades nothing while the byte cells stay green
 Q15@crates/unblock-mcp/src/wire.rs@^ +fn every_parse_error_kind_is_represented@fn every_parse_error_kind_is_represented\(\)@every reply kind and both gate halves stay in the corpus, as a SET
-Q16@crates/unblock-mcp/src/wire.rs@^ +async fn the_per_entry_differential_holds_for_every_tier@async fn the_per_entry_differential_holds_for_every_tier\(\)@the per-entry differential still grades the id-inserted tier against rmcp's LIVE bytes, rmcp's own reply asserted id-less
-Q17@crates/unblock-mcp/src/wire.rs@^ +IdInserted\(ParseExpect\),@IdInserted\(ParseExpect\),@the CD-7 harness still carries the D54 tier, so the set-equality guard declares its entries
+Q16@crates/unblock-mcp/src/wire.rs@^ +async fn the_per_entry_differential_holds_for_every_tier@async fn the_per_entry_differential_holds_for_every_tier\(\)@[D59 re-pointed] the per-entry differential grades every tier against rmcp 3.10's LIVE bytes: Silenced (rule (α), rmcp writes nothing), Recoded (rule (α) on a shape-first line, rmcp's id-less -32600) and IdInserted (rule (β), rmcp's id-less -32600 against our -32700 on the id)
+Q17@crates/unblock-mcp/src/wire.rs@^ +IdInserted\(ParseExpect\),@IdInserted\(ParseExpect\),@[D59 re-pointed] the CD-7 harness still carries the rule-(β) tier, so the set-equality guard declares its entries beside the Silenced and Recoded ones
 Q18@crates/unblock-mcp/src/wire.rs@^ +\"-32700 recovered id\",@\"-32700 recovered id\",@the cancellation cell still carries the recovered-id -32700 arm, the only cell that sees an inline (unparked) write of this reply
 Q19@crates/unblock-mcp/src/envelope_id_corpus.rs@^pub fn parse_error_corpus\(\)@pub fn parse_error_corpus\(\) -> Vec<ParseErrorFrame>@the hand-written corpus is still declared in the module the shared any(test, feature) gate compiles
 Q20@crates/unblock-mcp/src/envelope_id_corpus.rs@^pub fn parse_error_bytes\(@pub fn parse_error_bytes\(expect: &ParseExpect\) -> Vec<u8>@the hand-written expected-bytes function is still declared — every byte assertion grades through it, never through the production encoder

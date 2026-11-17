@@ -3,13 +3,13 @@
 //! Builds the guided message set that walks an agent from the default-complete `ready` set to a
 //! `claim`. Pure (no `Session`).
 
-use rmcp::model::{PromptMessage, PromptMessageRole};
+use rmcp::model::{PromptMessage, Role};
 
 /// Build the `plan_next_work` guided-workflow messages.
 #[must_use]
 pub(crate) fn messages() -> Vec<PromptMessage> {
     vec![PromptMessage::new_text(
-        PromptMessageRole::User,
+        Role::User,
         "Plan the next unit of work. Steps:\n\
          1. Read the `unblock://issues/ready` resource (or call `query` with `{\"kind\":\"ready\"}`) \
             — it is default-complete and already hybrid-ranked.\n\

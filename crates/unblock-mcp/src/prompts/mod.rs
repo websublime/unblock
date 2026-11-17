@@ -49,7 +49,7 @@ mod tests {
     //! D42 prologue every tool runs). A suggested call missing a required field, or carrying an
     //! unknown one, fails here instead of failing for the agent that follows the prompt (ub-kwh).
 
-    use rmcp::model::{JsonObject, PromptMessage, PromptMessageContent, PromptMessageRole};
+    use rmcp::model::{ContentBlock, JsonObject, PromptMessage, Role};
     use serde_json::Value;
     use unblock_error::StructuredError;
 
@@ -105,10 +105,10 @@ mod tests {
     fn check_prompt(messages: &[PromptMessage]) -> Result<usize, String> {
         let mut checked = 0;
         for message in messages {
-            let PromptMessageContent::Text { text } = &message.content else {
+            let ContentBlock::Text(content) = &message.content else {
                 continue;
             };
-            let parts: Vec<&str> = text.split('`').collect();
+            let parts: Vec<&str> = content.text.split('`').collect();
             if parts.len().is_multiple_of(2) {
                 return Err("unbalanced backticks".to_owned());
             }
@@ -137,7 +137,7 @@ mod tests {
     }
 
     fn text_message(text: &str) -> Vec<PromptMessage> {
-        vec![PromptMessage::new_text(PromptMessageRole::User, text)]
+        vec![PromptMessage::new_text(Role::User, text)]
     }
 
     #[test]

@@ -376,21 +376,66 @@ fn a_non_object_arguments_stays_a_protocol_fault() {
     );
 }
 
-/// `params.task` is rejected by rmcp (`TaskSupport::Forbidden` is the default) BEFORE
-/// `ServerHandler::call_tool`, so `request.task` is always `None` at our quota check. It is
-/// therefore NOT an exploitable bypass channel. This documents that, and fails loudly if a future
-/// rmcp changes the defaulting.
+/// **Inverted by PRD §4 D59 clause (4), criterion (i).** rmcp 3.10's `CallToolRequestParams` has
+/// no `task` field and denies no unknown key, so a present `params.task` is discarded during the
+/// typed decode and the call EXECUTES as if it were absent (rmcp 1.7 refused it `-32602`). It is NOT
+/// measured by the D42 quota, because it never reaches `call_tool` and drives no work: a minimal
+/// call carrying a 300 KiB `task` still succeeds.
+///
+/// Mutants: an in-band or out-of-band rejection of `task` (the pre-D59 shape); a quota that measures
+/// it (the 300 KiB call fails); a `task` that changes the result.
 #[test]
-fn task_invocation_stays_a_protocol_fault() {
+fn a_task_param_is_ignored_and_the_call_runs() {
     let ws = Workspace::init();
     let mut c = client(&ws);
-    let resp = c.call_tool_raw_params(&json!({
-        "name": "issue", "arguments": {"action":"show","id":"ub-1"}, "task": {}
+    let (is_error, created) =
+        c.call_tool("issue", &json!({"action":"create","title":"task-target"}));
+    assert!(!is_error, "fixture create: {created}");
+    let id = common::issue_id(&created);
+    let show = json!({"action":"show","id":id});
+
+    let plain = c.call_tool_raw_params(&json!({"name": "issue", "arguments": show}));
+    let with_task = c.call_tool_raw_params(&json!({
+        "name": "issue", "arguments": show, "task": {}
     }));
     assert!(
-        resp.get("error").is_some(),
-        "`params.task` MUST stay a protocol fault. If this goes green, rmcp changed its TaskSupport \
-         defaulting and `task` became a live channel that our quota now has to be re-checked \
-         against: {resp}"
+        with_task.get("error").is_none(),
+        "`params.task` is ignored on rmcp 3.10 — the call must RUN: {with_task}"
     );
+    assert_eq!(
+        with_task["result"], plain["result"],
+        "a call with `params.task` returns the SAME result as the same call without it"
+    );
+
+    // Same store effect: a create carrying `task` creates exactly one issue, like one without it.
+    let list = json!({"kind":"list"});
+    let before = common::id_set(&c.call_tool("query", &list).1);
+    let created = c.call_tool_raw_params(&json!({
+        "name": "issue",
+        "arguments": {"action":"create","title":"created-with-task"},
+        "task": {"ttl": 1}
+    }));
+    assert!(
+        created.get("error").is_none() && created["result"]["isError"] != true,
+        "{created}"
+    );
+    let after = common::id_set(&c.call_tool("query", &list).1);
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "a create with `params.task` creates exactly one issue (before {before:?}, after {after:?})"
+    );
+    assert!(before.is_subset(&after), "nothing else moved");
+
+    // 300 KiB of `task` is NOT measured by the quota (256 KiB): it never reaches `call_tool`.
+    let big = "t".repeat(300 * 1024);
+    let resp = c.call_tool_raw_params(&json!({
+        "name": "issue", "arguments": show, "task": {"pad": big}
+    }));
+    assert!(
+        resp.get("error").is_none() && resp["result"]["isError"] != true,
+        "a minimal call carrying a 300 KiB `params.task` succeeds — `task` is unmeasured: {}",
+        resp.to_string().chars().take(300).collect::<String>()
+    );
+    assert_eq!(resp["result"], plain["result"]);
 }

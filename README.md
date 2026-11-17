@@ -218,7 +218,7 @@ unblock's product surface is MCP, so the goal is to get an MCP client spawning t
    the workspace directory it bound **to stderr** (diagnostics only, NFR-14) — check that line to confirm
    it opened the workspace you expected.
 
-The contract id is **`unblock.mcp.v1.12`**. For machine-readable discovery, agents read the resources
+The contract id is **`unblock.mcp.v1.13`**. For machine-readable discovery, agents read the resources
 `unblock://capabilities` (the descriptor tables) and `unblock://schema` (the full JsonSchema bundle
 for every tool I/O). The topology is **child-per-client** (D31): each MCP client spawns its own
 `unblock mcp` child, and a cross-process advisory `.unblock/.write.lock` serializes writers across
@@ -226,7 +226,8 @@ clients.
 
 ## MCP surface
 
-The contract (`unblock.mcp.v1.12`) exposes **8 tools**, **5 resources**, and **3 prompts**.
+The contract (`unblock.mcp.v1.13`) exposes **8 tools**, **5 resources**, and **3 prompts**.
+unblock mcp serves both MCP lifecycles: the initialize handshake (protocol revisions up to 2025-11-25) and the stateless 2026-07-28 lifecycle with server/discover.
 
 The values below are sent under the tool's discriminant key: `action` for `issue`, `defer`, `dep`,
 `sync` and `comment`, but **`kind` for `query` and `diagnostics`** (e.g. `{"kind": "ready"}`, never

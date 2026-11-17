@@ -217,11 +217,11 @@ async fn ns5_a_duplicate_outside_params_is_not_flagged() {
 
 /// **Row 6.8 — the fail-closed ABSENT-verdict arm.**
 ///
-/// `mcp_server_duplex_unclamped_for_test` is the CD-6 RAW rmcp serve path and deliberately installs
-/// NO scan, so a tool call through it reaches `call_tool` with no verdict at all. That arm — "absent
-/// ⇒ reject" — is the entire security property (an empty `Extensions` is the DEFAULT state, so the
-/// opposite encoding would fail OPEN), and before this cell it had zero coverage: the only in-tree
-/// driver of that helper does an `initialize` handshake and never calls a tool.
+/// `mcp_server_duplex_raw_for_test` is the RAW rmcp serve path and deliberately installs NO scan,
+/// so a tool call through it reaches `call_tool` with no verdict at all. That arm — "absent ⇒
+/// reject" — is the entire security property (an empty `Extensions` is the DEFAULT state, so the
+/// opposite encoding would fail OPEN), and this cell is that helper's one remaining use (D59
+/// clause (10)).
 #[tokio::test]
 async fn an_unscanned_path_is_rejected_fail_closed() {
     let session = common::session().await;

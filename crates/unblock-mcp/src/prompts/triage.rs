@@ -4,13 +4,13 @@
 //! deferred work via the read tools/resources. Pure (no `Session`) — the agent drives the actual
 //! reads via the `query`/`dep` tools and the `unblock://issues/...` resources.
 
-use rmcp::model::{PromptMessage, PromptMessageRole};
+use rmcp::model::{PromptMessage, Role};
 
 /// Build the `triage` guided-workflow messages.
 #[must_use]
 pub(crate) fn messages() -> Vec<PromptMessage> {
     vec![PromptMessage::new_text(
-        PromptMessageRole::User,
+        Role::User,
         "Triage the workspace. Steps:\n\
          1. Call `query` with `{\"kind\":\"blocked\"}` to find blocked issues, and `dep` with \
             `{\"action\":\"cycles\"}` to surface any dependency cycles.\n\

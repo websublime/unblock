@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.12",
+  "contract_version": "unblock.mcp.v1.13",
   "issue": {
     "input": {
       "$defs": {
@@ -108,7 +108,6 @@ expression: schema_bundle()
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `issue` tool input (spine §5.2 — EXACT shape; 11 actions).",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -845,7 +844,6 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "IssueInput",
       "type": "object"
     },
     "output": {
@@ -1585,7 +1583,6 @@ expression: schema_bundle()
     "input": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "The `claim` tool input (spine §5.2 — EXACT shape).",
       "properties": {
         "agent_name": {
           "default": null,
@@ -1624,7 +1621,6 @@ expression: schema_bundle()
         "id",
         "assignee"
       ],
-      "title": "ClaimInput",
       "type": "object"
     },
     "output": {
@@ -2026,7 +2022,6 @@ expression: schema_bundle()
   "defer": {
     "input": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `defer` tool input (spine §5.2 — EXACT shape).",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -2121,7 +2116,6 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "DeferInput",
       "type": "object"
     },
     "output": {
@@ -2566,7 +2560,6 @@ expression: schema_bundle()
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `query` tool input (spine §5.2 — EXACT shape).",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -3329,7 +3322,6 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "QueryInput",
       "type": "object"
     },
     "output": {
@@ -3893,7 +3885,6 @@ expression: schema_bundle()
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `dep` tool input (spine §5.2 — EXACT shape; was `DepInput2`).",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -4089,7 +4080,6 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "DepToolInput",
       "type": "object"
     },
     "output": {
@@ -4283,7 +4273,6 @@ expression: schema_bundle()
   "sync": {
     "input": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `sync` tool input (spine §5.2 — EXACT shape).",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -4351,7 +4340,6 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "SyncInput",
       "type": "object"
     },
     "output": {
@@ -4457,7 +4445,6 @@ expression: schema_bundle()
   "diagnostics": {
     "input": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `diagnostics` tool input (spine §5.2 — EXACT shape; mirrors [`DiagnosticKind`]).",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -4581,7 +4568,6 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "DiagnosticsInput",
       "type": "object"
     },
     "output": {
@@ -4676,7 +4662,6 @@ expression: schema_bundle()
   "comment": {
     "input": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `comment` tool input (spine §5.2 — EXACT shape).",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -4839,7 +4824,6 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "CommentToolInput",
       "type": "object"
     },
     "output": {

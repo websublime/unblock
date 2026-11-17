@@ -412,12 +412,12 @@ fn ns2_a_duplicated_params_key_is_a_parse_error_on_its_id_and_recovers() {
     );
 }
 
-/// NS4 — a duplicated ENVELOPE `id` is answered OUT-OF-BAND `-32600` on the RECOVERED id (D47).
+/// NS4 — a duplicated ENVELOPE `id` is answered OUT-OF-BAND on the RECOVERED id: `-32700` since PRD
+/// §4 D59 clause (2) rule (β) (D47 answered it `-32600`).
 ///
-/// It parses cleanly (so the compatibility filter never runs) and decodes as a NOTIFICATION,
-/// because rmcp tries the `Request` variant first and `JsonRpcRequest` requires an `id` that
-/// deserializes as a number-or-string. Before D47 the notification path ignored it and a client
-/// waiting on that id hung forever. The two reasons the pre-D47 cell gave for scoping that out were
+/// Under rmcp 1.7 it decoded as a NOTIFICATION and a client waiting on that id hung until D47
+/// answered it; under rmcp 3.10 a `method`+`id` frame is a Request or nothing, so the duplicated id
+/// fails the typed parse and the strict-JSON line is answered on its readable id. The two reasons the pre-D47 cell gave for scoping that out were
 /// BOTH falsified, and are recorded here so they are not re-derived: "there is no request id to
 /// answer on" looked at the DECODED message, where rmcp has dropped the surplus `id`, not at the RAW
 /// line where it is still present; and the in-band arm D43 protects belongs to `call_tool`, which
@@ -455,7 +455,7 @@ fn ns4_a_duplicated_envelope_id_with_equal_ids_is_answered_on_that_id() {
 
     assert!(
         c.saw_response_for(echo_id),
-        "the EQUAL-ids frame must now be answered ON that id (D47); on the pre-D47 binary this \
+        "the EQUAL-ids frame must be answered ON that id (rule (β)); on the pre-D47 binary this \
          frame was silent, which is what makes this cell the before/after witness. Lines: {:?}",
         c.seen_lines
     );
@@ -466,12 +466,13 @@ fn ns4_a_duplicated_envelope_id_with_equal_ids_is_answered_on_that_id() {
         .unwrap_or_else(|| panic!("the answer line is missing: {:?}", c.seen_lines));
     let parsed: Value = serde_json::from_str(answer).expect("the answer is JSON");
     assert_eq!(
-        parsed["error"]["code"], -32600,
-        "and it must be an Invalid Request, not a tool result: {parsed}"
+        parsed["error"]["code"], -32700,
+        "and it must be the -32700 on that id (D59 rule (β)), not a tool result: {parsed}"
     );
 }
 
-/// `NS4b` — the AMBIGUOUS half: two DIFFERING ids answer with the `id` OMITTED.
+/// `NS4b` — the AMBIGUOUS half: two DIFFERING ids answer with the `id` OMITTED — rmcp 3.10's id-less
+/// `-32600` since D59 rule (γ).
 ///
 /// This drives the ORIGINAL pre-D47 frame unchanged, and RETAINS both of its original negatives —
 /// which is the discrimination that cell bought and which must not be lost. Note that both of them
@@ -515,14 +516,13 @@ fn ns4_a_duplicated_envelope_id_with_differing_ids_answers_with_the_id_omitted()
         "nor under the last-wins id. Lines: {:?}",
         c.seen_lines
     );
-    let omitted = c
-        .seen_lines
-        .iter()
-        .any(|line| line.contains("-32600") && !line.contains(r#""id":"#));
+    let omitted = c.seen_lines.iter().any(|line| {
+        line == r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid request"}}"#
+    });
     assert!(
         omitted,
-        "a -32600 with the id OMITTED must nevertheless have been emitted (D47) — before D47 this \
-         frame produced nothing at all. Lines: {:?}",
+        "rmcp's id-less -32600 must have been emitted (rule (γ)) — before D47 this frame produced \
+         nothing at all. Lines: {:?}",
         c.seen_lines
     );
 }

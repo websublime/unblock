@@ -10,7 +10,8 @@
 //! downstream T2.4 concern).
 //!
 //! **D42:** the check moved from per-tool-body over the RE-SERIALIZED TYPED input to ONCE in
-//! `call_tool` over the WHOLE `tools/call` `params` (name + arguments + `_meta` + `task`), inside
+//! `call_tool` over the WHOLE `tools/call` `params` (name + arguments + inputResponses +
+//! requestState + `_meta`, D59 clause (4)), inside
 //! the rate-limit permit. The pre-D42 placement meant a payload parked under an unknown key was
 //! never measured at all.
 
@@ -479,7 +480,8 @@ async fn quota_check_sits_inside_the_rate_limit_permit() {
 /// The re-serialization used for measurement is LOSSLESS. This is what pins "measuring the request
 /// here is NOT the `preflight` defect": every `CallToolRequestParams` field is raw JSON, so
 /// `to_value` cannot drop anything — unlike the typed DTO, which dropped every unknown key and
-/// invented `#[serde(default)]` padding.
+/// invented `#[serde(default)]` padding. Over rmcp 3.10's struct (PRD §4 D59 clause (4), criterion
+/// (i)) that is `name` + `arguments` + `inputResponses` + `requestState` + `_meta`.
 #[test]
 fn request_measurement_is_lossless() {
     use rmcp::model::CallToolRequestParams;
@@ -489,13 +491,26 @@ fn request_measurement_is_lossless() {
     arguments.insert("totally_unknown_key".into(), json!("PRESERVED"));
     let mut meta = serde_json::Map::new();
     meta.insert("blob".into(), json!("META-PRESERVED"));
+    let mut input_responses = std::collections::BTreeMap::new();
+    input_responses.insert("r1".to_string(), json!({"nested": "INPUT-PRESERVED"}));
 
-    let mut params = CallToolRequestParams::new("issue").with_arguments(arguments);
-    params.meta = Some(rmcp::model::Meta(meta));
+    let mut params = CallToolRequestParams::new("issue")
+        .with_arguments(arguments)
+        .with_input_responses(input_responses)
+        .with_request_state("STATE-PRESERVED");
+    params.meta = Some(rmcp::model::RequestMetaObject::from(meta));
 
     let value = serde_json::to_value(&params).expect("lossless");
     assert_eq!(value["name"], "issue");
     assert_eq!(value["arguments"]["totally_unknown_key"], "PRESERVED");
+    assert_eq!(
+        value["inputResponses"]["r1"]["nested"], "INPUT-PRESERVED",
+        "`inputResponses` is raw JSON on 3.10 and MUST be measured: {value}"
+    );
+    assert_eq!(
+        value["requestState"], "STATE-PRESERVED",
+        "`requestState` MUST be measured: {value}"
+    );
     assert_eq!(
         value["_meta"]["blob"], "META-PRESERVED",
         "`_meta` MUST appear in the measured value — measuring only `request.arguments` would \

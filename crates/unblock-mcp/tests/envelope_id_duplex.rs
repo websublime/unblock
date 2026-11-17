@@ -1,9 +1,12 @@
-//! **[v1.0.1/D47] The UN-DECODABLE-ENVELOPE-`id` class over a LIVE duplex.**
+//! **The envelope-`id` corpus over a LIVE duplex** (first minted for D47; re-classified by PRD §4
+//! D59 clauses (2) and (3)).
 //!
 //! The in-module transport cells (`src/wire.rs`) already pin the exact reply BYTES. What they
-//! cannot show is that the arm is actually INSTALLED on the path `run_mcp_server` uses, and — the
-//! part no channel assertion reaches — that a class frame naming a destructive action EXECUTES
-//! NOTHING.
+//! cannot show is that the parse-error arm's three rules are actually INSTALLED on the path
+//! `run_mcp_server` uses, and — the part no channel assertion reaches — that a frame failing the
+//! typed parse while naming a destructive action EXECUTES NOTHING. Since D59 a duplicated EQUAL id
+//! draws rule (β), `-32700` on that id (D47 answered it `-32600`), and an unreadable id draws rule
+//! (γ), rmcp's id-less `-32600`.
 //!
 //! # Why the effect oracle is the point of this file
 //!
@@ -31,11 +34,11 @@
 mod common;
 
 use unblock_mcp::Quotas;
-use unblock_mcp::envelope_id_corpus::{ISSUE_ID_PLACEHOLDER, divergence_corpus};
+use unblock_mcp::envelope_id_corpus::{ISSUE_ID_PLACEHOLDER, id_corpus};
 
-/// Fetch one divergence-corpus frame as text.
+/// Fetch one envelope-`id` corpus frame as text.
 fn frame_text(entry: &str) -> String {
-    let frame = divergence_corpus()
+    let frame = id_corpus()
         .into_iter()
         .find(|f| f.id == entry)
         .unwrap_or_else(|| panic!("corpus entry {entry} is missing"))
@@ -43,7 +46,8 @@ fn frame_text(entry: &str) -> String {
     String::from_utf8(frame).expect("corpus frames are UTF-8")
 }
 
-/// **C-P1** — a class `tools/call` naming a DESTRUCTIVE action is answered, and executes NOTHING.
+/// **C-P1** — a `tools/call` with a duplicated EQUAL id naming a DESTRUCTIVE action is answered
+/// `-32700` on that id (rule (β)), and executes NOTHING.
 ///
 /// This is the ONLY cell that kills the "rebuild it as a Request on the recovered id and deliver
 /// it" implementation. That implementation is answered-correctly and byte-plausible at every other
@@ -55,7 +59,7 @@ async fn an_undecodable_id_tools_call_answers_and_executes_nothing() {
     let session = common::session().await;
     let (mut client, _server, _cancel) = common::connect_raw(session, Quotas::default()).await;
 
-    let target = common::create_issue(&mut client, "D47 store-effect target").await;
+    let target = common::create_issue(&mut client, "D59 store-effect target").await;
     let before = common::store_fingerprint(&mut client, std::slice::from_ref(&target)).await;
 
     // Point the corpus frame at the live id. The `arguments` are otherwise verbatim.
@@ -70,8 +74,8 @@ async fn an_undecodable_id_tools_call_answers_and_executes_nothing() {
     // stringified id) trips `read_response`'s bounded deadline (ub-f1k) instead of hanging.
     let response = client.request_raw(90016, &raw).await;
     assert_eq!(
-        response["error"]["code"], -32600,
-        "the class frame must be answered -32600: {response}"
+        response["error"]["code"], -32700,
+        "a duplicated equal id is answered -32700 on that id (rule (β), D59 clause (2)): {response}"
     );
     assert!(
         response.get("result").is_none(),
@@ -87,8 +91,8 @@ async fn an_undecodable_id_tools_call_answers_and_executes_nothing() {
     );
 }
 
-/// **C-P2** — the arm is INSTALLED on the real serve path, and the ambiguous frame is answered with
-/// no id while neither of its two candidate ids is ever answered.
+/// **C-P2** — rule (γ) is INSTALLED on the real serve path: the ambiguous frame is answered with
+/// rmcp's id-less `-32600` while neither of its two candidate ids is ever answered.
 ///
 /// Observed by SENTINEL FOLLOW over `seen_lines`, because a reply with no id is invisible to an
 /// id-correlating reader.
@@ -97,7 +101,7 @@ async fn the_arm_is_installed_on_the_real_serve_path() {
     let session = common::session().await;
     let (mut client, _server, _cancel) = common::connect_raw(session, Quotas::default()).await;
 
-    // D04 carries two DIFFERING ids (90004 / 90005), so the reply takes the OMITTED arm.
+    // D04 carries two DIFFERING ids (90004 / 90005), so the reply is rule (γ)'s id-less -32600.
     client.write_raw_line(&frame_text("D04")).await;
 
     // The sentinel is a known-good request; reading its response drains everything the server wrote
@@ -111,8 +115,10 @@ async fn the_arm_is_installed_on_the_real_serve_path() {
     );
 
     assert!(
-        client.saw_line_containing("-32600"),
-        "the ambiguous class frame must still be ANSWERED, with the id omitted: {:?}",
+        client.saw_line_containing(
+            r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid request"}}"#
+        ),
+        "the ambiguous frame must still be ANSWERED with rmcp's id-less -32600: {:?}",
         client.seen_lines
     );
     assert!(

@@ -1,10 +1,9 @@
 //! **[ub-nbz / ub-zja] `receive()` CANCELLATION over the REAL serve path.**
 //!
-//! rmcp polls the transport's `receive()` as one arm of an UNBIASED `tokio::select!`
-//! (`rmcp-1.7.0/src/service.rs:805`, the arm at `:813`) and DROPS it whenever another arm — a handler
-//! response, most often — wins. The in-module cells in `src/wire.rs` pin each consequence at one
-//! deterministic interleaving. These cells pin the same two properties through the INSTALLED stack
-//! (`VersionClampingTransport(PreHandshakeGateTransport(DupScanningTransport))` via
+//! rmcp polls the transport's `receive()` as one arm of a `tokio::select!` in its serve loop and
+//! DROPS it whenever another arm — a handler response, most often — wins. The in-module cells in
+//! `src/wire.rs` pin each consequence at one deterministic interleaving. These cells pin the same two
+//! properties through the INSTALLED stack (`PreHandshakeGateTransport(DupScanningTransport)` via
 //! `mcp_server_duplex_for_test`), in the regime that loses them in production: fast handlers in
 //! flight and a promptly draining client.
 //!
@@ -21,7 +20,7 @@ mod common;
 use std::fmt::Write as _;
 
 use unblock_mcp::Quotas;
-use unblock_mcp::envelope_id_corpus::divergence_corpus;
+use unblock_mcp::envelope_id_corpus::id_corpus;
 
 /// Pings in flight ahead of each bad frame. Eight is the deepest in-flight depth the reply loss was
 /// measured at; any depth that keeps a response `send()` holding the write lock would do.
@@ -40,7 +39,7 @@ const SMALL_OUTBOUND: usize = 32;
 #[tokio::test(flavor = "current_thread")]
 async fn an_out_of_band_reply_survives_pings_in_flight() {
     let frame = |id: &str| {
-        let entry = divergence_corpus()
+        let entry = id_corpus()
             .into_iter()
             .find(|f| f.id == id)
             .unwrap_or_else(|| panic!("{id} missing"));
@@ -49,9 +48,9 @@ async fn an_out_of_band_reply_survives_pings_in_flight() {
     let (recovered, omitted) = (frame("D01"), frame("D04"));
     let arms: [(&str, &str, &str); 3] = [
         (
-            "-32600 recovered id",
+            "-32700 on the recovered id",
             recovered.as_str(),
-            r#""id":90001,"error":{"code":-32600"#,
+            r#""id":90001,"error":{"code":-32700"#,
         ),
         (
             "-32600 id omitted",

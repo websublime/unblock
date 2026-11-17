@@ -1,17 +1,15 @@
-//! The D47 UN-DECODABLE-ENVELOPE-`id` predicate — a `serde::de::DeserializeSeed` over the ROOT
-//! object that recovers the envelope `id` from a frame's RAW BYTES.
-//!
-//! It is also the id source for D54's `-32700` reply ([`crate::wire`]), where it runs only on
-//! lines the strict-JSON gate accepted.
+//! The ENVELOPE-`id` scan — a `serde::de::DeserializeSeed` over the ROOT object that recovers the
+//! envelope `id` from a frame's RAW BYTES. First minted for D47; since D59 it is D54's leg (c): the
+//! id source for the reply [`crate::wire`] writes to a line that fails the typed parse, where it runs
+//! only on lines the strict-JSON gate accepted.
 //!
 //! # Why the bytes are the only place the information exists
 //!
-//! rmcp decodes a JSON-RPC frame through a serde UNTAGGED union tried Request-first (rmcp
-//! `src/model.rs:575-588`), and `JsonRpcRequest` requires `id: RequestId` (`:431-436`). So ANY
-//! frame whose `id` fails to decode falls through to the Notification variant — where
-//! `JsonRpcNotification` has no `id` field at all (`:486-490`) and `CustomNotification` carries only
-//! `method`/`params`/`Extensions` (`:721-729`). The surplus `id` is DROPPED, not retained. By the
-//! time the transport holds a message, the only surviving copy of the id is the raw line.
+//! A line that fails rmcp's typed parse never becomes a message at all, so by the time the transport
+//! holds the failure the only surviving copy of the id is the raw line. rmcp 3.10 decodes by key
+//! PRESENCE (`rmcp-3.10.0/src/model.rs:907`), so a `method`+`id` frame is a Request or nothing; the
+//! rmcp 1.7 path on which an id-carrying frame fell through to the Notification variant, D47's
+//! class, is gone (PRD §4 D59 clause (3)).
 //!
 //! # Why this is a separate module from [`crate::wire`]
 //!
@@ -39,14 +37,11 @@
 //! # The fail-open direction is the OPPOSITE of D43's, on purpose
 //!
 //! `dup_key`'s normative rule is that `Indeterminate` is never `Clean` — fail-CLOSED, because that
-//! verdict gates EXECUTION. Here a tokenizer failure yields [`EnvelopeId::Absent`], i.e. silence.
-//! A reader will assume symmetry, so: this verdict gates a REPLY to a frame on which nothing
-//! executes either way, and over-firing would answer a genuine notification, violating JSON-RPC
-//! 2.0's "The Server MUST NOT reply to a Notification" in a way every conforming client sees. The
-//! arm is also unreachable in practice, because both callers run [`scan`] only on bytes `serde_json`
-//! has ALREADY accepted: D47's on a line the typed `from_slice` decoded, D54's on a line whose typed
-//! parse failed but whose `Value` parse succeeded (the strict-JSON gate). On D54's arm a seed failure
-//! would yield `Absent`, i.e. the id-less `-32700` rmcp writes anyway — still the fail-safe direction.
+//! verdict gates EXECUTION. Here a tokenizer failure yields [`EnvelopeId::Absent`], i.e. no id. This
+//! verdict gates only which id a REPLY carries, to a frame on which nothing executes either way. The
+//! arm is also unreachable in practice, because the caller runs [`scan`] only on a line whose typed
+//! parse failed but whose `Value` parse succeeded (the strict-JSON gate). A seed failure there would
+//! yield `Absent`, i.e. rule (γ)'s id-less reply — still the fail-safe direction.
 
 use rmcp::model::RequestId;
 use serde::Deserialize;
@@ -58,9 +53,8 @@ use std::fmt;
 pub(crate) enum EnvelopeId {
     /// No top-level `id` member (or a non-object root).
     ///
-    /// **D47 OUT OF SCOPE.** This is a legitimate JSON-RPC Notification — "a Request object without
-    /// an id member" — and it MUST keep behaving exactly as it did before D47. On D54's `-32700`
-    /// arm, `Absent` means "no id to recover": the reply stays id-less, exactly as before D54.
+    /// On the parse-error arm, `Absent` means "no id to recover": the reply is rule (γ)'s id-less
+    /// `-32600` (D59 clause (2)).
     Absent,
     /// One or more `id` members, ALL mutually equal, whose common value `RequestId` accepts.
     ///
@@ -68,7 +62,8 @@ pub(crate) enum EnvelopeId {
     /// resolves a waiting rmcp peer (its client DROPS an error carrying no id).
     Recovered(RequestId),
     /// An `id` exists but cannot be answered on: two or more occurrences with DIFFERENT values, or
-    /// a uniform value `RequestId` rejects (`null`, object, array, bool, non-integer, out of i64).
+    /// a uniform value `RequestId` rejects (`null`, object, array, bool, a non-integer number, an
+    /// integer outside i64, or a float-form integer at or past 2^53).
     Unusable,
 }
 
@@ -86,11 +81,13 @@ struct IdCollector {
 ///
 /// Recoverability delegates to rmcp's OWN `RequestId` deserializer rather than to a hand-written
 /// type table, so agreement with the real decoder is structural. It is that impl which rejects
-/// `null`/object/array/bool ("Expect number or string"), non-integers ("Expected an integer") and
-/// values outside `i64` ("Number too large for i64").
+/// `null`/object/array/bool ("Expect number or string"), non-integers and float-form integers at or
+/// past 2^53 ("Expected an integer"), and values outside `i64` ("Number too large for i64"); since
+/// rmcp 3.10 it ACCEPTS a float-form integer below 2^53 (`1.0`, `1e2`) as that integer
+/// (`rmcp-3.10.0/src/model.rs:378-397`).
 ///
-/// Two callers: D47's Notification arm and D54's `-32700` arm. D54's runs it only behind the
-/// strict-JSON gate, because this scan is NOT a JSON validator — see the `end()` note in the body.
+/// One caller: the transport's parse-error arm, which runs it only behind the strict-JSON gate,
+/// because this scan is NOT a JSON validator — see the `end()` note in the body.
 pub(crate) fn scan(line: &[u8]) -> EnvelopeId {
     // Strip exactly ONE prefix BOM, reusing the transport's constant. Scanner and parser must see
     // the same document; two copies of that constant is precisely how they drift apart.
@@ -108,9 +105,9 @@ pub(crate) fn scan(line: &[u8]) -> EnvelopeId {
     }
     .deserialize(&mut deserializer);
 
-    // `deserializer.end()` is deliberately NOT called. Both callers guarantee the input was ALREADY
-    // accepted by `serde_json`: D47's runs on a line the typed `from_slice` decoded, D54's on a line
-    // its strict `Value` parse accepted (`wire::ParseFailure::NotAMessage`). That is also why this
+    // `deserializer.end()` is deliberately NOT called. The caller guarantees the input was ALREADY
+    // accepted by `serde_json`: it runs on a line its strict `Value` parse accepted
+    // (`wire::ParseFailure::NotAMessage`). That is also why this
     // scan must never BE the strictness oracle: `IgnoredAny` checks no nesting depth (serde_json's
     // `ignore_value` keeps its own stack), validates neither UTF-8 nor surrogate escapes inside the
     // strings it skips, and range-checks no number, so on an unvalidated line it recovers ids from
@@ -231,14 +228,14 @@ impl<'de> Visitor<'de> for IdVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::{EnvelopeId, scan};
-    use crate::envelope_id_corpus::divergence_corpus;
+    use crate::envelope_id_corpus::id_corpus;
     use proptest::prelude::*;
     use rmcp::model::{NumberOrString, RequestId};
     use serde::Deserialize as _;
 
-    /// Fetch one divergence-corpus frame by entry id.
+    /// Fetch one envelope-`id` corpus frame by entry id.
     fn frame(entry: &str) -> Vec<u8> {
-        divergence_corpus()
+        id_corpus()
             .into_iter()
             .find(|f| f.id == entry)
             .unwrap_or_else(|| panic!("corpus entry {entry} is missing"))
@@ -253,10 +250,9 @@ mod tests {
         EnvelopeId::Recovered(NumberOrString::String(s.into()))
     }
 
-    /// **A1** — a frame with NO root `id` is `Absent`, which is D47's explicit carve-out.
+    /// **A1** — a frame with NO root `id` is `Absent`.
     ///
-    /// Mutant: deleting the `Absent => {}` arm at the transport (so a genuine notification falls
-    /// into the `Unusable` reply arm).
+    /// Mutant: reporting `Unusable` for a frame that names no id at all.
     #[test]
     fn scan_is_absent_without_a_root_id() {
         assert_eq!(
@@ -267,17 +263,8 @@ mod tests {
 
     /// **A2** — a LONE valid id is recovered.
     ///
-    /// **Honesty note, and it is not a hedge word: this arm is PROVABLY UNREACHABLE end-to-end with
-    /// rmcp 1.7.** `CustomRequest` and `CustomNotification` have byte-identical `Deserialize`
-    /// bodies (rmcp `src/model/serde_impl.rs:338-360` versus `:391-413`) and the untagged union
-    /// tries `Request` FIRST, so any body the Notification variant would accept is also accepted as
-    /// a `CustomRequest` — and with a valid `id` present, `JsonRpcRequest` simply succeeds. A single
-    /// well-formed id therefore ALWAYS yields a Request. Consistent with live evidence: an
-    /// id-carrying `notifications/initialized|cancelled|progress|message|foo` is answered `-32601`
-    /// today.
-    ///
-    /// The cell and its mutant are KEPT anyway, deliberately, as an rmcp-version-independence
-    /// hedge: they are what will notice if a future rmcp makes the arm reachable.
+    /// On the wire this is D54's headline: a strict-JSON line with one readable id that fails the
+    /// typed parse for another reason (a duplicated `method`, a scalar `params`) is answered on it.
     ///
     /// Mutant: requiring `occurrences >= 2` before recovering (`M22`) — killed by this cell ONLY.
     #[test]
@@ -332,11 +319,30 @@ mod tests {
     /// **A6** — a number outside what `RequestId` accepts is unusable, and the neighbours that ARE
     /// accepted are asserted alongside so this pins a BOUNDARY rather than a blanket rejection.
     ///
-    /// Mutants: accepting an f64 whose `fract() == 0.0` by truncating (`M10`, killed by D10/D11);
-    /// widening the integer test to `i128` (`M11`, killed by D12/D13).
+    /// Since D59 (rmcp 3.10, `rmcp-3.10.0/src/model.rs:378-397`) a float-form integer below 2^53 IS
+    /// accepted as that integer (D10, D11, D26), while a non-integer (D24) and 2^53 itself (D25)
+    /// stay unusable.
+    ///
+    /// Mutants: accepting any f64 by truncating (killed by D24/D25); rejecting every float form
+    /// (killed by D10/D11/D26); widening the integer test to `i128` (`M11`, killed by D12/D13).
     #[test]
     fn scan_is_unusable_on_a_non_i64_number() {
-        for entry in ["D10", "D11", "D12", "D13"] {
+        assert_eq!(
+            scan(&frame("D10")),
+            num(100),
+            "1e2 is the integer 100 on rmcp 3.10"
+        );
+        assert_eq!(
+            scan(&frame("D11")),
+            num(100),
+            "100.0 is the integer 100 on rmcp 3.10"
+        );
+        assert_eq!(
+            scan(&frame("D26")),
+            num(1),
+            "1.0 is the integer 1 on rmcp 3.10"
+        );
+        for entry in ["D12", "D13", "D24", "D25"] {
             assert_eq!(
                 scan(&frame(entry)),
                 EnvelopeId::Unusable,
@@ -401,8 +407,8 @@ mod tests {
     /// it does not grade those arms.** Delete every scalar arm and `visit_seq` and the verdict is
     /// UNCHANGED — `deserialize_any` then fails with an `invalid_type` error and [`scan`] maps a
     /// failed seed to `Absent` too (the `seeded.is_err()` guard), so arm-deletion is an EQUIVALENT
-    /// mutant by construction, not a hole a byte corpus could close. What the cell does pin is the
-    /// property D47's out-of-scope carve-out rests on: a non-object root NEVER produces a reply.
+    /// mutant by construction, not a hole a byte corpus could close. What the cell does pin is that
+    /// a non-object root NEVER yields an id, so its reply is always rule (γ)'s id-less one.
     ///
     /// One arm is unreachable even here, and saying so is cheaper than leaving a reader to
     /// rediscover it: `visit_none` is never called by `serde_json`'s `deserialize_any`, which
@@ -468,15 +474,10 @@ mod tests {
     /// **A10** — `1` and `1.0` are UNEQUAL as `serde_json::Value`, so the pair is ambiguous.
     ///
     /// This is the one place a reviewer's intuition disagrees with the code, and the conservative
-    /// direction is the right one: the id is omitted rather than guessed.
-    ///
-    /// Mutation: the equality test rewritten to DROP occurrences whose `RequestId::deserialize`
-    /// FAILS and compare only the survivors — that spelling recovers `1` and turns this cell RED.
-    ///
-    /// **Do NOT spell the mutant "compare the two decoded `RequestId`s": it SURVIVES.** `serde_json`
-    /// stores `1.0` as an f64, so `as_i64`/`as_u64` both return `None` and rmcp takes its "Expected
-    /// an integer" branch — `1.0` never becomes `Number(1)`, the second occurrence simply fails to
-    /// decode, the pair is unequal, and the verdict stays `Unusable` with the cell GREEN.
+    /// direction is the right one: the id is omitted rather than guessed. The comparison is over the
+    /// decoded `Value`s, never over the decoded `RequestId`s: since rmcp 3.10 both spellings decode
+    /// to `Number(1)`, so the mutant "compare the two decoded `RequestId`s" recovers `1` and turns
+    /// this cell RED.
     #[test]
     fn scan_is_unusable_on_int_vs_float_duplicates() {
         assert_eq!(

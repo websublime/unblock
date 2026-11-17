@@ -54,7 +54,13 @@
 # [D59] NOTE (PRD §4 D59 clauses (3) and (19)). rmcp 3.10 types every `method`+`id` frame as a Request,
 # so the arm this file pins is RETIRED. P2 (the reply constant), P3 (the arm's exhaustive match) and
 # Q12 (the recovered-id answer) are RETIRED by D59's IMPLEMENTATION commit, the commit that deletes the
-# lines they pin, each with its one-line reason here. Until then they pin shipped code that still holds.
+# lines they pin, each with its one-line reason here:
+#   P2  RETIRED (D59) — `INVALID_REQUEST_ID_MESSAGE` is deleted; rmcp 3.10 never decodes the class, and a
+#       duplicated equal id is answered by D54's `-32700` on the id (rule (β), PRD §4 D59 clause (2)).
+#   P3  RETIRED (D59) — the exhaustive Notification-variant match is deleted with the arm; no frame
+#       carrying `method`+`id` decodes as a Notification on rmcp 3.10 (`rmcp-3.10.0/src/model.rs:907`).
+#   Q12 RETIRED (D59) — the recovered-id `-32600` answer is deleted; the recovered id now rides rule (β)'s
+#       `-32700`, which d54's Q5 and Q8 pin.
 # P1 stays, because `envelope_id::scan` is D54's leg (c). The `rmcp-1.7.0` reasoning above is the record.
 #
 # Exit: 0 = pass · 1 = BLOCK (a required landing is missing) · 2 = cannot evaluate (fail-closed).
@@ -83,7 +89,7 @@ RANGE_ALT_RE='D\(59\|58\|'
 # The LIVE published contract version. D47 does NOT move it (see the header): this row is the
 # affirmative record of that, so a silent bump riding this decision goes red. It tracks the LIVE id,
 # so a later decision's bump moves it in that decision's implementation commit (D52: v1.9 -> v1.10).
-CONTRACT_RE='unblock\.mcp\.v1\.12'
+CONTRACT_RE='unblock\.mcp\.v1\.13'
 
 # The SAME two spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte rather than a regex operator. DERIVED, never hand-written a second time: a second copy of
@@ -93,18 +99,6 @@ CONTRACT_RE='unblock\.mcp\.v1\.12'
 knob_re() { printf '%s' "$1" | sed 's/\\/\\\\\\/g'; }
 RANGE_KNOB_RE="$(knob_re "$RANGE_RE")"
 RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
-
-# Q12's two halves, held in variables for TWO independent reasons, both of which bite silently.
-#   1. An END-ANCHOR cannot be written inline in the tables below: those are DOUBLE-QUOTED strings
-#      whose field separator is `@`, so a regex ending in `$` puts `$@` in the source — the shell
-#      expands that to the positional parameters (empty) and eats the anchor. The row then matches a
-#      mangled pattern, and the failure looks like a missing landing rather than a quoting bug.
-#   2. The two halves are matched against DIFFERENT texts and cannot be one variable: the ANCHOR runs
-#      over the file's own lines, while the REQUIREMENT runs over `git grep -n` output, i.e.
-#      `path:lineno:text` — so a `^` in a requirement can never match anything and would turn the row
-#      into a permanent, meaningless BLOCK.
-RECOVERED_ID_LINE_RE='^ +Some\(id\),$'
-RECOVERED_ID_RE='Some\(id\),$'
 
 # =================================================================================================
 # REQUIRED LANDINGS — `code@path@regex@what it proves`
@@ -142,8 +136,6 @@ RECOVERED_ID_RE='Some\(id\),$'
 # =================================================================================================
 REQUIRE="
 P1@crates/unblock-mcp/src/envelope_id.rs@pub\(crate\) fn scan@the D47 predicate module still exists and still exposes its scan entry point
-P2@crates/unblock-mcp/src/wire.rs@INVALID_REQUEST_ID_MESSAGE@the transport's -32600 arm is still wired to the compile-time reply constant
-P3@crates/unblock-mcp/src/wire.rs@JsonRpcMessage::Response\(_\)@the variant match is still EXHAUSTIVE (no wildcard arm): a fifth rmcp variant that could carry a stray id must be a COMPILE error, not a silent hole
 P6@crates/unblock-mcp/src/lib.rs@cfg\(any\(test, feature = \"test-util\"\)\)@the shared corpus is gated so the in-lib cells cannot silently compile away — a non-compiled cell is a vacuous pass
 P7@crates/unblock-mcp/tests/envelope_id_duplex.rs@store_fingerprint@the store-EFFECT oracle survives: the one assertion that kills a rebuild-as-a-Request-and-deliver-it implementation
 P8@crates/unblock-mcp/src/wire.rs@(ub-788.*D54|D54.*ub-788)@the -32700 residual D47 disclosed is recorded at the transport as CLOSED by D54, on the line that names its id, so the record neither dangles nor reads it as open
@@ -201,7 +193,6 @@ Q8@scripts/checks/d46-schema-migration-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D
 Q9@scripts/checks/d46-schema-migration-claims.sh@^RANGE_ALT_RE=@$RANGE_KNOB_ALT_RE@…and THAT sibling's ALTERNATION knob, the fifth separate way the enumeration can be half-bumped
 Q10@crates/unblock-mcp/src/options.rs@^pub const CONTRACT_VERSION@$CONTRACT_RE@D47 mints no ErrorCode and bumps NO contract: -32600 is rmcp's transport-level code, not our taxonomy. An unstated 'we didn't bump' is indistinguishable from an oversight, so it is stated here
 Q11@crates/unblock-mcp/src/envelope_id.rs@^ +while let Some\(key\) = map\.next_key@next_key::<String>\(\)@keys are still compared DECODED, never as raw spans — the escaped spelling IS a genuine envelope id. Anchored on the collector's key LOOP, so neither of this file's two comments about the rule can satisfy it
-Q12@crates/unblock-mcp/src/wire.rs@$RECOVERED_ID_LINE_RE@$RECOVERED_ID_RE@the RECOVERED arm still answers ON the recovered id; passing None there answers nobody, since an rmcp client DROPS an id-less error. Anchored on the argument's own production line, so the module doc and the test body that also spell Some(id) cannot satisfy it
 "
 
 blocked=0
@@ -270,9 +261,11 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # were RE-ANCHORED into the Q table (header) rather than dropped, and it rose by one when P15 pinned
 # the second residual id the PRD row names. A floor may only move down together with the rows it counts
 # moving somewhere the other floor counts them — never because a rule became inconvenient.
-check_table_floor 'required-landing (P)' "$p_count" 13 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 12 || blocked=1
+# D59 retired P2, P3 and Q12 with the lines they pinned (see the [D59] NOTE above), so the floors moved
+# 13 → 11 and 12 → 11 in that same commit.
+check_table_floor 'required-landing (P)' "$p_count" 11 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 11 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
-say "OK — the D47 predicate, its exhaustive-match guard, its decoded-key rule and its recovered-id arm are all still in the tree, the store-effect oracle is still pinned and the -32700 residual's closure by D54 is recorded at the transport, the tracker names ub-cnv and both ids the PRD row's residual clause cites (ub-788, closed by D54, and ub-nbz, closed by the clause 8(v) amendment), the rendered roadmap lists the decision, this gate is both specified and wired, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates while the contract version stands unmoved."
+say "OK — the envelope-id scan and its decoded-key rule are still in the tree (the D47 arm, its exhaustive-match guard and its recovered-id -32600 are RETIRED by D59), the store-effect oracle is still pinned and the -32700 residual's closure by D54 is recorded at the transport, the tracker names ub-cnv and both ids the PRD row's residual clause cites (ub-788, closed by D54, and ub-nbz, closed by the clause 8(v) amendment), the rendered roadmap lists the decision, this gate is both specified and wired, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates while the contract knob carries the live id."
 exit 0

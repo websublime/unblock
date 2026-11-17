@@ -8,9 +8,9 @@
 //! 1. A fix at the argument seam ([`crate::tools::args`]) is impossible: `Parameters` receives
 //!    `context.arguments`, a `JsonObject` rmcp already built — the duplicate was collapsed before
 //!    that type existed.
-//! 2. A fix in a `Transport` **decorator** of the [`crate::server`] `VersionClampingTransport` kind
-//!    is impossible for the same reason one level up: `receive()` hands a decorator an
-//!    already-parsed `RxJsonRpcMessage`.
+//! 2. A fix in a `Transport` **decorator** (the [`crate::pre_handshake`] kind) is impossible for the
+//!    same reason one level up: `receive()` hands a decorator an already-parsed
+//!    `RxJsonRpcMessage`.
 //!
 //! So detection has to own the read framing. A byte-sniffing `AsyncRead` shim feeding a side queue
 //! was rejected: `AsyncRwTransport::receive` consumes lines WITHOUT emitting a message on blank
@@ -26,131 +26,98 @@
 //! carrying the verdict, and adds NO reply of its own for that class, because that class HAS an
 //! in-band channel: inventing a reply for it would force the out-of-band `-32602`/`-32700` arm back
 //! open for a class the binding decision says must be answered IN-BAND. The only replies such a
-//! frame can draw here are out-of-band ones its ENVELOPE draws, never one for the duplicate: the
-//! `-32700` that ANY line failing the typed parse draws (carrying the D54 recovered id when there
-//! is one), or D47's `-32600` when its envelope `id` is duplicated or does not decode. Rejection
-//! for it happens at exactly one site: `call_tool` (`crate::server`).
+//! frame can draw here are out-of-band ones its ENVELOPE draws when the line fails the typed parse
+//! (the three rules below), never one for the duplicate. Rejection for it happens at exactly one
+//! site: `call_tool` (`crate::server`).
 //!
-//! # THE ONE CLASS THE TRANSPORT ANSWERS WHERE RMCP STAYS SILENT — UN-DECODABLE ENVELOPE `id` (normative, PRD §4, D47)
+//! # A LINE THAT FAILS THE TYPED PARSE — THREE RULES (normative, PRD §4 D54, which closed `ub-788`, as kept by D59 clause (2))
 //!
-//! The two rules do not conflict, because this class never reaches `call_tool` at all. A frame whose
-//! RAW BYTES carried a top-level `id` member and whose decode produced a `Notification` has no
-//! response obligation in rmcp and no in-band channel here, so before D47 it evaporated: no reply,
-//! no store effect, nothing on stdout, and a client that sent an id waiting forever. Duplication is
-//! the MINORITY route — `null`, an object, an array, a boolean, a non-integer or out-of-i64-range
-//! number, and the `id` key spelled "\u0069d" all land in the same place, because rmcp
-//! tries the `Request` variant first and `JsonRpcRequest` requires an `id` that deserializes as a
-//! number-or-string.
+//! rmcp 3.10's own reader writes NOTHING for a line that is not valid JSON
+//! (`rmcp-3.10.0/src/transport/async_rw.rs:317-323`) and answers a well-formed line of the wrong
+//! shape with an id-less `-32600 Invalid request` (`:325-330`, flushed at `:253-268`). An rmcp client
+//! drops an id-less error (`rmcp-3.10.0/src/service.rs:1766-1771`) and awaits its request with no
+//! timeout by default (`:790-803`), so following rmcp would turn every readable-id parse failure into
+//! a caller that waits forever — the hang D54 exists to end. This transport therefore answers the
+//! typed-parse `Err` arm by three rules, keyed on D54's strictness leg and never on serde's error
+//! category (RULED by Miguel, tracker comment 406):
 //!
-//! The transport answers it **out-of-band `-32600 Invalid Request`**, on the id RECOVERED from the
-//! raw line when the bytes yield one unambiguously (a single valid `RequestId`, or several all
-//! EQUAL), with the id omitted when they do not (two different ids, or a value that is no
-//! representable `RequestId`). Answering on the recovered id is the whole mechanism, not a nicety:
-//! rmcp's client awaits untimed and DISCARDS an error that carries no id, so an id-less reply never
-//! releases it.
+//! - **(α)** a line that is NOT strict JSON (not UTF-8 after the one BOM strip, truncated, trailing
+//!   bytes, a lone surrogate, nesting at or past 128) gets the id-less `-32700 Parse error`, where
+//!   rmcp writes nothing;
+//! - **(β)** a strict-JSON line whose id [`crate::envelope_id::scan`] recovers gets `-32700 Parse
+//!   error` ON that id, where rmcp writes the id-less `-32600`;
+//! - **(γ)** a strict-JSON line whose id cannot be read (no `id`, an id that is no `RequestId`, two
+//!   differing ids, a non-object root) gets rmcp's own reply, the id-less
+//!   `ErrorData::invalid_request("Invalid request", None)`, byte for byte.
 //!
-//! It then **DROPS** the frame. Dropping is required rather than tidy, and since **D50** it rests on
-//! two reasons that outlive the fatality it once rested on. An answered frame must not ALSO take
-//! effect, because rmcp's serve loop converts every delivered notification with
-//! `TryInto<CancelledNotification>` before any handler runs (`rmcp-1.7.0/src/service.rs:981-996`).
-//! And pre-handshake a delivered frame meets the D50 gate above this layer and is dropped there with
-//! no reply and no recovered id, so answering-and-dropping here stays the only spelling that releases
-//! a waiting peer.
-//!
-//! The predicate is [`crate::envelope_id::scan`], a `DeserializeSeed` over the ROOT object collecting
-//! every top-level `id` member's value, guarded by an EXHAUSTIVE match on the `Notification` variant
-//! so request traffic pays nothing. Keys are compared DECODED, never as raw spans.
-//! [`unblock_error::dup_key::scan`] CANNOT serve as this predicate: it reports `Clean` for every
-//! non-duplicated shape of the class, and its `Duplicate { key, path }` verdict retains no occurrence
-//! VALUES, so equal and differing ids are indistinguishable to it.
-//!
-//! # THE `-32700` REPLY CARRIES A READABLE ID (normative, PRD §4, D54; closes `ub-788`)
-//!
-//! A line that FAILS the typed parse is answered `-32700 Parse error` exactly as rmcp answers it
-//! (`rmcp-1.7.0/src/transport/async_rw.rs:145-153`), with ONE addition: the `id` recovered from the
-//! raw bytes. All three legs are required: the typed parse failed; the line is STRICT JSON — after
-//! the one BOM strip it is UTF-8 and `serde_json`'s `Value` parse accepts it; and
-//! [`crate::envelope_id::scan`] returns `Recovered`. A line the compatibility filter drops (a
-//! last-wins `method` that is a non-standard `notifications/*`) gets NO reply, as in rmcp (D54
-//! clause (7)). Every other failed line — not strict JSON, no root `id`, differing ids, or an id
-//! that is no `RequestId` — gets the id-less `-32700`,
-//! byte-identical to rmcp's. The code stays `-32700`, so the `id` member is the ONLY byte the fork
-//! adds. Answering on the id is the whole mechanism, as it is for D47: rmcp's client DROPS an id-less
-//! error (`rmcp-1.7.0/src/service.rs:1030-1036`) while `Peer::send_request` awaits untimed
-//! (`:442-447`).
+//! A line the compatibility filter drops still gets no reply, at parity with rmcp: a strict-JSON line
+//! whose last-wins `method` is a non-standard `notifications/*`, with or without an `id`, and an
+//! id-LESS line whose `method` is any non-standard method (`async_rw.rs:437-455`).
 //!
 //! The strictness leg is NOT a second parse: it is the `Value` parse rmcp's compatibility filter
-//! already runs on every failed UTF-8 line (`async_rw.rs:289`), surfaced as [`ParseFailure`]. It is
-//! load-bearing: `scan` drains non-`id` members with `IgnoredAny`, which checks no nesting depth,
-//! validates neither UTF-8 nor surrogate escapes inside the strings it skips, and range-checks no
-//! number. Without the gate, trailing bytes after a complete object, a non-UTF-8 byte or a lone
-//! surrogate inside a skipped string, and nesting past `serde_json`'s 128-level limit would each
-//! recover an id from a line that is not JSON.
+//! already runs on every failed UTF-8 line, surfaced as [`ParseFailure`]. It is load-bearing: `scan`
+//! drains non-`id` members with `IgnoredAny`, which checks no nesting depth, validates neither UTF-8
+//! nor surrogate escapes inside the strings it skips, and range-checks no number. Without the gate,
+//! trailing bytes after a complete object, a non-UTF-8 byte or a lone surrogate inside a skipped
+//! string, and nesting past `serde_json`'s 128-level limit would each recover an id from a line that
+//! is not JSON.
+//!
+//! rmcp 3.10 decodes a frame by key PRESENCE first (`rmcp-3.10.0/src/model.rs:907`), so a frame
+//! carrying both `method` and `id` is a Request or nothing: it runs when it types and otherwise
+//! meets the rules above. D47's Notification-keyed arm and its `-32600` are RETIRED (D59 clause (3)),
+//! and a float id that is an exact integer below 2^53 (`1.0`, `1e2`) types as that integer and runs.
 //!
 //! # `receive()` IS CANCEL-SAFE (normative — D47 clause 8(v), closed by `ub-nbz`; D53)
 //!
-//! rmcp polls `receive()` as one arm of an UNBIASED `tokio::select!` (`src/service.rs:805`, the arm
-//! at `:813`) and DROPS it whenever another arm wins, most often a handler response. So two kinds of
-//! state must not live only inside the `receive()` future, and neither does.
+//! rmcp polls `receive()` as one arm of a `tokio::select!` in its serve loop and DROPS it whenever
+//! another arm wins, most often a handler response. So two kinds of state must not live only inside
+//! the `receive()` future, and neither does.
 //!
-//! 1. **An out-of-band reply is never written inside `receive()`.** Both out-of-band arms, D47's
-//!    `-32600` and the `-32700`, hand their reply to a `tokio::spawn`ed task. The task runs the
-//!    SAME `'static` write future `send()` builds, and its `JoinHandle` is PARKED on the transport.
-//!    The handle is awaited at the top of EVERY loop iteration, so the reply is on the wire before
-//!    the next frame is read, which is the order an inline write gave. It is also awaited in
-//!    `close()` before the write half is taken. `close()` waits for it exactly as it waits for any
-//!    rmcp send holding the write lock, so a peer that has stopped reading holds a signalled
-//!    teardown until it reads or a second signal escalates (D38 clause (2)). A write that fails, or
-//!    a task that panics, ends that SAME `receive()` call with `None` (or, if that call was dropped,
-//!    the NEXT one), which is the contract the inline write shipped and what D40's teardown reads. A
-//!    dropped `receive()` drops only its borrow of the handle. The task keeps running, and the next
-//!    call or `close()` settles it. The pre-handshake EOF path drops the whole transport without
-//!    `close()`, but it reads that EOF only after the loop head has settled the reply, so the reply
-//!    is still written. On the pre-handshake SIGNAL path rmcp drops the transport without
-//!    `close()`; a parked reply's task is detached, keeps the write half, and finishes the reply
-//!    unless the process exits first.
+//! 1. **An out-of-band reply is never written inside `receive()`.** Every reply of the three rules
+//!    is handed to a `tokio::spawn`ed task. The task runs the SAME `'static` write future `send()`
+//!    builds, and its `JoinHandle` is PARKED on the transport. The handle is awaited at the top of
+//!    EVERY loop iteration, so the reply is on the wire before the next frame is read, which is the
+//!    order an inline write gave. It is also awaited in `close()` before the write half is taken.
+//!    `close()` waits for it exactly as it waits for any rmcp send holding the write lock, so a peer
+//!    that has stopped reading holds a signalled teardown until it reads or a second signal
+//!    escalates (D38 clause (2)). A write that fails, or a task that panics, ends that SAME
+//!    `receive()` call with `None` (or, if that call was dropped, the NEXT one), which is the
+//!    contract the inline write shipped and what D40's teardown reads. A dropped `receive()` drops
+//!    only its borrow of the handle. The task keeps running, and the next call or `close()` settles
+//!    it. On the pre-lifecycle SIGNAL path rmcp drops the transport without `close()`; a parked
+//!    reply's task is detached, keeps the write half, and finishes the reply unless the process
+//!    exits first.
 //! 2. **A dropped `receive()` never discards a partially read line** (D53). tokio's `read_until`
 //!    leaves the bytes it consumed in the buffer when it is dropped, and documents calling it again
 //!    as the recovery. So `line_buf` is cleared only after a COMPLETE line has been read and
-//!    processed (or after a read error, below), never at the top of an iteration that a dropped
-//!    call may have left half-filled. `Ok(0)` with a non-empty buffer is therefore the
-//!    unterminated final line. Clearing first would destroy the head of a well-formed request
-//!    split across reads, which happens to any frame larger than one 8 KiB `BufReader` fill, and
-//!    to one a client writes in pieces. The tail would then be answered `-32700` on its own or,
-//!    when the split falls on the terminator, skipped as an empty line with no reply at all;
-//!    either way the request was never served. A read ERROR is different: it ends `receive()` with
-//!    `None` and discards the half-read line, as rmcp does, so a call after it starts a fresh line.
-//!
-//! The two hazards are independent: the out-of-band frame was already read in full and is dropped
-//! by design, so only the read side ever lost a frame.
+//!    processed, never at the top of an iteration that a dropped call may have left half-filled.
+//!    rmcp 3.10 now does the same upstream (`rmcp-3.10.0/src/transport/async_rw.rs:271-280`), so
+//!    this is parity. A read ERROR also keeps the half-read line, as rmcp 3.10 does (`LineRead::Io`
+//!    at `:142` and `:293-296`; its buffer is cleared only at `:306` and `:311`), so a re-called
+//!    `receive()` RESUMES it (D59 clause (7)). EOF ends the read with `None` and DROPS an
+//!    unterminated final line, as rmcp 3.10 does (`:290-292`): the MCP stdio transport delimits
+//!    every message by a newline, so a conforming client never sends one.
 //!
 //! `tokio::spawn` makes a TOKIO RUNTIME a precondition of `receive()`, because it panics outside one.
-//! Every driver already is one: rmcp spawns its own response writes (`src/service.rs:892`), and the
-//! stdio pair is tokio's.
+//! Every driver already is one: rmcp spawns its own response writes, and the stdio pair is tokio's.
 //!
 //! The write mutex still buys only BYTE-ATOMICITY between concurrent writers. Cancellation-safety
 //! comes from the task owning the write, which a dropped `receive()` cannot reach. A RUNTIME shutdown
 //! can still abort that task mid-frame, exactly as it can any rmcp send task.
-//!
-//! ONE EFFECT IS REMOVED, deliberately: a `notifications/cancelled` frame carrying an un-decodable
-//! `id` is DELIVERED today, and rmcp's serve loop cancels the matching in-flight request through it
-//! before any handler runs (`src/service.rs:981-996`). Answered and dropped, that cancellation stops
-//! happening. Preserving it would mean delivering the frame after answering it — the shape that kills
-//! the server in the initialize slot. A conforming cancellation carries no `id` and is unaffected.
 //!
 //! # CD-7 — this module FORKS an undocumented rmcp internal
 //!
 //! `AsyncRwTransport`'s framing helpers (`try_parse_with_compatibility`, `should_ignore_notification`,
 //! `is_standard_method`, `is_standard_notification`, `without_carriage_return`) are all PRIVATE to
 //! rmcp's `transport::async_rw` module, so reproducing the read contract means re-implementing them.
+//! The copies here are rmcp 3.10's (`rmcp-3.10.0/src/transport/async_rw.rs:396-470`).
 //!
 //! **The compatibility filter runs only AFTER the typed parse has already failed** (the mechanism
 //! stated at [`should_ignore_notification`]). So it is *not* what makes an unknown notification
 //! work: a `notifications/whatever` frame with a well-formed `params` object is accepted by rmcp's
 //! own catch-all `CustomNotification` and DELIVERED, never reaching the filter. What the filter
 //! governs is the narrower class rmcp cannot type at all — an LSP-style `$/cancelRequest`, or a
-//! `notifications/*` frame whose `params` are not an object. Dropping it would answer `-32700` to
-//! frames rmcp silently ignores: a JSON-RPC violation and an interop regression.
+//! `notifications/*` frame whose `params` are not an object.
 //!
 //! That mechanism dictates how the fork must be pinned. The **differential harness** at the bottom
 //! of this file (the CD-6 assumption-pin pattern) feeds ONE byte corpus to
@@ -165,38 +132,37 @@
 //! survives.
 //!
 //! The WRITE half does not fork anything: it encodes through rmcp's own public
-//! [`JsonRpcMessageCodec`], so the emitted bytes are identical by construction rather than by test.
+//! [`JsonRpcMessageCodec`], whose encoder is byte-identical (`async_rw.rs:610-617`), so the emitted
+//! bytes are identical by construction rather than by test.
 //!
-//! **THE FORK CARRIES THREE DELIBERATE DIVERGENCES FROM `AsyncRwTransport`, AND ONLY THREE.**
+//! **THE FORK CARRIES FOUR DELIBERATE DIVERGENCES FROM rmcp 3.10's `AsyncRwTransport`, AND ONLY
+//! FOUR** (D59 clause (12)).
 //!
-//! 1. **D47, answer and drop.** A frame of the un-decodable-envelope-`id` class is answered `-32600`
-//!    and never delivered, where rmcp delivers it as a Notification. The divergence corpus and its
-//!    per-entry differential tier pin it (`the_diverging_entries_are_exactly_the_declared_ones`).
-//! 2. **D53, a partial line survives a dropped `receive()`.** Under CANCELLATION the fork keeps a
-//!    partially read line, where `AsyncRwTransport::receive` clears its buffer at the top of every
-//!    iteration (`rmcp-1.7.0/src/transport/async_rw.rs:127-128`) and so loses a well-formed request
-//!    split across reads. In a run that is never cancelled, every `read_until` completes and the two
-//!    framings are byte-identical, and that is all the differential harness can observe. So the
-//!    harness cannot see this divergence. It is pinned instead by
-//!    `a_line_split_by_a_dropped_receive_is_delivered_whole` and
-//!    `an_unterminated_line_split_by_a_dropped_receive_is_delivered_at_eof`.
-//! 3. **D54, the `-32700` reply carries a readable id.** For a line in the D54 class (the section
-//!    above), the fork writes rmcp's own id-less `-32700` plus EXACTLY the recovered `id` member. The
-//!    per-entry differential's `IdInserted` tier pins it, asserting BOTH that rmcp's bytes are still
-//!    the id-less `-32700` (so an rmcp that starts writing the id itself, or changes the message,
-//!    code or framing, turns it red) AND that ours are rmcp's with the declared id spliced in;
+//! 1. **Rule (α).** Our id-less `-32700` where rmcp writes nothing. The per-entry differential's
+//!    `Silenced` tier pins it, asserting BOTH that rmcp writes zero bytes and that ours are the
+//!    id-less `-32700`. One shape of it is `Recoded` instead (D59 clause (12), amended 2026-11-17):
+//!    a line with trailing bytes whose typed decode fails on SHAPE before `end()` reaches them, for
+//!    which rmcp writes its id-less `-32600` while ours keeps the id-less `-32700`.
+//! 2. **Rule (β).** Our `-32700` on the recovered id where rmcp writes the id-less `-32600`. The
+//!    `IdInserted` tier pins it, asserting BOTH that rmcp's bytes are still the id-less `-32600` (so
+//!    an rmcp that starts answering on the id, or changes the message, code or framing, turns it
+//!    red) AND that ours are the declared `-32700` on the declared id;
 //!    `the_diverging_entries_are_exactly_the_declared_ones` pins that no other entry diverges.
+//! 3. **The D43 duplicate-key scan** and its stamped verdict, which change no byte and no delivery.
+//! 4. **The line length.** Unbounded here (`read_until`, no cap), where rmcp drops a line over
+//!    16 MiB (`async_rw.rs:58`). DISCLOSED, not closed: `ub-o8s` stays OPEN and OUT of scope.
+//!
+//! Everything else — rule (γ), the EOF drop, the read-error resume, the partial line kept across a
+//! dropped `receive()`, the BOM and CR strips and the blank-line skip — is PARITY.
 //!
 //! The spawn-and-park reply path (`ub-nbz`) is not counted as a divergence of its own. In a run that is
 //! never cancelled it changes no byte and no order; it changes only whether an out-of-band reply
-//! survives a dropped `receive()`. rmcp awaits its own `-32700` inside `receive()` too
-//! (`rmcp-1.7.0/src/transport/async_rw.rs:145-153`) and loses it the same way, so under
-//! cancellation the fork writes a reply that rmcp would lose. That is recorded as the close of D47
-//! clause 8(v), not as a framing divergence.
+//! survives a dropped `receive()`. That is recorded as the close of D47 clause 8(v), not as a framing
+//! divergence.
 
 use std::sync::Arc;
 
-use rmcp::model::{ErrorData, JsonRpcMessage, RequestId};
+use rmcp::model::{ErrorData, RequestId};
 use rmcp::service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
 use rmcp::transport::Transport;
 use rmcp::transport::async_rw::JsonRpcMessageCodec;
@@ -216,15 +182,6 @@ use crate::envelope_id::{self, EnvelopeId};
 /// leave one nested-duplicate class executing.
 const SCAN_ROOT: &[&str] = &["params"];
 
-/// The `-32600` message for the D47 un-decodable-envelope-id arm.
-///
-/// A COMPILE-TIME CONSTANT on purpose: zero attacker bytes are echoed into it, and `data` is `None`
-/// for the same reason — so the reply's member set is exactly the shipped `-32700` reply's plus the
-/// (protocol-mandated) `id`. A `data` carrying anything derived from the frame would open a NEW echo
-/// channel for untrusted input with no protocol requirement behind it.
-const INVALID_REQUEST_ID_MESSAGE: &str =
-    "Invalid Request: the id member is duplicated or is not a valid JSON-RPC request id";
-
 /// UTF-8 byte order mark — RFC 8259 §8.1. Stripped exactly once, prefix only, mirroring rmcp.
 ///
 /// `pub(crate)` so [`crate::envelope_id`] strips exactly the SAME one: the scanner and the parser
@@ -237,7 +194,7 @@ pub(crate) const UTF8_BOM: &[u8; 3] = b"\xEF\xBB\xBF";
 ///
 /// It rides `rmcp::model::Extensions`, a `TypeId`-keyed typemap with **no `Serialize`/`Deserialize`
 /// impl at all**, so no wire field can name it. The only type rmcp itself ever inserts on the
-/// deserialize path is `rmcp::model::Meta`, sourced from the typed `params._meta` member.
+/// deserialize path is `rmcp::model::RequestMetaObject`, sourced from the typed `params._meta` member.
 ///
 /// **⚠️ THE DIRECTION IS THE WHOLE SECURITY PROPERTY.** An attacker cannot make the marker
 /// *present*, but **absent is the default state of `Extensions::new()`** — so "present ⇒ duplicate,
@@ -268,21 +225,20 @@ impl From<DupScan> for ParamsScan {
     }
 }
 
-/// An owned `Transport<RoleServer>` over a byte stream pair. It reproduces `AsyncRwTransport`'s read
-/// framing exactly in any run that is never cancelled, adds the D43 duplicate-key scan between the
-/// read and the parse, and keeps a partially read line across a dropped `receive()` where rmcp loses
-/// it (D53, the CD-7 section).
+/// An owned `Transport<RoleServer>` over a byte stream pair. It reproduces rmcp 3.10's
+/// `AsyncRwTransport` read framing except for the four divergences the CD-7 section lists: rules (α)
+/// and (β), the D43 duplicate-key scan between the read and the parse, and the unbounded line.
 pub(crate) struct DupScanningTransport<R, W> {
     /// The buffered read half. `read_until(b'\n', ..)` — there is deliberately no line-length bound
     /// here, exactly as rmcp has none (`max_length: usize::MAX`).
     read: BufReader<R>,
     /// The reusable line buffer, mirroring rmcp's `line_buf`. It is cleared only once the line in it
-    /// was COMPLETELY read (`line_complete`) or abandoned by a read error, never at the top of an
-    /// iteration that a dropped `read_until` may have left half-filled (D53).
+    /// was COMPLETELY read (`line_complete`), never at the top of an iteration that a dropped
+    /// `read_until` or a read error may have left half-filled (D53, D59 clause (7)).
     line_buf: Vec<u8>,
-    /// `true` when the next iteration must clear `line_buf`: the line in it was read to its end, or
-    /// a read error ended the call and abandoned it, as rmcp does. `false` while the bytes of a
-    /// `read_until` interrupted by a dropped `receive()` are still waiting to be resumed.
+    /// `true` when the next iteration must clear `line_buf`: the line in it was read to its end.
+    /// `false` while the bytes of a `read_until` interrupted by a dropped `receive()` or by a read
+    /// error are still waiting to be resumed.
     line_complete: bool,
     /// The write half. The `Arc<Mutex<Option<W>>>` shape is what satisfies `Transport::send`'s
     /// `+ Send + 'static` return bound (the future must not borrow `self`), and `Option` is what
@@ -314,17 +270,12 @@ where
     /// Hand ONE out-of-band error reply to its own task and park the handle; the next loop head
     /// ([`Self::settle_parked_reply`]) awaits it (`ub-nbz`).
     ///
-    /// Both out-of-band arms, `-32700` and D47's `-32600`, go through here, so they are identical
-    /// **by construction** rather than by review.
+    /// All three rules' replies go through here, so they are written identically **by
+    /// construction** rather than by review.
     ///
     /// **Takes two FIELDS, not `&mut self`.** `receive()` still holds `line`, an immutable borrow of
     /// `self.line_buf`, at every call site. Borrowing only `parked_reply` (mutably) and `write`
     /// (shared) keeps the borrows disjoint.
-    ///
-    /// Since **D50** the scanner is not the only emitter. The gate in [`crate::pre_handshake`] writes
-    /// its own `-32600` through `self.inner.send(..)`, which is this transport's `send`, so that reply
-    /// is byte-atomic under the same write mutex. It cannot route through here, because a decorator
-    /// generic over `T: Transport` cannot reach this private function.
     fn park_reply(
         slot: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
         write: &Arc<Mutex<Option<W>>>,
@@ -379,29 +330,29 @@ where
             // ub-nbz: the previous frame's reply is on the wire, or has ended the read, before the next
             // frame is read. That is the order an inline write gave.
             self.settle_parked_reply().await?;
-            // D53: clear only a line that was read to its END, or one a read error abandoned
-            // (below). A `read_until` interrupted by a dropped `receive()` left the frame's head in
-            // `line_buf`, and this call resumes it.
+            // D53: clear only a line that was read to its END. A `read_until` interrupted by a dropped
+            // `receive()` or by a read error left the frame's head in `line_buf`, and this call
+            // resumes it.
             if self.line_complete {
                 self.line_buf.clear();
                 self.line_complete = false;
             }
             match self.read.read_until(b'\n', &mut self.line_buf).await {
-                // EOF with nothing pending. EOF with a NON-EMPTY buffer is the unterminated final line,
-                // possibly begun by a dropped call, and it is processed like any other line.
-                Ok(0) if self.line_buf.is_empty() => return None,
+                // EOF. Any bytes still in `line_buf` are an unterminated final line with no
+                // delimiter, so there is nothing to deliver: it is DROPPED, as rmcp 3.10 drops it
+                // (D59 clause (7)).
+                Ok(_) if !self.line_buf.ends_with(b"\n") => return None,
                 Ok(_) => self.line_complete = true,
                 Err(e) => {
-                    // Nothing is swallowed here: the EOF/error shape is what the D40 pre-handshake
-                    // teardown depends on.
+                    // Nothing is swallowed here: the EOF/error shape is what the D40 pre-lifecycle
+                    // teardown depends on. The half-read line is KEPT, as rmcp 3.10 keeps it, so a
+                    // re-called `receive()` resumes it (D59 clause (7)).
                     tracing::error!("Error reading from stream: {}", e);
-                    // rmcp clears at the loop head, so a re-call after an error starts a fresh line.
-                    self.line_complete = true;
                     return None;
                 }
             }
-            // Strip ONE trailing `\n` (an unterminated final line at EOF is still processed), then
-            // ONE trailing `\r`. A whitespace-only line is NOT empty and proceeds to the parse.
+            // Strip the trailing `\n`, then ONE trailing `\r`. A whitespace-only line is NOT empty and
+            // proceeds to the parse.
             let line = without_carriage_return(
                 self.line_buf
                     .strip_suffix(b"\n")
@@ -419,61 +370,6 @@ where
 
             match try_parse_with_compatibility::<RxJsonRpcMessage<RoleServer>>(line) {
                 Ok(Some(mut message)) => {
-                    // D47 / ub-cnv — the UN-DECODABLE-ENVELOPE-ID class.
-                    //
-                    // rmcp decodes into an UNTAGGED union (rmcp src/model.rs:575-588) tried
-                    // Request-first, and `JsonRpcRequest` requires `id: RequestId` (:431-436). So
-                    // ANY frame whose `id` member fails to decode falls through to the Notification
-                    // variant — where the server has no response obligation and we register no
-                    // notification handler — and EVAPORATES: no reply, no store effect, nothing on
-                    // stdout. A client that DID send an id waits forever (`Peer::send_request` uses
-                    // `no_options`, src/service.rs:442-447; the non-timeout await is bare,
-                    // :344-346; an id-less error is dropped, :1030-1036).
-                    //
-                    // A frame with NO `id` member is a genuine Notification and is EXPLICITLY out
-                    // of scope: it takes the `Absent` arm and behaves exactly as it did before D47.
-                    //
-                    // The match is EXHAUSTIVE on purpose (no `_` arm): an rmcp bump adding a fifth
-                    // `JsonRpcMessage` variant that could carry a stray id must be a COMPILE ERROR
-                    // here, not a silent hole.
-                    let is_notification = match &message {
-                        JsonRpcMessage::Notification(_) => true,
-                        JsonRpcMessage::Request(_)
-                        | JsonRpcMessage::Response(_)
-                        | JsonRpcMessage::Error(_) => false,
-                    };
-                    if is_notification {
-                        // The raw line is deliberately NOT logged at any level:
-                        // `try_parse_with_compatibility` already logs it on its own failure path,
-                        // and these frames never reach that path.
-                        match envelope_id::scan(line) {
-                            EnvelopeId::Absent => {}
-                            EnvelopeId::Recovered(id) => {
-                                tracing::debug!(
-                                    "un-decodable envelope id; answering -32600 on the recovered id"
-                                );
-                                Self::park_reply(
-                                    &mut self.parked_reply,
-                                    &self.write,
-                                    ErrorData::invalid_request(INVALID_REQUEST_ID_MESSAGE, None),
-                                    Some(id),
-                                );
-                                continue; // ANSWER AND DROP — never delivered.
-                            }
-                            EnvelopeId::Unusable => {
-                                tracing::debug!(
-                                    "un-decodable envelope id, unrecoverable; answering -32600 with the id omitted"
-                                );
-                                Self::park_reply(
-                                    &mut self.parked_reply,
-                                    &self.write,
-                                    ErrorData::invalid_request(INVALID_REQUEST_ID_MESSAGE, None),
-                                    None,
-                                );
-                                continue;
-                            }
-                        }
-                    }
                     message.insert_extension(verdict);
                     return Some(message);
                 }
@@ -483,15 +379,26 @@ where
                 Ok(None) => {}
                 Err(failure) => {
                     tracing::debug!("Parse error on incoming message: {}", failure.error());
-                    // D54 (closes `ub-788`): rmcp's own reply, plus the id recovered from the raw
-                    // line when the line is strict JSON and its id is readable.
+                    // D54 KEPT by D59 clause (2), three rules. (β) a strict-JSON line whose id is
+                    // readable gets `-32700` ON that id; (α) a line that is not strict JSON gets the
+                    // id-less `-32700`; (γ) a strict-JSON line whose id cannot be read gets rmcp
+                    // 3.10's own id-less `-32600`, byte for byte.
                     let id = parse_error_reply_id(&failure, line);
-                    Self::park_reply(
-                        &mut self.parked_reply,
-                        &self.write,
-                        ErrorData::parse_error("Parse error", None),
-                        id,
-                    );
+                    if answers_invalid_request(&failure, id.as_ref()) {
+                        Self::park_reply(
+                            &mut self.parked_reply,
+                            &self.write,
+                            ErrorData::invalid_request("Invalid request", None),
+                            None,
+                        );
+                    } else {
+                        Self::park_reply(
+                            &mut self.parked_reply,
+                            &self.write,
+                            ErrorData::parse_error("Parse error", None),
+                            id,
+                        );
+                    }
                     // Recover: loop to the next line. This deliberately does NOT return.
                 }
             }
@@ -515,7 +422,7 @@ where
 ///
 /// The future is `Send + 'static` because it owns what it touches, a clone of the `Arc` and the
 /// message. That is what lets `send()` return it and lets `DupScanningTransport::park_reply` SPAWN
-/// it. `send()` and both out-of-band arms therefore write through the same future, so their bytes are
+/// it. `send()` and the replies of all three rules therefore write through the same future, so their bytes are
 /// identical **by construction** rather than by review. It is a FREE function on purpose: an
 /// `async fn` inside the `impl<R, W>` block would capture `R` too, and its future would then not be
 /// `'static` for a merely-`Send` `R`.
@@ -561,12 +468,14 @@ fn without_carriage_return(s: &[u8]) -> &[u8] {
     s.strip_suffix(b"\r").unwrap_or(s)
 }
 
-/// Is `method` a standard MCP request or notification? (rmcp `is_standard_method`, MCP 2025-06-18.)
+/// Is `method` a standard MCP request or notification? (rmcp 3.10 `is_standard_method`, MCP
+/// 2026-07-28, `rmcp-3.10.0/src/transport/async_rw.rs:396-418`.)
 fn is_standard_method(method: &str) -> bool {
     matches!(
         method,
         "initialize"
             | "ping"
+            | "server/discover"
             | "prompts/get"
             | "prompts/list"
             | "resources/list"
@@ -574,16 +483,19 @@ fn is_standard_method(method: &str) -> bool {
             | "resources/subscribe"
             | "resources/unsubscribe"
             | "resources/templates/list"
+            | "subscriptions/listen"
             | "tools/call"
             | "tools/list"
             | "completion/complete"
+            | "elicitation/create"
             | "logging/setLevel"
             | "roots/list"
             | "sampling/createMessage"
     ) || is_standard_notification(method)
 }
 
-/// Is `method` a standard MCP notification? (rmcp `is_standard_notification`.)
+/// Is `method` a standard MCP notification? (rmcp 3.10 `is_standard_notification`,
+/// `rmcp-3.10.0/src/transport/async_rw.rs:420-434`.)
 fn is_standard_notification(method: &str) -> bool {
     matches!(
         method,
@@ -595,6 +507,7 @@ fn is_standard_notification(method: &str) -> bool {
             | "notifications/resources/list_changed"
             | "notifications/resources/updated"
             | "notifications/roots/list_changed"
+            | "notifications/subscriptions/acknowledged"
             | "notifications/tools/list_changed"
     )
 }
@@ -620,8 +533,8 @@ fn should_ignore_notification(json_value: &serde_json::Value, method: &str) -> b
 
 /// Parse one line with rmcp's compatibility handling (rmcp `try_parse_with_compatibility`).
 ///
-/// `Ok(Some(_))` = deliver, `Ok(None)` = silently ignore, `Err(ParseFailure)` = answer `-32700` and
-/// recover; the variant says whether the line was strict JSON, which gates D54's recovered id.
+/// `Ok(Some(_))` = deliver, `Ok(None)` = silently ignore, `Err(ParseFailure)` = answer by the three
+/// rules and recover; the variant says whether the line was strict JSON, which selects rule (α).
 ///
 /// The BOM is stripped ONCE, prefix only, and `line` is REBOUND to the stripped slice **before**
 /// both the primary parse and the compat re-parse — so a BOM-prefixed unknown notification is
@@ -632,7 +545,8 @@ fn should_ignore_notification(json_value: &serde_json::Value, method: &str) -> b
 /// path, which `receive()` does not use). The one bit the fork adds is whether the compatibility
 /// filter's own `Value` parse ACCEPTED the line — that parse already runs here on every failed UTF-8
 /// line, so D54's strict-JSON gate costs no extra parse. A non-UTF-8 line skips the compat branch
-/// and is never strict JSON.
+/// and is never strict JSON. rmcp 3.10 keys its own reply on serde's error CATEGORY instead
+/// (`async_rw.rs:316-331`); this fork keys on strictness, as D54 measured it.
 fn try_parse_with_compatibility<T: serde::de::DeserializeOwned>(
     line: &[u8],
 ) -> Result<Option<T>, ParseFailure> {
@@ -683,13 +597,11 @@ impl ParseFailure {
     }
 }
 
-/// D54: the id the `-32700` reply carries — the one [`crate::envelope_id::scan`] recovers from a
-/// STRICT-JSON line, and none from any other.
+/// D54: the id the reply to a failed line carries — the one [`crate::envelope_id::scan`] recovers
+/// from a STRICT-JSON line (rule (β)), and none from any other.
 ///
 /// Both matches are exhaustive with no `_` arm: a new verdict or a new failure kind must be routed
-/// here deliberately. The recovered arm is spelled on ONE line beginning `EnvelopeId::Recovered`,
-/// which keeps `scripts/checks/d47-envelope-id-claims.sh`'s `Q12` anchor (a bare `Some(id),` line)
-/// single-sited on D47's own argument.
+/// here deliberately.
 fn parse_error_reply_id(failure: &ParseFailure, line: &[u8]) -> Option<RequestId> {
     match failure {
         ParseFailure::NotJson(_) => None,
@@ -700,11 +612,22 @@ fn parse_error_reply_id(failure: &ParseFailure, line: &[u8]) -> Option<RequestId
     }
 }
 
+/// Is this failed line answered by rule (γ) — rmcp 3.10's own id-less `invalid_request("Invalid
+/// request", None)` — rather than by a `-32700`? (D59 clause (2), RULED by Miguel in tracker
+/// comment 406.)
+///
+/// Exactly the strict-JSON lines whose id cannot be read: no `id`, an id that is no `RequestId`, two
+/// differing ids, a non-object root. A line that is not strict JSON keeps D54's id-less `-32700`
+/// (rule (α)), and a readable id keeps its `-32700` on that id (rule (β)).
+fn answers_invalid_request(failure: &ParseFailure, id: Option<&RequestId>) -> bool {
+    matches!(failure, ParseFailure::NotAMessage(_)) && id.is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DupScanningTransport, ParamsScan};
     use crate::envelope_id_corpus::{
-        Expect, ParseExpect, divergence_corpus, expected_bytes, parse_error_bytes,
+        Expect, ParseExpect, ParseRole, expected_bytes, id_corpus, parse_error_bytes,
         parse_error_corpus,
     };
     use rmcp::model::{GetExtensions, JsonRpcMessage, RequestId};
@@ -730,12 +653,14 @@ mod tests {
         }
     }
 
-    /// The §4.6 framing corpus — ONE byte corpus, consumed by both transports.
+    /// The §4.6 framing corpus — ONE byte corpus, consumed by both transports, each entry with its
+    /// tier. The whole-stream cell feeds the PARITY entries; the per-entry differential grades all.
     ///
     /// Each entry is a raw line written to the transport's read half. It deliberately includes the
     /// shapes whose handling is invisible to any test that goes through an rmcp CLIENT: a client
     /// serializes an already-deduplicated object and structurally cannot emit a duplicate key.
-    fn framing_corpus() -> Vec<(&'static str, Vec<u8>)> {
+    fn framing_corpus() -> Vec<(&'static str, Vec<u8>, Tier)> {
+        let mut tiered: Vec<(&'static str, Vec<u8>, Tier)> = Vec::new();
         let mut corpus: Vec<(&'static str, Vec<u8>)> = Vec::new();
         // F1 — BOM-prefixed CLEAN frame.
         let mut bom_clean = b"\xEF\xBB\xBF".to_vec();
@@ -763,8 +688,9 @@ mod tests {
         ));
         // F5 — a blank line (skipped, no message, no reply).
         corpus.push(("F5", Vec::new()));
-        // F6 — a whitespace-only line: NOT empty, so it parses and fails => -32700 + recovery.
-        corpus.push(("F6", b"   ".to_vec()));
+        // F6 — a whitespace-only line: NOT empty, so it parses and fails. It is not strict JSON, so
+        // rule (α) answers the id-less -32700 where rmcp 3.10 writes nothing: the SILENCED tier.
+        tiered.push(("F6", b"   ".to_vec(), Tier::Silenced));
         // F8 — an unknown notification with a WELL-FORMED `params` object. It does NOT reach the
         // compatibility filter: rmcp's catch-all `CustomNotification` types it, so the frame is
         // DELIVERED (and the filter only runs on a typed-parse failure).
@@ -804,7 +730,8 @@ mod tests {
             br#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":5}"#.to_vec(),
         ));
         // F16 — the OVER-ignoring direction: a STANDARD notification with unusable `params` must
-        // still be a -32700, not a silent drop. Both arms must decline it.
+        // still be answered, not silently dropped. Both arms must decline it. It is strict JSON
+        // with no id, so rule (γ) answers rmcp's own id-less -32600: parity.
         corpus.push((
             "F16",
             br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":5}"#.to_vec(),
@@ -815,12 +742,11 @@ mod tests {
         // test — replacing its whole `matches!` with `false` leaves the suite green while the fork
         // silently answers -32700 to a frame rmcp drops.
         //
-        // [v1.0.1/D47] This is ALSO the DELIBERATE PARITY DROP (D47's Decision 4): it carries an
-        // `id`, so a reader reasonably expects the D47 arm to answer it. It must NOT, and no
-        // carve-out exists for it — the exclusion is STRUCTURAL. `try_parse_with_compatibility`
-        // returns `Ok(None)` for this frame, so it never becomes a `message` at all, and a
-        // predicate keyed on a DELIVERED Notification cannot see it. It stays byte-silent because
-        // rmcp is byte-silent, which is the whole point of the fork.
+        // This is ALSO the DELIBERATE PARITY DROP: it carries a readable `id`, so a reader
+        // reasonably expects rule (β) to answer it. It must NOT, and no carve-out exists for it —
+        // the exclusion is STRUCTURAL. `try_parse_with_compatibility` returns `Ok(None)` for this
+        // frame, so it never reaches the parse-error arm. It stays byte-silent because rmcp is
+        // byte-silent, which is the whole point of the fork.
         corpus.push((
             "F17",
             br#"{"jsonrpc":"2.0","id":17,"method":"notifications/foo","params":5}"#.to_vec(),
@@ -830,24 +756,24 @@ mod tests {
             "F9",
             br#"{"jsonrpc":"2.0","id":9,"method":"nope/nope","params":{}}"#.to_vec(),
         ));
-        // F10 — non-UTF-8 bytes: -32700 + recovery. F10 does NOT grade the D54 gate — `scan` finds
-        // no `id` in it either way; the UTF-8 witness is parse-error corpus entry X03.
-        corpus.push(("F10", vec![b'{', 0xff, 0xfe, b'}']));
-        // F11 — depth-130 nesting: past serde_json's 128-level limit for BOTH parsers => -32700.
-        // Since D54 this is ALSO the strict-JSON gate's depth witness: `envelope_id::scan` alone
+        // F10 — non-UTF-8 bytes: rule (α), the id-less -32700, where rmcp writes nothing (SILENCED).
+        // F10 does NOT grade the D54 gate — `scan` finds no `id` in it either way; the UTF-8
+        // witness is parse-error corpus entry X03.
+        tiered.push(("F10", vec![b'{', 0xff, 0xfe, b'}'], Tier::Silenced));
+        // F11 — depth-130 nesting: past serde_json's 128-level limit for BOTH parsers, so rule (α)
+        // (SILENCED). It is ALSO the strict-JSON gate's depth witness: `envelope_id::scan` alone
         // recovers id 11 from it (`IgnoredAny` checks no depth), so it stays id-less on our side
         // only because the gate rejects it.
         let mut deep = String::from(r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":"#);
         deep.push_str(&"[".repeat(130));
         deep.push_str(&"]".repeat(130));
         deep.push('}');
-        corpus.push(("F11", deep.into_bytes()));
-        // -- [v1.0.1/D47] four NEVER-ANSWERED negatives ------------------------------------------
+        tiered.push(("F11", deep.into_bytes(), Tier::Silenced));
+        // -- NEVER-ANSWERED negatives ---------------------------------------------------------------
         //
-        // These are PARITY entries: each must stay byte-identical to rmcp. They exist because the
-        // D47 arm's failure mode is OVER-firing, and the shipped corpus contains no frame that
-        // distinguishes "the predicate is correct" from "the predicate answers anything with an
-        // `id`-shaped thing near it".
+        // These are PARITY entries: each must stay byte-identical to rmcp. They exist because an
+        // id-recovering arm's failure mode is OVER-firing, and they distinguish "the predicate is
+        // correct" from "the predicate answers anything with an `id`-shaped thing near it".
         //
         // F18 — a NESTED `id`. The envelope id is a ROOT member by definition, so `params.id` is
         // invisible: delivered, nothing written. Dies if the scan recurses instead of `IgnoredAny`.
@@ -855,10 +781,8 @@ mod tests {
             "F18",
             br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{"id":1}}"#.to_vec(),
         ));
-        // F19 — a WELL-FORMED id on a `notifications/*` method. This is already a `CustomRequest`
-        // today (the untagged union tries Request first), so it is delivered as a REQUEST and the
-        // D47 arm — keyed on the Notification variant — structurally cannot see it. Dies if the
-        // predicate is re-keyed onto `Request`.
+        // F19 — a WELL-FORMED id on a `notifications/*` method. rmcp 3.10 decodes a `method`+`id`
+        // frame as a Request (`CustomRequest` here), so it is DELIVERED and nothing is written.
         corpus.push((
             "F19",
             br#"{"jsonrpc":"2.0","id":19,"method":"notifications/cancelled","params":{"requestId":1,"reason":"x"}}"#
@@ -875,12 +799,29 @@ mod tests {
             br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{"s":"id"}}"#.to_vec(),
         ));
         // A trailing UNTERMINATED line at EOF (F7) — the writer omits the final newline for the
-        // LAST entry, so this one exercises it.
+        // LAST entry, so this one exercises it. rmcp 3.10 DROPS it at EOF, and so do we (D59
+        // clause (7)): parity, nothing delivered and nothing written.
         corpus.push((
             "F7",
             br#"{"jsonrpc":"2.0","id":7,"method":"ping","params":{}}"#.to_vec(),
         ));
-        corpus
+        let last = corpus.pop().expect("F7 closes the corpus");
+        let mut all: Vec<(&'static str, Vec<u8>, Tier)> = corpus
+            .into_iter()
+            .map(|(label, bytes)| (label, bytes, Tier::Parity))
+            .collect();
+        all.extend(tiered);
+        all.push((last.0, last.1, Tier::Parity));
+        all
+    }
+
+    /// The framing corpus's PARITY entries, in order — the whole-stream cell's input.
+    fn parity_framing_corpus() -> Vec<(&'static str, Vec<u8>)> {
+        framing_corpus()
+            .into_iter()
+            .filter(|(_, _, tier)| *tier == Tier::Parity)
+            .map(|(label, bytes, _)| (label, bytes))
+            .collect()
     }
 
     /// Serialize the corpus into one byte stream: `\n` after every line except the last (F7), and
@@ -934,17 +875,17 @@ mod tests {
 
     /// **CD-7 — the differential framing pin.**
     ///
-    /// Feed ONE byte corpus to rmcp's `AsyncRwTransport` and to our `DupScanningTransport` and
-    /// assert identical `receive()` sequences AND identical bytes written (the `-32700` replies,
-    /// with the id OMITTED, and recovery on the next line). Every `-32700` in THIS corpus is outside
-    /// the D54 class; the in-class lines live in `parse_error_corpus` and are graded by the
-    /// per-entry `IdInserted` tier. This differential pin, TOGETHER WITH
+    /// Feed ONE byte corpus to rmcp 3.10's `AsyncRwTransport` and to our `DupScanningTransport` and
+    /// assert identical `receive()` sequences AND identical bytes written (rule (γ)'s id-less
+    /// `-32600`, recovery on the next line, the EOF drop). Only the framing corpus's PARITY entries
+    /// ride this stream; the rule-(α) entries (F6, F10, F11) are graded per entry by the `Silenced`
+    /// tier, and the rule-(β) lines by the `IdInserted` tier. This differential pin, TOGETHER WITH
     /// the arm-by-arm cell below (`the_compatibility_filter_is_entered_and_discriminates`), is
     /// what stands between an rmcp bump and a silent framing divergence — neither alone suffices,
     /// which is the module doc's standing note at the top of this file.
     #[tokio::test]
     async fn cd7_framing_is_identical_to_rmcp_async_rw_transport() {
-        let corpus = framing_corpus();
+        let corpus = parity_framing_corpus();
         let bytes = corpus_bytes(&corpus);
 
         // rmcp's own transport.
@@ -973,22 +914,27 @@ mod tests {
             "the bytes WRITTEN diverged from rmcp's"
         );
 
-        // Non-vacuity: the corpus must actually produce both deliveries and parse-error replies.
+        // Non-vacuity: the corpus must actually produce deliveries and a rule-(γ) reply, and the
+        // unterminated F7 must be DROPPED by both (its id 7 is delivered by neither).
         assert!(
             rmcp_received.len() >= 4,
             "the corpus must deliver several messages, got {}",
             rmcp_received.len()
         );
-        let parse_errors = String::from_utf8_lossy(&rmcp_written)
-            .matches("-32700")
+        let invalid_requests = String::from_utf8_lossy(&rmcp_written)
+            .matches("-32600")
             .count();
         assert!(
-            parse_errors >= 3,
-            "the corpus must provoke several -32700 replies, got {parse_errors}"
+            invalid_requests >= 1,
+            "the corpus must provoke rmcp's id-less -32600, got {invalid_requests}"
+        );
+        assert!(
+            !rmcp_received.iter().any(|m| m.contains(r#""id":7"#)),
+            "the unterminated final line is dropped at EOF (D59 clause (7))"
         );
         assert!(
             !String::from_utf8_lossy(&our_written).contains("\"id\":null"),
-            "the -32700 reply must OMIT the id, not send a null one"
+            "the id-less reply must OMIT the id, not send a null one"
         );
     }
 
@@ -1043,7 +989,7 @@ mod tests {
         );
 
         // F16 — NOT filtered, the over-ignoring direction: a STANDARD notification with unusable
-        // `params` is a real client defect and must surface as -32700, not vanish.
+        // `params` is a real client defect and must be answered (rule (γ)), not vanish.
         assert!(
             parse(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":5}"#).is_err(),
             "a malformed STANDARD notification must not be silently swallowed"
@@ -1064,24 +1010,64 @@ mod tests {
         );
 
         // A request OUTSIDE the `notifications/` prefix is never filtered: the `id` makes the first
-        // arm decline it and the prefix test makes the second decline it too, so it surfaces as
-        // -32700 instead of vanishing. (F17 above is the deliberate exception rmcp itself defines,
-        // and only inside that prefix.)
-        //
-        // Since D54 this frame IS answered on its id: it is strict JSON with a readable root `id`
-        // that fails the typed parse, so the `-32700` carries id 1 and a waiting rmcp client is
-        // released (parse-error corpus entry E22). This assertion pins only that the frame is not
-        // IGNORED.
-        //
-        // ONE THING THIS DOES NOT SAY, because an earlier wording claimed it and it is not true
-        // (PRD section 4, D47): it is not a transport-wide invariant. A frame whose raw bytes
-        // carry a top-level `id` that FAILS to decode never reaches this arm at all: rmcp's
-        // untagged union falls through to the Notification variant. That class is answered
-        // -32600 on the recovered id and dropped, by the arm D47 adds — not by anything here.
+        // arm decline it and the prefix test makes the second decline it too, so it is answered
+        // instead of vanishing. (F17 above is the deliberate exception rmcp itself defines, and
+        // only inside that prefix.) It is strict JSON with a readable root `id` that fails the
+        // typed parse, so rule (β) answers -32700 on id 1 and a waiting rmcp client is released
+        // (parse-error corpus entry E22). This assertion pins only that the frame is not IGNORED.
         assert!(
             parse(br#"{"jsonrpc":"2.0","id":1,"method":"nope/nope","params":5}"#).is_err(),
             "a request outside `notifications/*` must never be ignored — the client is waiting on \
              its id"
+        );
+
+        // The rmcp 3.10 lists (D59 clause (12), criterion (o)): an id-LESS `server/discover` with
+        // untypeable `params` is NOT filtered, because 3.10's `is_standard_method` names
+        // `server/discover`. rmcp 1.7's 2025-06-18 list did not, so its first arm (no `id` + a
+        // non-standard method) dropped this frame. With an id the two lists give the same verdict
+        // (`rmcp-3.10.0/src/transport/async_rw.rs:437-455`), so only the id-less frame bites.
+        // `subscriptions/listen` and `elicitation/create` are the other two methods 3.10 added.
+        for method in [
+            "server/discover",
+            "subscriptions/listen",
+            "elicitation/create",
+        ] {
+            let line = format!(r#"{{"jsonrpc":"2.0","method":"{method}","params":5}}"#);
+            assert!(
+                parse(line.as_bytes()).is_err(),
+                "an id-less `{method}` with untypeable params is a STANDARD method on rmcp 3.10 and \
+                 must be answered, never filtered"
+            );
+        }
+        // `notifications/subscriptions/acknowledged` is the one standard NOTIFICATION 3.10 added:
+        // with an id and untypeable params, the prefix arm would drop it under the 1.7 list.
+        assert!(
+            parse(
+                br#"{"jsonrpc":"2.0","id":3,"method":"notifications/subscriptions/acknowledged","params":5}"#
+            )
+            .is_err(),
+            "a STANDARD 3.10 notification with untypeable params is answered, never filtered"
+        );
+    }
+
+    /// **Criterion (o)** — the fork's standard-method verdict equals rmcp 3.10's LIVE reader on the
+    /// id-less `server/discover` frame: rmcp answers it (its id-less `-32600`), so the fork must not
+    /// filter it either. The differential is live, so an rmcp bump that changes its list turns this
+    /// red even if the copy above is never edited.
+    #[tokio::test]
+    async fn the_id_less_server_discover_frame_gets_rmcps_verdict() {
+        let frame = br#"{"jsonrpc":"2.0","method":"server/discover","params":5}"#;
+        let (our_received, our_written) = run_ours(frame).await;
+        let (rmcp_received, rmcp_written) = run_rmcp(frame).await;
+        assert_eq!(
+            String::from_utf8_lossy(&rmcp_written),
+            String::from_utf8_lossy(&parse_error_bytes(&ParseExpect::InvalidRequest)),
+            "rmcp 3.10 must answer the id-less server/discover frame, not filter it"
+        );
+        assert_eq!(
+            (our_received, String::from_utf8_lossy(&our_written)),
+            (rmcp_received, String::from_utf8_lossy(&rmcp_written)),
+            "the fork must give rmcp's verdict, byte for byte"
         );
     }
 
@@ -1095,7 +1081,7 @@ mod tests {
     }
 
     // =============================================================================================
-    // [v1.0.1/D47] THE UN-DECODABLE-ENVELOPE-`id` CELLS
+    // THE PARSE-ERROR AND ENVELOPE-`id` CELLS (D54, re-tiered by D59)
     //
     // Homed here and not in an integration suite for one reason: only the in-module harness owns
     // the RAW WRITTEN STREAM and both transports. Neither integration harness can assert exact
@@ -1103,59 +1089,51 @@ mod tests {
     // ORDER and the presence-versus-null distinction, and those are exactly what these cells pin.
     // =============================================================================================
 
-    /// Which tier one entry of the FULL corpus belongs to.
+    /// Which tier one entry of the FULL corpus belongs to (D59 clause (12)).
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Tier {
-        /// Must stay byte-identical to `AsyncRwTransport`.
+        /// Must stay byte-identical to rmcp 3.10's `AsyncRwTransport`, rule (γ) and the EOF drop
+        /// included.
         Parity,
-        /// Must DIVERGE from rmcp in exactly the declared way (D47).
-        Divergence(Expect),
-        /// rmcp's id-less `-32700` plus EXACTLY the declared id (D54).
+        /// Rule (α): rmcp writes NOTHING, ours writes the id-less `-32700`.
+        Silenced,
+        /// Rule (α) on a line whose typed decode fails on SHAPE before `end()` reaches its trailing
+        /// bytes: rmcp writes its id-less `-32600`, ours the id-less `-32700` (D59 clause (12),
+        /// amended 2026-11-17).
+        Recoded,
+        /// Rule (β): rmcp writes its id-less `-32600`, ours writes `-32700` ON the declared id.
         IdInserted(ParseExpect),
     }
 
-    /// Every tier as ONE labelled list: the framing corpus (parity), D47's divergence corpus, and
-    /// D54's parse-error corpus (id-inserted for an in-class entry, parity for every other).
+    /// Every tier as ONE labelled list: the framing corpus, the envelope-`id` corpus (rule (β) for a
+    /// recovered id, parity for rule (γ) and for a float id that runs) and D54's parse-error corpus
+    /// (rule (β) for an in-class entry, `Silenced` or `Recoded` for rule (α), parity for every
+    /// other).
     fn full_corpus() -> Vec<(String, Vec<u8>, Tier)> {
         let mut all: Vec<(String, Vec<u8>, Tier)> = framing_corpus()
             .into_iter()
-            .map(|(label, bytes)| (label.to_string(), bytes, Tier::Parity))
+            .map(|(label, bytes, tier)| (label.to_string(), bytes, tier))
             .collect();
-        all.extend(divergence_corpus().into_iter().map(|entry| {
-            (
-                entry.id.to_string(),
-                entry.frame,
-                Tier::Divergence(entry.expect),
-            )
+        all.extend(id_corpus().into_iter().map(|entry| {
+            let tier = match entry.expect {
+                Expect::RecoveredNum(n) => Tier::IdInserted(ParseExpect::RecoveredNum(n)),
+                Expect::RecoveredStr(s) => Tier::IdInserted(ParseExpect::RecoveredStr(s)),
+                Expect::Omitted | Expect::Runs(_) => Tier::Parity,
+            };
+            (entry.id.to_string(), entry.frame, tier)
         }));
         all.extend(parse_error_corpus().into_iter().map(|entry| {
             let tier = match entry.expect {
                 ParseExpect::RecoveredNum(_) | ParseExpect::RecoveredStr(_) => {
                     Tier::IdInserted(entry.expect)
                 }
-                ParseExpect::IdLess | ParseExpect::Silent => Tier::Parity,
+                ParseExpect::IdLess if entry.role == ParseRole::Recoded => Tier::Recoded,
+                ParseExpect::IdLess => Tier::Silenced,
+                ParseExpect::InvalidRequest | ParseExpect::Silent => Tier::Parity,
             };
             (entry.id.to_string(), entry.frame, tier)
         }));
         all
-    }
-
-    /// Splice `"id":<declared>,` into rmcp's reply right after its `{"jsonrpc":"2.0",` head — the
-    /// slot rmcp's own field order gives `id` (`JsonRpcError`: `jsonrpc`, `id`, `error`; rmcp
-    /// `src/model.rs:462-470`). The id comes from the corpus row, NEVER from `envelope_id::scan`.
-    fn insert_id(rmcp_reply: &[u8], expect: &ParseExpect) -> Vec<u8> {
-        const HEAD: &[u8] = br#"{"jsonrpc":"2.0","#;
-        let tail = rmcp_reply.strip_prefix(HEAD).expect(
-            "rmcp's reply no longer opens with its jsonrpc member — re-derive the D54 id slot",
-        );
-        let id = match expect {
-            ParseExpect::RecoveredNum(n) => n.to_string(),
-            ParseExpect::RecoveredStr(s) => format!("\"{s}\""),
-            ParseExpect::IdLess | ParseExpect::Silent => {
-                panic!("only an in-class entry carries an id")
-            }
-        };
-        [HEAD, b"\"id\":", id.as_bytes(), b",", tail].concat()
     }
 
     /// Run ONE frame through our transport; return `(received, written)`.
@@ -1184,19 +1162,20 @@ mod tests {
         (received, written)
     }
 
-    /// **W-D01..W-D23** — every divergence entry is answered BYTE FOR BYTE, and never delivered.
+    /// **W-D01..W-D26** — every envelope-`id` entry is answered BYTE FOR BYTE and never delivered,
+    /// or, for a float-form integer id, delivered on that integer with nothing written.
     ///
     /// The assertion is EXACT bytes, not "differs from rmcp": a mutant writing garbage satisfies
     /// "differs" and cannot satisfy this. The per-entry id choice is the only thing that actually
     /// pins the unambiguity rule.
     ///
-    /// Mutants: the whole catalogue's byte-level half — `invalid_request` swapped for
-    /// `parse_error`; `Some(id)` replaced by `None` on the recovered arm; `None` replaced by any
-    /// id on the fallback arm; any edit to the message literal. **W-D23** additionally carries the
-    /// raw-span VALUE comparator, and **W-D22** the D43-suppresses-D47 precedence mutant.
+    /// Mutants: `invalid_request` swapped for `parse_error` on either arm; the recovered id replaced
+    /// by `None`; `None` replaced by any id on rule (γ); answer AND deliver. **W-D23** additionally
+    /// carries the raw-span VALUE comparator, **W-D22** the D43-suppresses-D54 precedence mutant,
+    /// and **W-D10/W-D11/W-D26** a fork that refuses float-form integer ids rmcp 3.10 accepts.
     #[tokio::test]
-    async fn the_divergence_corpus_is_answered_byte_for_byte() {
-        for entry in divergence_corpus() {
+    async fn the_id_corpus_is_answered_byte_for_byte() {
+        for entry in id_corpus() {
             let (received, written) = run_ours(&entry.frame).await;
             assert_eq!(
                 String::from_utf8_lossy(&written),
@@ -1205,26 +1184,32 @@ mod tests {
                 entry.id,
                 entry.why
             );
-            assert!(
-                received.is_empty(),
-                "{} must be ANSWERED AND DROPPED, never delivered — got {received:?}",
-                entry.id
-            );
+            if let Expect::Runs(id) = entry.expect {
+                assert_eq!(received.len(), 1, "{} must RUN as a request", entry.id);
+                assert!(
+                    received[0].contains(&format!(r#""id":{id},"#)),
+                    "{} must be delivered on the INTEGER id {id}: {}",
+                    entry.id,
+                    received[0]
+                );
+            } else {
+                assert!(
+                    received.is_empty(),
+                    "{} must be ANSWERED AND DROPPED, never delivered — got {received:?}",
+                    entry.id
+                );
+            }
         }
     }
 
     /// **W-DROP** — an answered frame is never delivered, and exactly one reply is written per frame.
     ///
-    /// Mutant: `continue` replaced by `return Some(message)` (answer AND deliver). Since D50 a frame
-    /// delivered BEFORE the handshake meets the gate above this transport and is dropped there a
-    /// second time. What this cell catches is the delivery ITSELF taking effect once the latch is
-    /// open. rmcp runs every delivered notification through `TryInto<CancelledNotification>`, and a
-    /// frame that converts cancels the in-flight request it names
-    /// (`rmcp-1.7.0/src/service.rs:981-995`). The count below catches the other half, since exactly
-    /// one reply per frame is written.
+    /// Mutant: the parse-error arm answering AND delivering a frame. A frame that failed the typed
+    /// parse has no message to deliver, so this pins that no arm fabricates one. The count below
+    /// catches the other half, since exactly one reply per frame is written.
     #[tokio::test]
     async fn an_answered_frame_is_never_delivered() {
-        let corpus = divergence_corpus();
+        let corpus = id_corpus();
         let pick = |id: &str| {
             corpus
                 .iter()
@@ -1244,7 +1229,7 @@ mod tests {
         let received = drain(DupScanningTransport::new(in_r, out_w)).await;
         let written = read_to_end(&mut out_r).await;
 
-        assert!(received.is_empty(), "no class frame may be delivered");
+        assert!(received.is_empty(), "no answered frame may be delivered");
         let lines = written
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
@@ -1260,7 +1245,7 @@ mod tests {
     /// Mutant: `continue` replaced by `return None` (close the connection after answering).
     #[tokio::test]
     async fn the_connection_survives_and_the_next_frame_is_delivered() {
-        let corpus = divergence_corpus();
+        let corpus = id_corpus();
         let ambiguous = corpus.iter().find(|f| f.id == "D04").expect("D04 missing");
 
         let mut bytes = ambiguous.frame.clone();
@@ -1284,16 +1269,16 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&written),
             String::from_utf8_lossy(&expected_bytes(&Expect::Omitted)),
-            "exactly ONE reply — the fallback — and nothing for the clean ping"
+            "exactly ONE reply — rule (γ)'s — and nothing for the clean ping"
         );
     }
 
     /// **W-N1** — a notification with NO `id` is DELIVERED and nothing is written.
     ///
-    /// This is D47's explicit carve-out and a JSON-RPC requirement ("The Server MUST NOT reply to a
-    /// Notification"), so it is a false-POSITIVE guard rather than a coverage cell.
+    /// This is a JSON-RPC requirement ("The Server MUST NOT reply to a Notification"), so it is a
+    /// false-POSITIVE guard rather than a coverage cell.
     ///
-    /// Mutant: deleting the `Absent => {}` arm, so a genuine notification falls into a reply arm.
+    /// Mutant: a reply arm that fires on a frame that typed.
     #[tokio::test]
     async fn a_notification_with_no_id_is_delivered_and_nothing_is_written() {
         let (received, written) =
@@ -1340,14 +1325,12 @@ mod tests {
 
     /// **W-N3** — the Decision-4 parity drop stays silent.
     ///
-    /// F17 carries an `id`, so a reader expects the D47 arm to answer it. The exclusion is
+    /// F17 carries a readable `id`, so a reader expects rule (β) to answer it. The exclusion is
     /// STRUCTURAL rather than a carve-out: `try_parse_with_compatibility` returns `Ok(None)` for
-    /// this frame, so it never becomes a `message` and the predicate — keyed on a DELIVERED
-    /// Notification — cannot see it. rmcp drops it too, so the re-scoped acceptance criterion
-    /// ("no frame that rmcp itself would answer may go unanswered") is satisfied.
+    /// this frame, so it never reaches the parse-error arm. rmcp drops it too.
     ///
-    /// Mutants: neutering the compat filter's second arm; moving the D47 branch ABOVE the parse so
-    /// it keys on raw bytes alone.
+    /// Mutants: neutering the compat filter's second arm; running the id recovery ABOVE the parse
+    /// so it keys on raw bytes alone.
     #[tokio::test]
     async fn the_decision_4_parity_drop_stays_silent() {
         let (received, written) =
@@ -1361,8 +1344,7 @@ mod tests {
 
     /// **W-N4** — a clean request is untouched: delivered, `Clean`, nothing written.
     ///
-    /// Mutants: re-keying the predicate onto the `Request` variant; moving the branch above the
-    /// parse.
+    /// Mutant: an id-recovering branch moved above the parse.
     #[tokio::test]
     async fn a_clean_request_is_untouched() {
         let (received, written) =
@@ -1371,15 +1353,15 @@ mod tests {
         assert!(written.is_empty(), "request traffic must pay nothing");
     }
 
-    /// **W-N5** — a D43 frame is not STOLEN by D47.
+    /// **W-N5** — a D43 frame is not STOLEN by the parse-error arm.
     ///
     /// The duplicate is inside `params.arguments` and the ROOT `id` is perfectly fine, so this
     /// stays a D43 frame end to end: delivered, carrying its `Duplicate` verdict, unanswered.
     ///
-    /// Mutant: re-keying the predicate onto `Request`, which would answer it and never deliver it —
+    /// Mutant: answering any frame whose raw bytes hold a duplicate, which would never deliver it —
     /// silently disabling the whole D43 gate.
     #[tokio::test]
-    async fn d43_frames_are_not_stolen_by_d47() {
+    async fn d43_frames_are_not_stolen_by_the_parse_error_arm() {
         let (received, written) = run_ours(
             br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"issue","arguments":{"id":"a","id":"b"}}}"#,
         )
@@ -1387,7 +1369,7 @@ mod tests {
         assert_eq!(received.len(), 1, "a D43 frame must still be DELIVERED");
         assert!(
             written.is_empty(),
-            "and must NOT be answered by the D47 arm"
+            "and must NOT be answered by the parse-error arm"
         );
 
         // And it must still carry its D43 verdict, which is what `call_tool` gates on.
@@ -1412,12 +1394,18 @@ mod tests {
         );
     }
 
-    /// **W-G2** — the per-entry differential over the FULL corpus, every tier (parity, D47
-    /// divergence, D54 id-inserted).
+    /// **W-G2** — the per-entry differential over the FULL corpus against rmcp 3.10's LIVE reader,
+    /// every tier: Parity (rule (γ) and the EOF drop included), `Silenced` (rule (α)) and
+    /// `IdInserted` (rule (β)) — D59 clause (12), criteria (c) and (d).
     ///
     /// The whole-stream cell above keeps its own job (F2's CRLF, F5's blank line and F7's
     /// unterminated final line are STREAM properties a per-entry harness destroys, which is why
     /// that cell must not be deleted as redundant). This one grades each entry independently.
+    ///
+    /// Each diverging tier asserts BOTH halves: that rmcp's own bytes are still what D59 recorded
+    /// (nothing for rule (α), the id-less `-32600` for rule (β)), so an rmcp that starts answering
+    /// those lines itself turns it red, and that ours are the declared reply, so a fork that drifts
+    /// to rmcp's bytes turns it red.
     #[tokio::test]
     async fn the_per_entry_differential_holds_for_every_tier() {
         for (label, frame, tier) in full_corpus() {
@@ -1435,36 +1423,58 @@ mod tests {
                         "{label}: the bytes written diverged from rmcp's"
                     );
                 }
-                Tier::Divergence(expect) => {
+                Tier::Silenced => {
+                    // (a) rmcp 3.10 writes NOTHING for a line that is not strict JSON.
                     assert!(
                         rmcp_written.is_empty(),
-                        "{label}: rmcp must answer NOTHING — that IS the defect"
+                        "{label}: rmcp must write nothing for this line — if it now answers it, \
+                         re-derive rule (α): {}",
+                        String::from_utf8_lossy(&rmcp_written)
                     );
-                    assert_eq!(
-                        rmcp_received.len(),
-                        1,
-                        "{label}: rmcp must DELIVER it as a notification — that IS the defect"
-                    );
+                    // (b) ours is D54's id-less -32700 — a hand-written literal.
                     assert_eq!(
                         String::from_utf8_lossy(&our_written),
-                        String::from_utf8_lossy(&expected_bytes(&expect)),
-                        "{label}: our reply bytes are wrong"
+                        String::from_utf8_lossy(&parse_error_bytes(&ParseExpect::IdLess)),
+                        "{label}: ours must be the id-less -32700 (rule (α))"
                     );
-                    assert!(our_received.is_empty(), "{label}: we must answer AND DROP");
+                    assert!(
+                        our_received.is_empty() && rmcp_received.is_empty(),
+                        "{label}: a line that fails the typed parse is never delivered"
+                    );
                 }
-                Tier::IdInserted(expect) => {
-                    // (a) rmcp's OWN reply is still the id-less -32700 — a hand-written literal.
+                Tier::Recoded => {
+                    // (a) rmcp 3.10's decode stops at the shape error first: its id-less -32600.
                     assert_eq!(
                         String::from_utf8_lossy(&rmcp_written),
-                        String::from_utf8_lossy(&parse_error_bytes(&ParseExpect::IdLess)),
-                        "{label}: rmcp's own reply must still be the id-less -32700 — if rmcp now \
-                         writes the id itself, or changed the code, message or framing, re-derive D54"
+                        String::from_utf8_lossy(&parse_error_bytes(&ParseExpect::InvalidRequest)),
+                        "{label}: rmcp must still write its id-less -32600 for this line — if it \
+                         now writes nothing, move the entry to the Silenced tier"
                     );
-                    // (b) ours is rmcp's ACTUAL bytes with EXACTLY the declared id spliced in.
+                    // (b) ours keeps rule (α)'s id-less -32700 (ruling 406).
                     assert_eq!(
                         String::from_utf8_lossy(&our_written),
-                        String::from_utf8_lossy(&insert_id(&rmcp_written, &expect)),
-                        "{label}: ours must be rmcp's bytes with EXACTLY the declared id inserted"
+                        String::from_utf8_lossy(&parse_error_bytes(&ParseExpect::IdLess)),
+                        "{label}: ours must be the id-less -32700 (rule (α))"
+                    );
+                    assert!(
+                        our_received.is_empty() && rmcp_received.is_empty(),
+                        "{label}: a line that fails the typed parse is never delivered"
+                    );
+                }
+                Tier::IdInserted(expect) => {
+                    // (a) rmcp's OWN reply is still the id-less -32600 — a hand-written literal.
+                    assert_eq!(
+                        String::from_utf8_lossy(&rmcp_written),
+                        String::from_utf8_lossy(&parse_error_bytes(&ParseExpect::InvalidRequest)),
+                        "{label}: rmcp's own reply must still be the id-less -32600 — if rmcp now \
+                         answers on the id itself, or changed the code, message or framing, \
+                         re-derive rule (β)"
+                    );
+                    // (b) ours is the -32700 ON EXACTLY the declared id — a hand-written literal.
+                    assert_eq!(
+                        String::from_utf8_lossy(&our_written),
+                        String::from_utf8_lossy(&parse_error_bytes(&expect)),
+                        "{label}: ours must be -32700 on EXACTLY the declared id (rule (β))"
                     );
                     // (c) neither transport delivers it.
                     assert!(
@@ -1479,13 +1489,13 @@ mod tests {
     /// **W-G3** — the SET-EQUALITY / anti-drift guard. This is what replaces what a single
     /// "identical bytes" assertion used to buy.
     ///
-    /// Without it, an OVER-firing predicate that also answered the id-less F8/F12 would leave both
-    /// other tiers green: the parity tier would still match rmcp on the entries it did not touch,
-    /// and the divergence tier would still match its expected bytes.
+    /// Without it, an OVER-firing arm that also answered the id-less F8/F12 would leave both other
+    /// tiers green: the parity tier would still match rmcp on the entries it did not touch, and the
+    /// diverging tiers would still match their expected bytes.
     ///
-    /// Mutant: re-keying the predicate onto `Request` (F1–F4/F9/F19 gain replies), or any rmcp bump
-    /// that migrates an entry between tiers. The declared set is the D47 divergence tier UNION the
-    /// D54 id-inserted tier.
+    /// Mutant: a reply arm that fires on frames that type (F1–F4/F9/F19 gain replies), or any rmcp
+    /// bump that migrates an entry between tiers. The declared set is EXACTLY `Silenced` ∪ `Recoded`
+    /// ∪ `IdInserted`; D47's tier is deleted (D59 clause (12), amended 2026-11-17).
     #[tokio::test]
     async fn the_diverging_entries_are_exactly_the_declared_ones() {
         use std::collections::BTreeSet;
@@ -1495,7 +1505,7 @@ mod tests {
         let mut all_our_written = String::new();
 
         for (label, frame, tier) in full_corpus() {
-            if matches!(tier, Tier::Divergence(_) | Tier::IdInserted(_)) {
+            if matches!(tier, Tier::Silenced | Tier::Recoded | Tier::IdInserted(_)) {
                 declared.insert(label.clone());
             }
             let (our_received, our_written) = run_ours(&frame).await;
@@ -1509,51 +1519,47 @@ mod tests {
         assert_eq!(
             observed, declared,
             "the stream positions where we diverge from rmcp must be EXACTLY the declared \
-             divergence tier — an entry in `observed` only is an over-firing predicate, an entry \
-             in `declared` only is a fix that stopped working"
+             Silenced, Recoded and IdInserted entries — an entry in `observed` only is an \
+             over-firing arm, an entry in `declared` only is a divergence that stopped working"
         );
         assert!(
             !declared.is_empty(),
             "a corpus with no declared divergence would make this guard vacuous"
         );
 
-        // The RATIFIED fallback spelling, pinned over the whole DIVERGENCE stream. This is a
-        // SECOND, WIDER copy of the guard the shipped CD-7 cell carries — not a migration of it.
-        // That one pins the parity tier's omission and stays where it is; this one covers the
-        // arms D47 and D54 add, which the shipped guard never sees.
+        // The RATIFIED id-less spelling, pinned over the whole stream. This is a SECOND, WIDER copy
+        // of the guard the CD-7 whole-stream cell carries — not a migration of it.
         assert!(
             !all_our_written.contains("\"id\":null"),
-            "D47's fallback spells the missing id by OMISSION: rmcp's JsonRpcError.id is \
-             Option<RequestId> with skip_serializing_if = \"Option::is_none\" (model.rs:462-470), \
-             so a literal null is not reachable through the codec. If the decision is ever revised \
-             to a literal null (a deliberate codec bypass), THIS is the assertion to change."
+            "an id-less reply spells the missing id by OMISSION: rmcp's JsonRpcError.id is \
+             Option<RequestId> with skip_serializing_if = \"Option::is_none\", so a literal null \
+             is not reachable through the codec. If the decision is ever revised to a literal null \
+             (a deliberate codec bypass), THIS is the assertion to change."
         );
     }
 
-    /// **W-G4** — divergence-kind coverage as a SET, never a count.
+    /// **W-G4** — envelope-`id` outcome coverage as a SET, never a count.
     ///
     /// A count would rot; a set cannot be off-by-one against itself. Its "site" is the CORPUS, not
     /// a production site: the mutation it grades is a corpus EDIT that silently drops one half of
-    /// the recovery rule (e.g. deleting every string-id entry).
+    /// the recovery rule (e.g. deleting every string-id entry) or every float-id entry.
     #[test]
-    fn every_divergence_kind_is_represented() {
+    fn every_id_corpus_kind_is_represented() {
         use crate::envelope_id_corpus::ExpectKind;
         use std::collections::BTreeSet;
 
-        let present: BTreeSet<ExpectKind> = divergence_corpus()
-            .iter()
-            .map(|f| f.expect.kind())
-            .collect();
+        let present: BTreeSet<ExpectKind> = id_corpus().iter().map(|f| f.expect.kind()).collect();
         let required: BTreeSet<ExpectKind> = [
             ExpectKind::RecoveredNum,
             ExpectKind::RecoveredStr,
             ExpectKind::Omitted,
+            ExpectKind::Runs,
         ]
         .into_iter()
         .collect();
         assert_eq!(
             present, required,
-            "the corpus must exercise all three reply shapes"
+            "the corpus must exercise all four outcomes"
         );
     }
 
@@ -1562,12 +1568,12 @@ mod tests {
     /// The failure this guards is the one this repo has paid for: someone "tidies" a frame into a
     /// well-formed one and the cell keeps passing while grading nothing.
     #[test]
-    fn the_divergence_corpus_is_not_vacuous() {
-        for entry in divergence_corpus() {
+    fn the_id_corpus_is_not_vacuous() {
+        for entry in id_corpus() {
             let text = String::from_utf8_lossy(&entry.frame);
 
-            // Every entry must be a frame our predicate can even see: the raw bytes must carry a
-            // root `id` member in SOME spelling.
+            // Every entry must be a frame the id scan can even see: the raw bytes must carry a root
+            // `id` member in SOME spelling.
             assert!(
                 text.contains(r#""id":"#) || text.contains(r#"d":"#),
                 "{}: no `id` member in the frame text at all",
@@ -1589,6 +1595,26 @@ mod tests {
                         entry.id
                     );
                 }
+            }
+
+            // A float-id entry must really be written in FLOAT form and decode to its declared
+            // integer, or it stops grading rmcp 3.10's float-id acceptance.
+            if let Expect::Runs(want) = entry.expect {
+                use serde::Deserialize as _;
+                let parsed: serde_json::Value =
+                    serde_json::from_slice(&entry.frame).expect("a float-id entry is JSON");
+                let id = &parsed["id"];
+                assert!(
+                    id.is_f64(),
+                    "{}: a float-id entry must spell its id in float form: {id}",
+                    entry.id
+                );
+                assert_eq!(
+                    RequestId::deserialize(id.clone()).ok(),
+                    Some(RequestId::Number(want)),
+                    "{}: the float-form id must decode to the declared integer",
+                    entry.id
+                );
             }
 
             // D23 SPECIFICALLY: the two occurrences must NOT be byte-identical while their decoded
@@ -1618,7 +1644,8 @@ mod tests {
     /// Mutants: the recovered arm answering `None` (every E entry); the strict-JSON gate removed or
     /// weakened (X01, X03, X04, X05, X12, F11 in CD-7); a non-UTF-8 line classed `NotAMessage` (X03
     /// alone); a byte prefilter on the literal `"id"` (E16 alone); numeric ids only (E04, E14, E15);
-    /// a gate stricter than `Value` (E18, E24); answer AND deliver (every E entry).
+    /// a gate stricter than `Value` (E18, E24); answer AND deliver (every E entry); rule (γ)
+    /// answered `-32700` like rule (α) (X06–X10, X14).
     #[tokio::test]
     async fn the_parse_error_corpus_is_answered_byte_for_byte() {
         for entry in parse_error_corpus() {
@@ -1715,6 +1742,20 @@ mod tests {
                         "{id}: a parity-only entry fails the gate and recovers nothing"
                     );
                 }
+                ParseRole::Recoded => {
+                    assert!(
+                        matches!(parsed, Err(super::ParseFailure::NotJson(_))) && scan_recovers,
+                        "{id}: a recoded entry fails the gate while scan alone recovers an id"
+                    );
+                    let typed = serde_json::from_slice::<RxJsonRpcMessage<RoleServer>>(body)
+                        .expect_err("a recoded entry fails the typed decode");
+                    assert_eq!(
+                        typed.classify(),
+                        serde_json::error::Category::Data,
+                        "{id}: the typed decode must fail on SHAPE before `end()`, which is what \
+                         makes rmcp 3.10 answer -32600 here"
+                    );
+                }
             }
         }
     }
@@ -1725,7 +1766,7 @@ mod tests {
     /// entry sees a non-UTF-8 line classed as JSON — or deleting (or reshaping) a witness required
     /// by id. X01, X03, X10, E16 and E24 are each the only entry that kills its mutant. E15 and E17
     /// are each the only PARSE-ERROR-corpus entry that kills its mutant, which `envelope_id`'s own
-    /// cells and D47's divergence corpus (D23, D19) also kill. E18 is X01's in-class boundary
+    /// cells and the envelope-`id` corpus (D23, D19) also kill. E18 is X01's in-class boundary
     /// partner, required by id although X06 and X07 also kill its mutant.
     #[test]
     fn every_parse_error_kind_is_represented() {
@@ -1738,13 +1779,14 @@ mod tests {
             ParseExpectKind::RecoveredNum,
             ParseExpectKind::RecoveredStr,
             ParseExpectKind::IdLess,
+            ParseExpectKind::InvalidRequest,
             ParseExpectKind::Silent,
         ]
         .into_iter()
         .collect();
         assert_eq!(
             kinds, required,
-            "the corpus must exercise all four reply shapes"
+            "the corpus must exercise all five reply shapes"
         );
 
         let halves: BTreeSet<GateHalf> = corpus
@@ -1762,18 +1804,19 @@ mod tests {
 
         // The row-unique witnesses, required BY ID with their declared reply and role, so neither
         // deleting nor reshaping one passes while every other cell stays green.
-        let witnesses: [(&str, ParseExpect, ParseRole); 8] = [
+        let witnesses: [(&str, ParseExpect, ParseRole); 9] = [
             (
                 "X01",
                 ParseExpect::IdLess,
                 ParseRole::GateWitness(GateHalf::Json),
             ),
+            ("X15", ParseExpect::IdLess, ParseRole::Recoded),
             (
                 "X03",
                 ParseExpect::IdLess,
                 ParseRole::GateWitness(GateHalf::Utf8),
             ),
-            ("X10", ParseExpect::IdLess, ParseRole::ScanWitness),
+            ("X10", ParseExpect::InvalidRequest, ParseRole::ScanWitness),
             ("E15", ParseExpect::RecoveredStr("a"), ParseRole::InClass),
             ("E16", ParseExpect::RecoveredNum(54016), ParseRole::InClass),
             ("E17", ParseExpect::RecoveredNum(54017), ParseRole::InClass),
@@ -1859,8 +1902,8 @@ mod tests {
     use std::sync::Arc;
 
     // =============================================================================================
-    // [ub-nbz / ub-zja] CANCELLATION CELLS — `receive()` dropped mid-poll, exactly as rmcp's unbiased
-    // serve-loop `select!` drops a losing arm (`rmcp-1.7.0/src/service.rs:805`, the arm at `:813`).
+    // [ub-nbz / ub-zja] CANCELLATION CELLS — `receive()` dropped mid-poll, exactly as rmcp's
+    // serve-loop `select!` drops a losing arm.
     //
     // Every cell here runs on the CURRENT-THREAD runtime `#[tokio::test]` builds by default, and that
     // is load-bearing: a task spawned inside `receive()` cannot be polled until the test itself
@@ -1898,7 +1941,7 @@ mod tests {
     /// spawned or parked · the parked handle discarded by a `receive()` drop.
     #[tokio::test]
     async fn an_out_of_band_reply_survives_a_dropped_receive() {
-        let corpus = divergence_corpus();
+        let corpus = id_corpus();
         let recovered = corpus.iter().find(|f| f.id == "D01").expect("D01 missing");
         let omitted = corpus.iter().find(|f| f.id == "D04").expect("D04 missing");
         assert!(
@@ -1922,7 +1965,7 @@ mod tests {
 
         let arms: [(&str, Vec<u8>, Vec<u8>); 4] = [
             (
-                "-32600 recovered id",
+                "-32700 on the id of a duplicated id",
                 recovered.frame.clone(),
                 expected_bytes(&recovered.expect),
             ),
@@ -2077,7 +2120,7 @@ mod tests {
     /// second slot / queue that lets the replies race.
     #[tokio::test]
     async fn consecutive_bad_frames_are_answered_in_arrival_order() {
-        let corpus = divergence_corpus();
+        let corpus = id_corpus();
         let recovered = corpus.iter().find(|f| f.id == "D01").expect("D01 missing");
         let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
         let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
@@ -2103,7 +2146,7 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&read_to_end(&mut out_r).await),
             String::from_utf8_lossy(&expected),
-            "the -32600 then the -32700, each once, in arrival order"
+            "the -32700 on the id then the id-less -32700, each once, in arrival order"
         );
     }
 
@@ -2215,14 +2258,15 @@ mod tests {
         );
     }
 
-    /// **ub-zja** — an UNTERMINATED final line whose bytes were consumed by a DROPPED `receive()`
-    /// is still processed at EOF: `read_until` then returns `Ok(0)` with a NON-EMPTY buffer.
+    /// **ub-zja, inverted by D59 clause (7)** — an UNTERMINATED final line whose bytes were consumed
+    /// by a DROPPED `receive()` is DROPPED at EOF, as rmcp 3.10 drops it
+    /// (`rmcp-3.10.0/src/transport/async_rw.rs:290-292`): nothing is delivered and nothing written.
     ///
-    /// Mutant: `Ok(0)` returns `None` regardless of the buffer.
+    /// Mutant: the EOF arm processing a non-empty buffer as a line (the pre-D59 shape).
     #[tokio::test]
-    async fn an_unterminated_line_split_by_a_dropped_receive_is_delivered_at_eof() {
+    async fn an_unterminated_line_split_by_a_dropped_receive_is_dropped_at_eof() {
         let (mut in_w, in_r) = tokio::io::duplex(1024 * 1024);
-        let (out_w, _out_r) = tokio::io::duplex(1024 * 1024);
+        let (out_w, mut out_r) = tokio::io::duplex(1024 * 1024);
         in_w.write_all(PING_7)
             .await
             .expect("write the unterminated frame");
@@ -2233,14 +2277,15 @@ mod tests {
         in_w.shutdown().await.expect("EOF with no newline");
         let delivered = transport.receive().await;
         assert!(
-            delivered
-                .as_ref()
-                .is_some_and(|m| render(m).contains(r#""id":7"#)),
-            "an unterminated final line is still a frame: {delivered:?}"
+            delivered.is_none(),
+            "an unterminated final line is dropped at EOF: {delivered:?}"
         );
+        assert!(transport.receive().await.is_none(), "and EOF stays EOF");
+        let _ = transport.close().await;
+        drop(transport);
         assert!(
-            transport.receive().await.is_none(),
-            "then EOF, exactly once"
+            read_to_end(&mut out_r).await.is_empty(),
+            "nothing is written for the dropped line"
         );
     }
 
@@ -2297,14 +2342,20 @@ mod tests {
 
     const PING_1: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
 
-    /// A `receive()` re-called after a READ ERROR discards the half-read line, exactly as rmcp's
-    /// `AsyncRwTransport` does (it clears at every loop head): same result, same bytes written.
+    /// A `receive()` re-called after a READ ERROR RESUMES the half-read line, exactly as rmcp 3.10's
+    /// `AsyncRwTransport` does (`LineRead::Io` keeps its buffer, `async_rw.rs:142` and `:293-296`):
+    /// same result, same bytes written (D59 clause (7), inverted from the rmcp 1.7 discard).
     ///
-    /// Mutant: the `Err` arm leaves `line_complete` false, so the re-call resumes the partial line.
+    /// Mutant: the `Err` arm marks the line complete, so the re-call discards the head and answers
+    /// the tail alone.
     #[tokio::test]
-    async fn a_read_error_discards_the_partial_line_like_rmcp() {
+    async fn a_read_error_resumes_the_partial_line_like_rmcp() {
         let rmcp = recall_after_read_error(AsyncRwTransport::new_server).await;
         let ours = recall_after_read_error(DupScanningTransport::new).await;
+        assert!(
+            rmcp.0.as_deref().is_some_and(|m| m.contains(r#""id":1"#)),
+            "non-vacuity: rmcp 3.10 resumes the half-read ping: {rmcp:?}"
+        );
         assert_eq!(
             (ours.0, String::from_utf8_lossy(&ours.1)),
             (rmcp.0, String::from_utf8_lossy(&rmcp.1)),

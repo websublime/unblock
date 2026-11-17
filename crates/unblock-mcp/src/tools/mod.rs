@@ -10,7 +10,8 @@
 //!   its module doc before touching any tool signature — the name `Parameters` is load-bearing.
 //! - [`enforce_quota`] — the NFR-18 untrusted-input check, run **once in
 //!   [`crate::server::UnblockServer::call_tool`] over the WHOLE `tools/call` `params`** (name +
-//!   arguments + `_meta` + `task`), inside the rate-limit permit and BEFORE dispatch (D42; rmcp has
+//!   arguments + inputResponses + requestState + `_meta`, D59 clause (4)), inside the rate-limit
+//!   permit and BEFORE dispatch (D42; rmcp has
 //!   no stdio quota hook). It is deliberately NOT re-run inside tool bodies — a second call would be
 //!   provably dead, since `params` strictly contains `arguments`.
 //! - [`ok_json`] / [`err_json`] — map a domain result to an rmcp `CallToolResult` that is always
@@ -83,7 +84,8 @@ pub(crate) fn engine_err_json(err: &EngineError) -> CallToolResult {
 ///
 /// rmcp provides NO built-in request-size / array-length / string-length / batch cap on the stdio
 /// path, so this is the only enforcement point. Since D42 its argument is the **whole `tools/call`
-/// `params`** — `name` + `arguments` + `_meta` + `task` — serialized losslessly by
+/// `params`** — `name` + `arguments` + `inputResponses` + `requestState` + `_meta` (D59 clause (4);
+/// a `task` key is discarded by rmcp 3.10's decode and never reaches it) — serialized losslessly by
 /// [`crate::server::UnblockServer::enforce_request_quota`], NOT a re-serialized typed DTO. Measuring
 /// the typed DTO was the defect: a payload parked under an unknown key never appeared in it, so it
 /// was never measured (and `#[serde(default)]` padding was counted instead of the real bytes).

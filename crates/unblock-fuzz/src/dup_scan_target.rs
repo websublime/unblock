@@ -246,7 +246,9 @@ pub fn run_dup_scan_case(data: &[u8]) -> Result<(), FuzzError> {
     // adjudicate, one subtree at a time.
     //
     // The divergence is harmless in production for the reason the whole design turns on: such a
-    // frame fails rmcp's own parse too, so it is answered `-32700` and never reaches `call_tool`.
+    // frame fails rmcp's own parse too, so it is answered by the transport's parse-error arm (PRD §4
+    // D59 clause (2)'s three rules: an id-less `-32700`, a `-32700` on a readable id, or rmcp 3.10's
+    // id-less `-32600`) and never reaches `call_tool`.
     let params_verdict = scan(data, &["params"]);
     if let Ok(document) = serde_json::from_slice::<RawJson>(body) {
         // Every occurrence, because the scanner scans every occurrence of a repeated root key.

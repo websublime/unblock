@@ -326,7 +326,7 @@ pub fn assert_stdout_is_frame_only(stdout: &str, cell: &str) {
 /// (`code` + `retryable`)? The D48 hardening of the [`McpClient::read_response`] guard.
 ///
 /// **All three membership tests are TOP-LEVEL, on the object's own keys — [`Value::get`], never a
-/// recursive search.** A recursive reading would reject the shipped D47 `-32600` frame, whose `code`
+/// recursive search.** A recursive reading would reject an out-of-band error frame, whose `code`
 /// member is nested under `error`; that frame is legitimate framing and this predicate must accept
 /// it. That claim is pinned for ALL THREE tests, not only for `code`, by `mcp_stdout_channel.rs`'s
 /// H6; and each of the two blob-shape clauses is pinned as INDEPENDENTLY load-bearing by H5, whose
@@ -898,11 +898,11 @@ impl McpClient {
     /// provably parked awaiting `initialize` — WITHOUT completing the handshake — by round-tripping a
     /// JSON-RPC `ping`.
     ///
-    /// The MCP lifecycle spec permits `ping` BEFORE `initialize`, and rmcp 1.7 implements it: its
-    /// handshake loop (`rmcp-1.7.0/src/service/server.rs` `serve_server_with_ct_inner`) answers a
-    /// `PingRequest` with an `EmptyResult` and LOOPS BACK to `expect_next_message` — it does not
-    /// break out to negotiate. (`VersionClampingTransport` passes it through untouched: the clamp
-    /// only rewrites `InitializeRequest`.) So receiving the ping response proves, IN-BAND:
+    /// The MCP lifecycle spec permits `ping` BEFORE `initialize`, and rmcp implements it: its
+    /// pre-lifecycle loop (`rmcp-3.10.0/src/service/server.rs:573-587`, `serve_server_with_ct_inner`)
+    /// answers a `PingRequest` with an `EmptyResult` and LOOPS BACK to `expect_next_message` — it does
+    /// not start either lifecycle. (The pre-lifecycle gate passes every Request upward untouched.) So
+    /// receiving the ping response proves, IN-BAND:
     /// 1. the run loop is up ⇒ `shutdown::install()` has ALREADY run (it precedes `run_mcp_server`),
     ///    so a signal sent now is RECORDED, never delivered to the default disposition; and
     /// 2. the stdio transport is bound and a FRESH blocking-pool `stdin` read is parked — the exact

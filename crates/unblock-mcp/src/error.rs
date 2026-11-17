@@ -63,9 +63,9 @@ pub enum McpServerError {
 ///
 /// `TransportError` gets its own arm because a clip over rmcp's own text cuts inside a type name.
 /// rmcp renders that variant as `Send message error {error}, when {context}`
-/// (`rmcp-1.7.0/src/service/server.rs:75`), and its `{error}` is a nested `DynamicTransportError`
+/// (`rmcp-3.10.0/src/service/server.rs:90`), and its `{error}` is a nested `DynamicTransportError`
 /// whose own `Display` is `Transport [{transport_name}] error: {error}`
-/// (`rmcp-1.7.0/src/transport.rs:238`). `transport_name` is the TYPE NAME `std::any::type_name`
+/// (`rmcp-3.10.0/src/transport.rs:240`). `transport_name` is the TYPE NAME `std::any::type_name`
 /// fills, and it runs past the 128-byte bound alone, so clipping rmcp's whole string hides the I/O
 /// reason the operator needs.
 ///
@@ -137,10 +137,11 @@ fn describe_frame(frame: &rmcp::model::ClientJsonRpcMessage) -> String {
 
 /// The method name of a client notification.
 ///
-/// rmcp exposes a `method()` accessor for requests only, so this match is hand-written — and it is
-/// exhaustive, so an rmcp release that adds a sixth variant is a compile error rather than a silent
-/// hole. The four typed arms return their own variant's const method through `ConstString::as_str`,
-/// so the literal is rmcp's rather than ours.
+/// rmcp exposes a `method()` accessor for requests only, so this match is hand-written. rmcp 3 marks
+/// `ClientNotification` `#[non_exhaustive]`, so the match needs a wildcard: a variant a future rmcp
+/// adds renders the fixed `<unnamed>` placeholder, never any byte of the frame. The four typed arms
+/// return their own variant's const method through `ConstString::as_str`, so the literal is rmcp's
+/// rather than ours.
 fn notification_method(notification: &rmcp::model::ClientNotification) -> &str {
     use rmcp::model::{ClientNotification, ConstString as _};
 
@@ -150,6 +151,7 @@ fn notification_method(notification: &rmcp::model::ClientNotification) -> &str {
         ClientNotification::InitializedNotification(n) => n.method.as_str(),
         ClientNotification::RootsListChangedNotification(n) => n.method.as_str(),
         ClientNotification::CustomNotification(n) => n.method.as_str(),
+        _ => "<unnamed>",
     }
 }
 
@@ -182,7 +184,8 @@ impl McpServerError {
     /// Is this the rmcp **cancellation outcome** — i.e. a shutdown that was ASKED FOR, not a fault?
     ///
     /// `true` only for [`McpServerError::Transport`] wrapping `ServerInitializeError::Cancelled`,
-    /// which rmcp 1.7 returns from the OUTER `select!` arm of `serve_server_with_ct` when the
+    /// which rmcp returns from the OUTER `select!` arm of `serve_server_with_ct`
+    /// (`rmcp-3.10.0/src/service/server.rs:438-454`) when the
     /// caller's `CancellationToken` cancels an INCOMPLETE `initialize` handshake (spine §0.1). It is
     /// one of the two normal cooperative-shutdown outcomes (`Ok(())` is the other), so a caller that
     /// already knows a signal was recorded can report it as routine rather than blaming the process
@@ -214,19 +217,35 @@ impl McpServerError {
         }
     }
 
-    /// Is this the rmcp **pre-`initialize` peer disconnect** — i.e. the client closed the connection
-    /// before completing the MCP `initialize` handshake, with no internal fault?
+    /// Is this the rmcp **pre-lifecycle peer disconnect** — i.e. the client went away before either
+    /// MCP lifecycle started, with no internal fault?
     ///
-    /// `true` only for [`McpServerError::Transport`] wrapping
-    /// `ServerInitializeError::ConnectionClosed(_)`. rmcp raises it from the handshake path's
-    /// `expect_next_message`, which maps the transport's `receive() == None` to `ConnectionClosed`.
-    /// `AsyncRwTransport::receive` returns `None` on a clean EOF, on a read IO error (which it logs via
-    /// `tracing::error!` FIRST — nothing swallowed), and on garbage-then-peer-close; ALL collapse here.
+    /// `true` for [`McpServerError::Transport`] wrapping either of two rmcp outcomes:
+    ///
+    /// - `ServerInitializeError::ConnectionClosed(_)`. rmcp raises it from the pre-lifecycle loop's
+    ///   `expect_next_message` (`rmcp-3.10.0/src/service/server.rs:424-436`), which maps the
+    ///   transport's `receive() == None` to `ConnectionClosed`: a clean EOF, a read IO error (logged
+    ///   via `tracing::error!` FIRST — nothing swallowed) and garbage-then-peer-close all collapse
+    ///   here.
+    /// - `ServerInitializeError::TransportError` whose `DynamicTransportError` boxes OUR transport's
+    ///   [`std::io::Error`] (the scanner's `Error`, passed through by the gate) with an
+    ///   [`std::io::ErrorKind`] of `BrokenPipe`, `ConnectionReset` or `NotConnected` — the write half
+    ///   reporting the peer gone (D59 clause (13), Miguel's ruling in tracker comment 411). rmcp
+    ///   raises `TransportError` before either lifecycle ONLY from a failed send, at exactly SIX
+    ///   sites: the `initialize` failure reply, the `ping` reply, the missing-`_meta` `-32602`, the
+    ///   `server/discover` reply, the unsupported-inline-version `-32022` and the `InitializeResult`
+    ///   (`:546`, `:583`, `:608`, `:633`, `:653`, `:718`). A client that closed its read end of our
+    ///   stdout makes any of them fail, and that is D40's disconnect, not a fault.
+    ///
+    /// The predicate keys on the `io::ErrorKind` and NEVER on rmcp's `context` string, which is
+    /// unversioned diagnostic text. Every other `TransportError` stays a genuine fault (exit 1 through
+    /// `InternalError`), an encode failure (`InvalidData`/`UnexpectedEof`,
+    /// `rmcp-3.10.0/src/transport/async_rw.rs:505-513`) included.
     ///
     /// This is the D40 (T3.2.1 follow-up (b)) seam: on the UNSIGNALLED path the CLI's `resolve_mcp_exit`
     /// uses it to intercept the disconnect and delegate the exit code to `session.shutdown()` — a clean
     /// teardown → exit 0 (a routine peer disconnect is not an internal fault, unifying with the
-    /// post-handshake EOF; spine §5b), a failing teardown still decides via its own 0–8 code. It is a
+    /// post-lifecycle EOF; spine §5b), a failing teardown still decides via its own 0–8 code. It is a
     /// SEPARATE predicate from [`is_cancellation`](McpServerError::is_cancellation) (which stays
     /// `Cancelled`-only): the two disjoint outcomes travel independently.
     ///
@@ -234,11 +253,17 @@ impl McpServerError {
     /// `CONTRACT_HASH`/`CONTRACT_VERSION` bump — D40).
     #[must_use]
     pub fn is_pre_handshake_disconnect(&self) -> bool {
+        use rmcp::service::ServerInitializeError;
+
         match self {
-            Self::Transport { source } => matches!(
-                **source,
-                rmcp::service::ServerInitializeError::ConnectionClosed(_)
-            ),
+            Self::Transport { source } => match &**source {
+                ServerInitializeError::ConnectionClosed(_) => true,
+                ServerInitializeError::TransportError { error, .. } => error
+                    .error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| is_peer_gone(io.kind())),
+                _ => false,
+            },
             Self::RunLoop { .. } => false,
         }
     }
@@ -249,7 +274,9 @@ impl McpServerError {
     /// [`rmcp::service::ServerInitializeError::transport`] constructor over the concrete
     /// `AsyncRwTransport` whose `Error` is [`std::io::Error`]) — NOT a fabricated placeholder. This
     /// exists solely so a downstream crate (`unblock-cli`'s exit-code boundary test) can construct
-    /// the `Transport` arm to prove its D27/AF-4 mapping (`→ InternalError`, exit 1). The enum stays
+    /// the `Transport` arm to prove its D27/AF-4 mapping (`→ InternalError`, exit 1). Its I/O error
+    /// is [`std::io::ErrorKind::Other`], deliberately outside the three peer-gone kinds
+    /// [`McpServerError::is_pre_handshake_disconnect`] routes to exit 0 (D59 clause (13)). The enum stays
     /// `#[non_exhaustive]`; this seam is feature-gated + `#[doc(hidden)]`, so the shipped public API
     /// is unchanged.
     #[cfg(feature = "test-util")]
@@ -267,7 +294,7 @@ impl McpServerError {
             tokio::io::DuplexStream,
             tokio::io::DuplexStream,
         >;
-        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, message.to_string());
+        let io_err = std::io::Error::other(message.to_string());
         let init_err =
             ServerInitializeError::transport::<IoTransport>(io_err, "test-util transport");
         TransportSnafu.into_error(init_err)
@@ -361,6 +388,19 @@ impl McpServerError {
     }
 }
 
+/// Is this write-half [`std::io::ErrorKind`] the peer having gone away (D40, D59 clause (13))?
+///
+/// `BrokenPipe` is a closed pipe or socket, `ConnectionReset` a reset peer, and `NotConnected` a write
+/// half already taken by `close()`. Every other kind is a genuine fault.
+fn is_peer_gone(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+    )
+}
+
 /// Map an [`EngineError`] to a sanitized [`StructuredError`] at the MCP boundary (spine §2.4/§5.6).
 ///
 /// Exactly `(&err).into()` — the blanket `From<&EngineError> for StructuredError` (F-6). The engine
@@ -376,7 +416,9 @@ pub(crate) fn engine_error_to_structured(err: &EngineError) -> StructuredError {
 /// FR-11), so a `read_resource` failure surfaces as an `ErrorData`. A not-found —
 /// [`unblock_error::ErrorCode::IssueNotFound`], built for a missing `{id}` (`resources/issues.rs`) or
 /// an unknown URI (`server::unknown_resource`) — maps to `ErrorData::resource_not_found` (-32002, the
-/// pinned rmcp contract, `rmcp-1.7.0` `model.rs:544`). Every other code reaching this boundary maps to
+/// pinned rmcp contract, `rmcp-3.10.0/src/model.rs:640`; rmcp 3.10 rewrites it to `-32602` with the
+/// same `data` for a request on the 2026-07-28 revision, `src/handler/server.rs:329-330`, D59 clause
+/// (9)). Every other code reaching this boundary maps to
 /// `INTERNAL_ERROR` (-32603) — a true internal fault, OR (since D34/MF-5) the retryable `RateLimited`
 /// capacity cap, which shares the -32603 transport code but is distinguished by its structured
 /// `data.code`/`data.retryable`. The full structured payload is attached as `data` on BOTH arms, so a
@@ -565,6 +607,130 @@ mod tests {
             !McpServerError::__cancelled_error().is_pre_handshake_disconnect(),
             "a cancellation is not a disconnect"
         );
+    }
+
+    // -- D59 criterion (t): D40 KEPT on a closed stdout — the six pre-lifecycle reply sends. ------
+
+    /// Build the REAL `Transport{TransportError}` rmcp raises when a pre-lifecycle reply send fails:
+    /// a `DynamicTransportError` over a boxed [`std::io::Error`] of `kind`, built with rmcp's public
+    /// `from_parts` (`rmcp-3.10.0/src/transport.rs:263-273`), under rmcp's `context` string.
+    fn reply_write_failure(
+        kind: std::io::ErrorKind,
+        context: &'static str,
+    ) -> super::McpServerError {
+        use super::TransportSnafu;
+        use rmcp::service::ServerInitializeError;
+        use rmcp::transport::DynamicTransportError;
+        use snafu::IntoError as _;
+
+        let error = DynamicTransportError::from_parts(
+            "the scanning transport",
+            std::any::TypeId::of::<std::io::Error>(),
+            Box::new(std::io::Error::new(kind, "the reply write failed")),
+        );
+        TransportSnafu.into_error(ServerInitializeError::TransportError {
+            error,
+            context: context.into(),
+        })
+    }
+
+    /// The three peer-gone kinds on a pre-lifecycle reply write ARE the disconnect class (exit 0).
+    /// Narrowing the predicate back to `ConnectionClosed` alone turns this RED.
+    #[test]
+    fn a_reply_write_to_a_closed_peer_is_the_pre_handshake_disconnect_class() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::NotConnected,
+        ] {
+            assert!(
+                reply_write_failure(kind, "sending pre-init metadata error response")
+                    .is_pre_handshake_disconnect(),
+                "{kind:?} on a pre-lifecycle reply write is the peer gone (D40)"
+            );
+        }
+    }
+
+    /// Every OTHER `io::ErrorKind` stays a genuine fault (exit 1), an encode failure's
+    /// `InvalidData`/`UnexpectedEof` included. Widening the predicate to any `TransportError` turns
+    /// this RED.
+    #[test]
+    fn any_other_reply_write_error_kind_is_not_the_disconnect_class() {
+        for kind in [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::WriteZero,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert!(
+                !reply_write_failure(kind, "sending pre-init metadata error response")
+                    .is_pre_handshake_disconnect(),
+                "{kind:?} is a genuine transport fault, never a routine disconnect"
+            );
+        }
+    }
+
+    /// The `ping` reply and the `InitializeResult` reply — the two sends that exited 1 on v1.12 —
+    /// carry rmcp's own context strings here, and a closed peer under either is the disconnect class
+    /// (Miguel's ruling, tracker comment 411).
+    #[test]
+    fn the_ping_and_initialize_result_reply_writes_are_the_disconnect_class() {
+        for context in [
+            "sending pre-init ping response",
+            "sending initialize response",
+        ] {
+            assert!(
+                reply_write_failure(std::io::ErrorKind::BrokenPipe, context)
+                    .is_pre_handshake_disconnect(),
+                "a broken pipe while {context} is the peer gone (D40)"
+            );
+        }
+    }
+
+    /// The predicate keys on the `io::ErrorKind`, NEVER on rmcp's `context` text: the SAME
+    /// `BrokenPipe` under an arbitrary context is the class, and an `InvalidData` under the `ping`
+    /// context is not. A predicate matching on the context string fails one of the two.
+    #[test]
+    fn the_disconnect_predicate_keys_on_the_error_kind_never_on_the_context() {
+        assert!(
+            reply_write_failure(
+                std::io::ErrorKind::BrokenPipe,
+                "an arbitrary future context"
+            )
+            .is_pre_handshake_disconnect(),
+            "a broken pipe is the peer gone whatever rmcp calls the send"
+        );
+        assert!(
+            !reply_write_failure(
+                std::io::ErrorKind::InvalidData,
+                "sending pre-init ping response"
+            )
+            .is_pre_handshake_disconnect(),
+            "an encode failure under the ping context is still a genuine fault"
+        );
+    }
+
+    /// A boxed source that is not an `io::Error` at all is never the disconnect class.
+    #[test]
+    fn a_non_io_transport_error_is_not_the_disconnect_class() {
+        use super::{McpServerError, TransportSnafu};
+        use rmcp::service::ServerInitializeError;
+        use rmcp::transport::DynamicTransportError;
+        use snafu::IntoError as _;
+
+        let error = DynamicTransportError::from_parts(
+            "a foreign transport",
+            std::any::TypeId::of::<std::fmt::Error>(),
+            Box::new(std::fmt::Error),
+        );
+        let err: McpServerError =
+            TransportSnafu.into_error(ServerInitializeError::TransportError {
+                error,
+                context: "sending pre-init ping response".into(),
+            });
+        assert!(!err.is_pre_handshake_disconnect());
     }
 
     // -- D49 — the startup-failure message DESCRIBES the rejected first frame, never echoes it. ---

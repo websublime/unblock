@@ -65,7 +65,7 @@ RANGE_RE='D1\.\.D59'
 RANGE_ALT_RE='D\(59\|58\|'
 
 # The LIVE published contract version. D58 does NOT move it.
-CONTRACT_RE='unblock\.mcp\.v1\.12'
+CONTRACT_RE='unblock\.mcp\.v1\.13'
 
 # The SAME spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte. DERIVED, never hand-written a second time.
@@ -178,7 +178,7 @@ Q21@scripts/checks/d56-organization-claims.sh@^RANGE_ALT_RE=@$RANGE_KNOB_ALT_RE@
 Q22@scripts/checks/d57-config-layers-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D57 sibling's live-range knob — the PREVIOUS newest script, which by the self-row rule pins everyone except itself and so needs this row
 Q23@scripts/checks/d57-config-layers-claims.sh@^RANGE_ALT_RE=@$RANGE_KNOB_ALT_RE@…and that sibling's ALTERNATION knob, the other of the two knobs d57 cannot pin itself
 Q24@scripts/checks/d44-create-deps-claims.sh@^CONTRACT_RE=@$CONTRACT_KNOB_RE@that sibling's contract knob still carries the LIVE id — D58 moves no contract byte (PRD §4 D58 criterion (p))
-Q25@scripts/checks/ub-lp9.25-dangling-blocker-claims.sh@^CONTRACT_RE=@mcp.*v1.*[^0-9]12'\$@the D45 sibling's contract knob spells the id with its \\? segments, so this row checks the LIVE minor at its end — D58 moves no contract byte
+Q25@scripts/checks/ub-lp9.25-dangling-blocker-claims.sh@^CONTRACT_RE=@mcp.*v1.*[^0-9]13'\$@the D45 sibling's contract knob spells the id with its \\? segments, so this row checks the LIVE minor at its end — D58 moves no contract byte
 Q26@scripts/checks/d47-envelope-id-claims.sh@^CONTRACT_RE=@$CONTRACT_KNOB_RE@that sibling's contract knob still carries the LIVE id — D58 moves no contract byte (PRD §4 D58 criterion (p))
 Q27@scripts/checks/d48-stdout-channel-claims.sh@^CONTRACT_RE=@$CONTRACT_KNOB_RE@that sibling's contract knob still carries the LIVE id — D58 moves no contract byte (PRD §4 D58 criterion (p))
 Q28@scripts/checks/d49-startup-failure-render-claims.sh@^CONTRACT_RE=@$CONTRACT_KNOB_RE@that sibling's contract knob still carries the LIVE id — D58 moves no contract byte (PRD §4 D58 criterion (p))

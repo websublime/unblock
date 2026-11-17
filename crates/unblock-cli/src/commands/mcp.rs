@@ -7,8 +7,9 @@
 //! **Cancellation is TWO-outcome (spine §0.1 — D38 corrected the earlier "returns `Ok`" claim).** On
 //! EOF / first signal the `CancellationToken` cancels and `run_mcp_server` returns EITHER:
 //! - `Ok(())` — the rmcp `initialize` handshake had already completed; or
-//! - `Err(McpServerError::Transport{Cancelled})` — the cancel landed DURING the handshake (rmcp 1.7
-//!   wraps the WHOLE handshake in a `select!` against the token).
+//! - `Err(McpServerError::Transport{Cancelled})` — the cancel landed DURING the handshake (rmcp wraps
+//!   the WHOLE pre-lifecycle loop in a `select!` against the token,
+//!   `rmcp-3.10.0/src/service/server.rs:438-454`).
 //!
 //! BOTH are normal cooperative-shutdown outcomes, both MUST reach `session.shutdown()` (drain the
 //! write permit, clean libsql close), and the `Err` MUST NOT be treated as an independent fault.
@@ -26,10 +27,13 @@
 //! (the FULL `code`/`message`/`hint`/`retryable` document — FR-11 is preserved in CONTENT and moved
 //! in CHANNEL) goes where every other diagnostic already goes. The exit code is unmoved.
 //!
-//! **The unsignalled pre-`initialize` disconnect → exit 0 carve-out (D40, spine §5b).** One `Err` on
+//! **The unsignalled pre-lifecycle disconnect → exit 0 carve-out (D40, spine §5b).** One `Err` on
 //! the unsignalled path is NOT a genuine fault: an `Err(McpServerError::Transport{ConnectionClosed})`
-//! raised because the client closed the connection before completing the `initialize` handshake is a
-//! routine lifecycle event (child-per-client, D31 — a peer that probes then leaves). So
+//! raised because the client closed the connection before either MCP lifecycle started — or, since
+//! D59 clause (13) (Miguel's ruling, tracker comment 411), a `Transport{TransportError}` raised
+//! because a pre-lifecycle reply could not be written to a stdout whose read end the client closed
+//! (`BrokenPipe`/`ConnectionReset`/`NotConnected`) — is a routine lifecycle event (child-per-client,
+//! D31 — a peer that probes then leaves). So
 //! [`resolve_mcp_exit`] intercepts it via [`unblock_mcp::McpServerError::is_pre_handshake_disconnect`]
 //! and DELEGATES the exit code to the teardown: a clean `session.shutdown()` → `Ok(None)`/exit 0
 //! (unifying with the post-handshake EOF), while a FAILING teardown still decides via its OWN 0–8 code
@@ -103,8 +107,9 @@ struct Diagnostic {
 fn diagnostic_route(err: &CliError) -> DiagnosticRoute {
     match err {
         // TWO demotions, each narrow by construction: (i) a cancel that landed during the handshake
-        // (`is_cancellation()` matches `Cancelled` alone — spine §0.1), and (ii) the pre-`initialize`
-        // peer disconnect (`is_pre_handshake_disconnect()` matches `ConnectionClosed(_)` alone — D40).
+        // (`is_cancellation()` matches `Cancelled` alone — spine §0.1), and (ii) the pre-lifecycle
+        // peer disconnect (`is_pre_handshake_disconnect()` matches `ConnectionClosed(_)` and a reply
+        // write failing with a peer-gone `io::ErrorKind` — D40, D59 clause (13)).
         // Both are routine cooperative-shutdown outcomes, not faults, so they go to `tracing::debug!`;
         // neither predicate ever matches a real transport fault. (ii) also demotes a POST-signal
         // disconnect, resolving the D38 residual NIT where `Transport{ConnectionClosed}` still shouted.
@@ -117,11 +122,12 @@ fn diagnostic_route(err: &CliError) -> DiagnosticRoute {
     }
 }
 
-/// Is `err` the pre-`initialize` peer disconnect (`Transport{ConnectionClosed}`)? The D40 seam
-/// [`resolve_mcp_exit`] uses to intercept the UNSIGNALLED disconnect and delegate the exit code to the
-/// teardown (a clean `session.shutdown()` → exit 0). PURE, so the interception is unit- and
-/// mutation-pinnable; narrow by construction — `is_pre_handshake_disconnect()` matches
-/// `ConnectionClosed(_)` alone, never `Cancelled` or a real transport fault.
+/// Is `err` the pre-lifecycle peer disconnect (`Transport{ConnectionClosed}`, or since D59 clause (13)
+/// a pre-lifecycle reply write that failed on a closed stdout)? The D40 seam [`resolve_mcp_exit`]
+/// uses to intercept the UNSIGNALLED disconnect and delegate the exit code to the teardown (a clean
+/// `session.shutdown()` → exit 0). PURE, so the interception is unit- and mutation-pinnable; narrow by
+/// construction — `is_pre_handshake_disconnect()` keys on the boxed `io::ErrorKind`, never on rmcp's
+/// context text, and never matches `Cancelled` or any other transport fault.
 fn is_mcp_disconnect(err: &CliError) -> bool {
     matches!(err, CliError::Mcp { source } if source.is_pre_handshake_disconnect())
 }
@@ -346,11 +352,15 @@ pub async fn run(_args: &McpArgs, overrides: &CliOverrides) -> Result<Option<u8>
     }
 }
 
-/// The optional client-facing MCP instructions string (advertised on `initialize`).
+/// The optional client-facing MCP instructions string, advertised in the `initialize` answer and in
+/// `server/discover`. It carries PRD §4 D59 clause (8)'s cancel sentence (RULED by Miguel, tracker
+/// comment 406), so an agent with no `AGENTS.md` still learns that cancelling a write does not
+/// undo it.
 fn instructions() -> String {
     format!(
         "Connect to unblock over MCP stdio (contract {}). Issue-data verbs are MCP tools; the CLI is \
-         lifecycle/ops only.",
+         lifecycle/ops only. Cancelling a write request does not guarantee the write did not happen; \
+         the client must re-read the state before acting on it.",
         unblock_mcp::CONTRACT_VERSION
     )
 }
