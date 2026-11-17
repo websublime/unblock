@@ -57,7 +57,7 @@
 ## 4. Milestone M2 — MCP surface (primary)  *(exit gate: an MCP client completes ready → claim → close; bd dogfood data imports)*
 
 - **T2.1 — `unblock-render` (reduced).** json/robot/plain/csv/markdown behind a trait; structured stdout / diagnostics stderr (NFR-14); snapshot-stable shapes. (TOON feature-gated stub = v1.1.)
-- **T2.2 — `unblock-mcp`: rmcp stdio server (FULL crate surface, Option A).** `unblock mcp` on `rmcp 1.7` (`server`, `transport-io`); `#[tool_router]`/`#[tool_handler]` (+ `#[prompt_handler]`) + hand-written `ServerHandler::get_info`/resource methods; capabilities (tools/resources/prompts). **T2.2 lands the FULL `unblock-mcp` surface** (the M1 T1.2 precedent): the rmcp stdio server + `ServerHandler` holding `Arc<Session>` + capabilities/schema builders + error mapping (FR-11) + the NFR-18 quotas preflight infra + **all 7 tools** (issue/claim/defer/query/dep/sync/diagnostics) wired to `Session` + 5 resources + 3 prompts + cooperative shutdown via `serve_with_ct` (FR-17) + **the M2 lifecycle exit-gate e2e** `query{ready}→claim→close`. Errors → MCP error data mirroring exit codes (FR-11/FR-20). Thin adapter over `unblock-engine` (no domain logic, no write orchestration — D14). **Depends on T1.8** (engine id allocator, D21): the `issue.create`/quick-create action maps `IssueInput::Create` → `NewIssue` and calls the MINTING `Session::create_issue` (the engine mints the id; quick-create returns `.id`). *(The AC-proving suites — taxonomy conformance, schemars-drift gate, quota AC suite, bulk-markdown, cli_parity — land in T2.3 below.)*
+- **T2.2 — `unblock-mcp`: rmcp stdio server (FULL crate surface, Option A).** `unblock mcp` on `rmcp 1.7` (`server`, `transport-io`; **[D59]** rmcp 3.10 since T4.4); `#[tool_router]`/`#[tool_handler]` (+ `#[prompt_handler]`) + hand-written `ServerHandler::get_info`/resource methods; capabilities (tools/resources/prompts). **T2.2 lands the FULL `unblock-mcp` surface** (the M1 T1.2 precedent): the rmcp stdio server + `ServerHandler` holding `Arc<Session>` + capabilities/schema builders + error mapping (FR-11) + the NFR-18 quotas preflight infra + **all 7 tools** (issue/claim/defer/query/dep/sync/diagnostics) wired to `Session` + 5 resources + 3 prompts + cooperative shutdown via `serve_with_ct` (FR-17) + **the M2 lifecycle exit-gate e2e** `query{ready}→claim→close`. Errors → MCP error data mirroring exit codes (FR-11/FR-20). Thin adapter over `unblock-engine` (no domain logic, no write orchestration — D14). **Depends on T1.8** (engine id allocator, D21): the `issue.create`/quick-create action maps `IssueInput::Create` → `NewIssue` and calls the MINTING `Session::create_issue` (the engine mints the id; quick-create returns `.id`). *(The AC-proving suites — taxonomy conformance, schemars-drift gate, quota AC suite, bulk-markdown, cli_parity — land in T2.3 below.)*
 - **T2.3 — MCP taxonomy conformance + AC-proving (closes PRD §12.2). Mints D22 — expanded by Miguel's F7 decision into a real create-surface extension + the bulk-markdown feature.** The AC-proving sibling of T2.2 (the M1 T1.4–T1.7 precedent): T2.2 lands the tool/resource/prompt *implementations*, and T2.3 **proves taxonomy conformance** against the consolidated v1 surface in §6 below and closes PRD §12.2 — while also LANDING the bulk-markdown feature + the create-surface field fidelity it exposes (D22). **FOLDED multi-crate scope (Miguel-ratified):** the ATOMIC bulk primitive is part of THIS task — storage `Storage::create_issues` (one `BEGIN IMMEDIATE` tx) + engine `Session::create_bulk` (mint-all-under-one-permit + in-memory dep resolution + the one storage tx) + the create-field extension + the bulk parser + `max_batch` + the 4 AC suites + the fault-injection rollback test. **It is ONE task (folded), NOT a separate precursor.** *(AC: tool count ≤ target (exactly 7 — `create_bulk` is a discriminator, not a tool); args quota-checked and strictly deserialized (`deny_unknown_fields`) with size/rate limits + `max_batch` cap (NFR-18); bulk-markdown parse is validated **all-or-nothing pre-mutation** then created **TRULY ATOMICALLY** via `Session::create_bulk`/`Storage::create_issues` (one tx) — a malformed/unresolvable block is rejected with code+hint pre-mutation, and a mid-batch mint/storage failure rolls back the WHOLE tx (ZERO issues persisted — fault-injection test), FR-1a; the `issue`-schema change bumps `contract_version` (FR-12).)* The T2.3 artifacts (A0 the atomic bulk primitive, A1–A5 + the create-field extension):
   - **A0 — the ATOMIC bulk primitive (FR-1a, D22 — storage + engine, FOLDED into T2.3).** A NEW storage `Storage::create_issues(&[Issue], actor) -> Result<(), StorageError>` (spine §3.2/§3.2.1) that inserts the WHOLE slice in ONE `BEGIN IMMEDIATE` libsql tx (every row + `Event(Created)` + per-relation events + resolved dep edges + child-counter bumps, committed once; rollback-on-any-failure → ZERO rows) — implemented by factoring `create_issue`'s per-record body into a `pub(super) insert_issue_in_tx` helper both paths call; `NoopStorage` + the engine test stubs implement it. A NEW engine `Session::create_bulk(Vec<NewIssue>) -> Result<Vec<Issue>, EngineError>` (spine §4.1) that acquires the write permit ONCE for the batch, MINTS every id under it (the `get_issue` probe consulting committed state AND the in-batch already-minted set — intra-batch dedup), resolves the 2-phase intra-file deps/parent IN MEMORY, builds + validates the N `Issue`s, calls the one `storage.create_issues` tx, and returns the created `Issue`s — **TRUE all-or-nothing (parse-validation AND mint/insert atomicity); on ANY failure the whole tx rolls back, ZERO issues persisted.** Required BECAUSE the minting path is non-idempotent (a partial-batch re-run would duplicate the survivors), so an L7 loop over single `create_issue` calls is unsafe. The single `create_issue`/`create` paths are UNCHANGED (additive) — **SUPERSEDED by D44 (v1.0.1, PRD §4; the spine records the same supersession at §3.2.1 `create_issues`): D44 seeds the declared edges onto the built `Issue` so the single create commits row + edges in ONE tx, and adds the create-specific duplicate + gating-cycle guards to `Storage::create_issue`'s own transaction. `create_issues` — and therefore bulk create and the JSONL/`bd` import leg — stays unchanged, which is what this D22 clause was really protecting.** **PARTIALLY SUPERSEDED IN TURN by D45 (v1.0.1, PRD §4; the spine records the same supersession at §3.2.1): the SHARED per-record body `insert_issue_in_tx` — which is precisely what makes `create_issues` the bulk AND the JSONL/`bd` import body — now carries D45's batch-aware dependency-TARGET existence guard, so those paths are no longer guard-free. D44's scoping clause feared that a guard there could make an already-exported D5 record un-importable; D45 does not wave that hazard away, it removes the CAUSE by closing the export under its edges (T2.4). Everything else this clause protects is intact — the dedup-and-continue on a repeated `depends_on_id` and the deliberate absence of a CYCLE check both STAY. Full rule + acceptance criteria at T1.6.**
   - **A1 — bulk-markdown feature (FR-1a, D22).** A NEW `IssueInput::CreateBulk { markdown: String }` discriminator on the `issue` tool (inline content, NOT a path) + a pure `parse_bulk_markdown` parser (`src/tools/bulk_markdown.rs`), a **byte-faithful port** of `temp/beads_rust-main/src/util/markdown_import.rs::parse_markdown_content` (H2-record/H3-section grammar; implicit-description quirk; `type:id`/bare/`external:`/`blocked-by` deps; `### ID` stand-in). **All-or-nothing PRE-MUTATION** (F2 — whole-doc parse+validate, ZERO writes on any malformed/unresolvable block, ONE `code`+`hint`; deviation from the original best-effort `continue` — the PRD's safe-import discipline wins, NFR-8). The adapter maps the validated records → a `Vec<NewIssue>` (carrying the symbolic `### Dependencies`/`### Parent` refs) and calls the **ATOMIC `Session::create_bulk` (A0)** — NOT a loop over `create_issue`; the engine owns the 2-phase intra-file dep/parent resolution (F8 — title/`### ID` stand-in → minted ids) + the mint-all-under-one-permit + the one storage tx. bulk-markdown is INTERACTIVE create (mints fresh ids; does NOT preserve ids, unlike the JSONL/bd import path that loops `Session::create(&Issue)`). **Output reuses `ToolOutput::Issues`** (F3). CLI ingestion (with the file-read + path-confinement guards) mirrors this at T3.1. **(D45, v1.0.1 — corrected in place, spec-first: a STATED behaviour RELAXATION on this shipped, spine-pinned path.)** `create_bulk` today keeps the whole `external:…` string as the id, probes it as an issue id, misses, and rejects the ENTIRE batch — so it is the one path that currently refuses a legitimate external blocker, contradicting the premise the rest of the system is built on. Under D45 a `dep_ref` for which the shared `unblock-model` predicate holds is NOT resolved against anything: it is carried VERBATIM as the edge target and can never be "unresolved"; and the predicate is ASCII-case-INSENSITIVE, so `EXTERNAL:jira-1` in a `### Dependencies` section is now an external ref rather than an ordinary id. **No test covers either behaviour today, so nothing in CI goes red to announce the change** — it is pinned by a NEW cell instead (T1.6 AC (3)). The remaining unresolved-reference rejection keeps `ValidationFailed`: it is a resolution fault, distinct from D45's resolved-but-absent id.
@@ -792,6 +792,91 @@
   commit of the branch, the spec commit included. If criterion (f) measures that the exclusive locking mode does NOT
   refuse while another connection is open, implementation STOPS and the decision returns to Miguel. Both gates >=3
   agents; Claude opens the PR, a human merges.)*
+
+- **T4.4 — the MCP SDK moves to rmcp 3.10 and the server adopts MCP 2026-07-28, with the `quinn-udp` 0.5.16 and
+  `rustix` 1.1.6 lock bumps. Implements D59 (v1.1; anchored on FR-20, NFR-10 and NFR-18; contract `unblock.mcp.v1.12` →
+  `unblock.mcp.v1.13`, an ADDITIVE bump RULED by Miguel in tracker comment 406, PRD §4 D59 clause (15); no schema step, no
+  `ErrorCode`).** The design is normative in the **D59 PRD §4 row** and the `[D59]` notes on D2, D25, D27, D38, D40,
+  D42, D43, D47, D48, D49, D50, D53 and D54, FR-17's, FR-20's and NFR-18's `[D59]` notes, PRD §9's Lifecycle bullet, §10
+  and RK-2, spine §0.1's and §5's `[D59]` notes, the §2.3 D40 note, the §5.2a root-annotation note, §5.4's not-found
+  note and its D59 ledger entry, spine §5.6's `[D59]` paragraph, the quota note and §5b's gate note, the unblock-mcp
+  plan's "Pinned rmcp 3.10 API contract" section and its `[D59]` row notes, the cli plan's `commands/mcp.rs` and
+  `commands/agents.rs` notes, the fuzz plan's note, and ci-cd §2.1's D59 paragraph — **read those before implementing;
+  this bullet is a checklist of touched sites and never the spec.** Tracked as `ub-9ov`. OUT of scope (Miguel's
+  ruling, tracker comment 401): the 16 MiB line bound, inbound and client-side (`ub-o8s` stays open), the duplicate
+  dependency versions rmcp 3.10 brings (they only warn), MRTR (`InputRequiredResult`), the Tasks extension, the
+  streamable-HTTP transports, any narrowing of `supported_protocol_versions()`, and cooperative cancellation of a write
+  before its commit (`ub-bj0`). ONE PR. **DAG:** depends on T3.13 (the D50 gate it redesigns), T3.15 (the D53 read loop
+  it amends), T3.16 (the D54 arm it keeps) and T4.2 (the `unblock.mcp.v1.12` baseline it bumps); blocks nothing inside
+  v1.1 (T4.1–T4.3 merged first, by Miguel's ordering). **COMMIT PLAN** (the D55 and T4.3 precedent, and the
+  orchestrator's ruling in tracker comment 408). (i) The SPEC commit (D59, the D-range bump `D1..D58` → `D1..D59`,
+  ci-cd §2.1(a) with its D59 paragraph, `docs/PROCESS.md` §3's list entry and NEWEST pointer, the NEW
+  `scripts/checks/d59-rmcp3-claims.sh` wired into the `doc-lint` job — minted HERE as D58's was, pinning the spec
+  landings — with `d53` `Q53`, `d54` `Q67`/`Q72`, `d55` `Q78`/`Q80`/`Q81`/`Q82`, `d56` `Q101`/`Q103`–`Q109`, `d57`
+  `Q149`/`Q151`–`Q166` and `d58` `Q45`–`Q76` (`Q61` excepted) retargeted and `d58` `Q43`/`Q44` reworded, this task).
+  NO code and no `Cargo.*` change rides that commit, so it inherits main's known advisories and its `audit`/`deny`
+  reds are expected and named in the pull request (criterion (b)). Clause (15) is RULED (tracker comment 406):
+  `unblock.mcp.v1.13`, additive. (ii) The IMPLEMENTATION commit carries the code AND everything the code turns red,
+  so the workspace suite stays green on it: `Cargo.toml` (`rmcp = { version = "3.10", … }`) and `Cargo.lock`
+  (`rmcp`/`rmcp-macros` 3.10.0, `cargo update -p quinn-udp` → 0.5.16, `cargo update -p rustix@1.1.4` → 1.1.6); the
+  code and doc comments, every `rmcp-1.7.0/…` citation that describes current behaviour re-pointed to `rmcp-3.10.0/…`;
+  `CONTRACT_VERSION` → `unblock.mcp.v1.13`, `CONTRACT_HASH` re-pinned, the `capabilities`/`schema_bundle` goldens
+  re-blessed, `public_api.rs` and every live-id assert moved, every check script's `CONTRACT_RE` knob and every live-id
+  row moved WITH it (ci-cd §2.1); the SHIPPED cells the change inverts or re-points — `error_channel.rs`'s
+  `task_invocation_stays_a_protocol_fault`, D53's `…_delivered_at_eof` (renamed `…_dropped_at_eof`), `wire.rs:2305`'s
+  `a_read_error_discards_the_partial_line_like_rmcp` (renamed `a_read_error_resumes_the_partial_line_like_rmcp`), the
+  `protocol_version.rs` CD-6 pins, the D47/D50/D54 in-module and duplex cells and their corpora, and every caller of
+  the renamed seam (`tests/common/mod.rs`, `tests/protocol_version.rs`); README's contract id and clause (15)'s lifecycle
+  sentence; `unblock-cli`'s two text edits — the managed-block renderer `crates/unblock-cli/src/commands/agents.rs`
+  writing the `### MCP client-visible behaviour` section with clause (15)'s five lines (the `_meta` `-32022`, the EOF
+  drop, the unanswered cancelled request whose write may still have happened so the client must re-read the state before
+  acting on it, the root-less `inputSchema`, the `-32601` for an `inputResponses`/`requestState` present and neither
+  `null` nor an object/a string), with
+  `AGENTS.md` regenerated by `unblock agents` and `init_agents__agents_managed_block.snap` re-blessed, and
+  `crates/unblock-cli/src/commands/mcp.rs` `instructions()` gaining clause (8)'s cancel sentence; the `d59` script
+  EXTENDED with the mechanism and criterion-(s) rows ci-cd §2.1's D59 paragraph lists, floors raised in the same commit;
+  the sibling rows D59 clause (19) names RE-POINTED or RETIRED in their own scripts, each with its one-line reason,
+  together with the D47, D50, D53 and D54 paragraphs of ci-cd §2.1 that name them; and EVERY SUCCESSOR those re-pointed
+  rows name, so no sibling row is red on this commit — the rewritten `d50`/`d53` in-module cells, `d54`'s re-tiered
+  differential, and criterion (t)'s unit cells (`DynamicTransportError::from_parts`, the `ping` and `InitializeResult`
+  contexts, the context-independence pair) and its closed-stdout real-binary cells, which `d50` `Q19` re-points to and
+  which therefore ride THIS commit, not the test commit. (iii) The TEST commit only ADDS:
+  the new cells criteria (c)–(s) name that no shipped cell already carries and no sibling row names
+  (`tests/lifecycle_2026.rs` for (f2)–(f4), the gate's predicate differential, the hold-seam cells of (e), (g) and (m)
+  with their negative halves on the held-handler-returned signal plus the stdin-close/EOF drain, the renderer and `instructions()` cells of (s), the
+  duplicated-equal-id, `null`-runs and wrongly typed MRTR cells) and the `d59` cell rows. (iv) The tracker commit (Track step: the run-report, the `.unblock/issues.jsonl` re-export and the `ub-9ov`
+  comment thread). Every commit of the branch passes the workspace suite in CI (locally only targeted tests,
+  `docs/PROCESS.md` §4). Scope: (1) `unblock-mcp` — `server.rs` (the `ServerConfig`, `CallToolResponse`,
+  `ReadResourceResponse` and `RequestMetaObject` moves, the clamp and `clamp_unsupported_initialize_version` DELETED, the
+  composition `PreHandshakeGateTransport<DupScanningTransport<R, W>>`, `mcp_server_duplex_unclamped_for_test` renamed
+  `mcp_server_duplex_raw_for_test`, the quota doc and measurement), `wire.rs` (the D47 arm and
+  `INVALID_REQUEST_ID_MESSAGE` deleted, the three-rule `Err` arm, the EOF drop, the read-error resume, the 3.10
+  standard-method lists, the CD-7 tiers Parity/`Silenced`/`IdInserted`, the module doc's four divergences),
+  `pre_handshake.rs` (Request pass-through, the stateless latch edge on rmcp's public predicate, the reply constant and
+  `Answer` disposition deleted), `envelope_id.rs` and `envelope_id_corpus.rs` (the float-id re-classification),
+  `error.rs` (the 3.10 variant set and the extended `is_pre_handshake_disconnect()`), `tools/args.rs`, `prompts/*`,
+  `resources/*` (the bundle's root-annotation strip), `options.rs`, and a `test-util` hold seam for the in-flight cells;
+  the tests `protocol_version.rs`, `contract_suite.rs`, `quotas.rs`, `resources.rs`, `lifecycle.rs`,
+  `receive_cancellation.rs`, `parse_error_id_duplex.rs`, `envelope_id_duplex.rs`, `duplicate_key_duplex.rs`,
+  `common/mod.rs` and a NEW `tests/lifecycle_2026.rs`; (2) `unblock-cli` — the two text edits above, the D40
+  closed-stdout routing through the extended predicate, and wire tests: `error_channel.rs` (criterion (i) inverted,
+  criterion (j) added), `mcp_lifecycle.rs` (criteria (f1), (g), (l), (t)), `envelope_id_frames.rs` and
+  `duplicate_key_frames.rs` (criteria (c), (d), (e)), `init_agents.rs` and `agents.rs` (criterion (s)),
+  `common/mod.rs`; (3) `unblock-fuzz` — `dup_scan_target.rs` on the 3.10 types, no new target. *(AC: PRD §4 D59 clause
+  (17) (a) PIN, (b) ADVISORIES, (c) D54 KEPT AGAINST THE LIVE rmcp 3 READER,
+  (d) THE CONVERGED WRONG-SHAPE CLASS, (e) METHOD+ID AND FLOAT IDS, (f) TWO LIFECYCLES, (g) THE GATE, (h) THE CLAMP IS
+  RETIRED, (i) `params.task` AND THE QUOTA, (j) `_meta` OUT OF BAND, (k) inputSchema AND THE BUNDLE, (l) EOF, (m)
+  CANCELLATION, (n) WHAT HOLDS, (o) THE FORK, (p) NO DEPRECATED rmcp API, (s) DOCUMENTED CLIENT-VISIBLE BEHAVIOUR and
+  (t) D40 KEPT ON A CLOSED STDOUT, each by at least one named cell on deterministic hold seams where a request must stay
+  in flight; plus (q) GATE — the script is executable, wired, carries the live range, pins every older sibling's knobs
+  with `d58`'s two included and none of its own, and names every row ci-cd §2.1's D59 paragraph lists; and (r) PROBE —
+  `cargo fmt --check`, clippy pedantic, `cargo test --workspace` (CI), `cargo insta test --check`, `cargo xtask
+  doc-lint`, `cargo xtask check-layering`, `cargo xtask no-network`, `cargo xtask knowledge-lint` and every
+  `scripts/checks/*.sh` on EVERY commit of the branch, the spec commit included, and `cargo deny check` and `cargo
+  audit` from the implementation commit on (criterion (b)). If criterion (c) measures that rmcp 3.10 answers a
+  rule-(α) or rule-(β) line itself, or criterion (g)'s differential finds the gate's predicate and rmcp's loop
+  disagreeing on any frame, implementation STOPS and the decision returns to Miguel. Both gates >=3 agents; Claude
+  opens the PR, a human merges.)*
 
 ## 6. MCP surface — concrete v1 taxonomy (closes PRD §12.2)
 

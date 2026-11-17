@@ -485,6 +485,17 @@ jobs:
       # Positive-only by design, save two negative rows (no storage edge in unblock-health, no VACUUM
       # statement in production source). Specified in ci-cd-and-distribution.md §2.1 (the D58 sub-check).
       - run: scripts/checks/d58-health-full-claims.sh
+      # D59 (`ub-9ov`) required landings: the MCP SDK moves from rmcp 1.7.0 to 3.10.0 (RUSTSEC-2026-0462)
+      # with the quinn-udp and rustix lock bumps, the wire converges on rmcp 3 except D54, which is kept,
+      # and the server serves both MCP lifecycles. Minted in the SPEC commit, as D58's was, so it asserts
+      # the positive spec landings: the PRD row and its notes, the spine, the crate plans, both roadmaps,
+      # the task, the retargeted sibling rows, this gate's own wiring, the contract id as it stands, and
+      # the live D-range at every prose site and every SIBLING script's knob — including `d58`'s two; the
+      # implementation and test commits extend it with manifest, code and cell rows. Positive-only by
+      # design, save ten negative rows (no advisory ignore in deny.toml or .cargo/, no allow or expect
+      # naming deprecated in unblock-mcp or unblock-fuzz, single-line or multi-line, no deprecated lint
+      # level in their manifests or the workspace manifest, no rustflags allowing it under .cargo/). Specified in ci-cd-and-distribution.md §2.1 (the D59 sub-check).
+      - run: scripts/checks/d59-rmcp3-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
