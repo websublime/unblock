@@ -91,6 +91,11 @@ ALLOW_DEPRECATED_RE='(^|[^.[:alnum:]_])(allow|expect)\([^)]*deprecated'
 DEPRECATED_ATTR_LINE_RE='^[[:space:]]*deprecated[[:space:]]*([,)]|$)'
 DEPRECATED_LINT_RE='deprecated[[:space:]]*=|lints\.rust\.deprecated'
 DEPRECATED_FLAG_RE='(-A|--allow)[^]]*deprecated|--cap-lints'
+# Any RustSec id EXCEPT the one dated ignore D59's 2026-11-17 amendment permits (RUSTSEC-2026-0543):
+# another number in any year, or any number in another year.
+OTHER_ADVISORY_RE='RUSTSEC-[0-9]{4}-([1-9][0-9]{3}|0[0-46-9][0-9]{2}|05[0-35-9][0-9]|054[0-24-9])|RUSTSEC-([013-9][0-9]{3}|2[1-9][0-9]{2}|20[013-9][0-9]|202[0-57-9])-[0-9]{4}'
+# An advisory-ignore input or flag in a CI workflow (audit-check's `ignore:`, `--ignore …`).
+CI_IGNORE_RE='^ +ignore: |--ignore[ =]'
 
 # =================================================================================================
 # REQUIRED LANDINGS — `code@path@regex@what it proves`
@@ -113,6 +118,8 @@ N6@crates/unblock-mcp/Cargo.toml@$DEPRECATED_LINT_RE@NEGATIVE: unblock-mcp's man
 N7@crates/unblock-fuzz/Cargo.toml@$DEPRECATED_LINT_RE@NEGATIVE: unblock-fuzz's manifest sets no deprecated lint level in its [lints] table (criterion (p))
 N8@crates/unblock-mcp@$DEPRECATED_ATTR_LINE_RE@NEGATIVE: no line of unblock-mcp is a bare deprecated list entry, with a trailing comma, a closing paren or nothing after it (a final entry), which is how a multi-line allow( or expect( attribute names the lint on its own line (criterion (p), design Review rounds 2 and 3)
 N9@crates/unblock-fuzz@$DEPRECATED_ATTR_LINE_RE@NEGATIVE: the same for unblock-fuzz (criterion (p))
+N19@deny.toml@$OTHER_ADVISORY_RE@NEGATIVE: [D59 amendment, 2026-11-17] deny.toml names no advisory other than the one dated ignore, RUSTSEC-2026-0543 (criterion (b))
+N20@.github/workflows@$CI_IGNORE_RE@NEGATIVE: [D59 amendment, 2026-11-17] no CI workflow passes an advisory ignore to the audit or deny step (criterion (b))
 N10@.cargo@$DEPRECATED_FLAG_RE@NEGATIVE: no cargo configuration under .cargo/ passes rustflags that allow deprecated, or any --cap-lints (=warn and the spaced form included), which would silence the deprecation build-wide (criterion (p))
 "
 
@@ -150,6 +157,13 @@ N10@.cargo@$DEPRECATED_FLAG_RE@NEGATIVE: no cargo configuration under .cargo/ pa
 #      keying, the ping/InitializeResult exit flip and its D35 classification with the D40/D50 notes, the
 #      from_parts unit cells, the no-sibling-row-red commit order, the EOF-drain no-reply proof, the
 #      ledger, the required-check correction and the mcp plan's error.rs row.
+# Q293..Q294 (Verify round 1, tracker comment 422) the sixth narrowing (a reused in-flight id) and the _meta
+#      read ahead of the rate limit and quota, beside ub-o8s.
+# Q291..Q292 and N19..N20 ([D59 amendment, 2026-11-17], tracker comment 420) the one dated deny ignore of
+#      RUSTSEC-2026-0543 (chrono, an unconditional rmcp 3.10 dependency) and the ban on any other ignore;
+#      numbered after the test commit's rows so no earlier code is reused.
+# Q241..Q242 (orchestrator ruling on the X01 drift, option (A), measured 2026-11-17) the [D59 amendment]
+#      to clause (12) and criterion (17)(c): the third divergence tier `Recoded` and the three-tier guard.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@scripts/checks/d44-create-deps-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D44 sibling's live-range knob carries the SAME range as this script — anchored on the knob line, so the file's own prose about the knob cannot satisfy the pin
@@ -345,7 +359,7 @@ Q190@docs/PRD.md@^\| \*\*D59\*\* \|@\*\*The three rules are RULED by Miguel \(tr
 Q191@docs/PRD.md@^\| \*\*D59\*\* \|@\*\*RULED by Miguel \(tracker comment 406\): a client that cancels a WRITE request has NO guarantee that the write did not happen, and must re-read the state before acting on it\*\*@ruling 406 (3): a cancelling client must re-read the state
 Q192@docs/PRD.md@^\| \*\*D59\*\* \|@Cooperative cancellation of a write before its commit is studied in the follow-up issue .ub-bj0.@ruling 406 (3): the cooperative-cancellation follow-up is named
 Q193@docs/plans/implementation-plan.md@Clause \(15\) is RULED \(tracker comment 406\)@Clause \(15\) is RULED \(tracker comment 406\):@ruling 406 (1): T4.4 no longer waits on an open question
-Q194@docs/plans/implementation-plan.md@^  writing the .### MCP client-visible behaviour. section@clause \(15\).s five lines@ruling 406 (1) and Review round 1: T4.4's implementation commit writes the five client-visible lines through the cli renderer
+Q194@docs/plans/implementation-plan.md@^  writing the .### MCP client-visible behaviour. section@clause \(15\).s six lines@ruling 406 (1) and Review round 1: T4.4's implementation commit writes the six client-visible lines through the cli renderer
 Q195@docs/plans/01-design-spine.md@^Miguel \(tracker comment 406, PRD §4 D59 clause \(15\)\)\.@tracker comment 406@ruling 406 (1): the spine's D59 ledger entry records the additive ruling
 Q196@docs/plans/ci-cd-and-distribution.md@Named sub-check \(its D59 sibling@RULED additive \(tracker comment 406\)@ruling 406: the ci-cd paragraph names the ruling rows
 Q197@docs/plans/00-roadmap.md@^\| FR-20 \(SDK\) \|@RULED by Miguel in tracker comment 406@ruling 406 (1): the markdown roadmap's D59 row records the additive ruling
@@ -371,7 +385,7 @@ Q216@docs/PRD.md@^- \*\*FR-17 \[must\]@\*\*\[D59\] \(v1\.1\):\*\* every .pre-.in
 Q217@docs/plans/implementation-plan.md@The TEST commit only ADDS@\(iii\) The TEST commit only ADDS@ruling 408 (2): the test commit only adds cells; shipped cells and goldens move with the code
 Q218@docs/plans/implementation-plan.md@^  so the workspace suite stays green on it@The IMPLEMENTATION commit carries the code AND everything the code turns red|so the workspace suite stays green on it@ruling 408 (2): the implementation commit carries the inverted shipped cells and the re-blessed goldens
 Q219@docs/plans/crates/unblock-cli.md@^\| .src/commands/agents\.rs. \|@\*\*\[D59\] \(v1\.1, PRD §4 D59 clauses \(15\) and \(17\)\(s\)\):\*\*@the cli plan's agents.rs row carries the renderer duty
-Q220@docs/plans/01-design-spine.md@^section of the five ruled lines PRD §4 D59 clause \(15\) specifies@written by the renderer in@the spine ledger says the managed block gains the ruled lines beside the contract line
+Q220@docs/plans/01-design-spine.md@^section of the six ruled lines PRD §4 D59 clause \(15\) specifies@written by the renderer in@the spine ledger says the managed block gains the ruled lines beside the contract line
 Q221@docs/plans/01-design-spine.md@^\*\(\*\*Unsignalled pre-.initialize. disconnect@\*\*\[D59\] KEPT \(v1\.1, PRD §4 D59 clause \(13\)\):\*\*@spine §2.3's D40 note keeps exit 0 for the closed-stdout spelling
 Q222@docs/PRD.md@^\| \*\*D59\*\* \|@falls back to its last variant .CustomRequest.,.*answers out-of-band .-32601. on the frame.s id@ruling 410/411 R2-M1: a wrongly typed MRTR member gets -32601 through the CustomRequest fallback, not -32700
 Q223@docs/PRD.md@^\| \*\*D59\*\* \|@a call carrying .*inputResponses.*null.* RUNS@R2-S1: a null MRTR member decodes as absent and the call runs
@@ -392,6 +406,12 @@ Q237@docs/plans/implementation-plan.md@which therefore ride THIS commit, not the
 Q238@docs/plans/01-design-spine.md@^cancelled request, the fifth documented narrowing@present and neither .null. nor@spine ledger lists the fifth narrowing, the read-error resume and the D40 extension
 Q239@docs/plans/ci-cd-and-distribution.md@so the feature-ON leg is invisible to both supply-chain jobs@neither is a required status check on .main., where the only required check is .run-report-gate.@ci-cd records that audit and deny are not required checks
 Q240@docs/plans/crates/unblock-mcp.md@^\| .src/error\.rs. \|@keyed on that kind and NEVER on rmcp.s .context. string@the mcp plan's error.rs row keys the predicate on io::ErrorKind
+Q241@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, measured 2026-11-17\] A THIRD DIVERGENCE TIER, .Recoded.\..*exactly .Silenced. ∪ .Recoded. ∪ .IdInserted.@clause (12) records the measured Recoded tier (a not-strict-JSON line rmcp 3.10 answers with its id-less -32600 because its typed decode fails on shape first) and the three-tier set-equality guard
+Q293@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, 2026-11-17\] \(f\) A SIXTH narrowing.*rmcp-3\.10\.0/src/service\.rs:1528-1531.*1 and 1\.0 are the same id@criterion (s) and clause (15): the duplicated in-flight id narrowing is disclosed with its verbatim AGENTS.md line (tracker comment 422)
+Q294@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, 2026-11-17\] DISCLOSED beside that residual.*BEFORE .call_tool.*ub-o8s@clause (4): rmcp's _meta version read ahead of the rate limit and quota is disclosed beside ub-o8s (tracker comment 422)
+Q291@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, 2026-11-17\] ONE DATED DENY IGNORE, RUSTSEC-2026-0543.*ub-4db.*rmcp-3\.10\.0/Cargo\.toml:1012-1025@clause (1) records the one dated deny ignore, its rationale and ub-4db (tracker comment 420)
+Q292@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, 2026-11-17\]\*\* The one exception is the dated .deny\.toml. ignore of .RUSTSEC-2026-0543.@criterion (b) records the one exception
+Q242@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, measured 2026-11-17\]\*\* A rule-\(α\) line whose typed decode fails on shape before .end\(\). reaches its trailing bytes@criterion (c) records that X01's shape draws rmcp's id-less -32600, graded by the Recoded tier
 "
 
 blocked=0
@@ -475,8 +495,8 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # The floors are the counts this file shipped with; the implementation and test commits RAISE them in
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 2 || blocked=1
-check_table_floor 'negative (N)' "$n_count" 10 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 240 || blocked=1
+check_table_floor 'negative (N)' "$n_count" 12 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 246 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D59 row and its reciprocal notes on D2, D25, D27, D38, D40, D42, D43, D47, D48, D49, D50, D53 and D54, FR-20, NFR-18 and PRD §9/§10/§13/RK-2, the spine's rmcp 3.10 notes and D59 ledger entry, the crate plans, both roadmaps and the T4.4 task are in the tree; no advisory is ignored and no deprecation is allowed; the contract knobs agree with the code constant; the tracker names ub-9ov and ub-o8s; the live range sits at every prose site and every SIBLING script's knob — including d58's two — and every newest-pointer row names this gate."

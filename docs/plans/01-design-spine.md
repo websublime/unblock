@@ -4178,7 +4178,7 @@ the eight `ToolSchemas.input` roots drops both keys and `CONTRACT_HASH` is re-pi
 apart from the embedded version string. `CONTRACT_VERSION` bumps to `unblock.mcp.v1.13` (unblock-mcp `options.rs`), with
 the `capabilities` and `schema_bundle` goldens re-blessed, the `public_api.rs` assert and every live-id assert moved,
 and the managed `AGENTS.md` block regenerated with its new contract line PLUS the `### MCP client-visible behaviour`
-section of the five ruled lines PRD §4 D59 clause (15) specifies, written by the renderer in
+section of the six ruled lines PRD §4 D59 clause (15) specifies, written by the renderer in
 `crates/unblock-cli/src/commands/agents.rs`; its per-tool actions table does not move (`agents_digest()` reads `oneOf`,
 `properties` and `required`, never a root annotation; `unblock agents` re-run, `init_agents` snapshot updated). D59 mints **no**
 `ErrorCode` (`ErrorCode::ALL` stays 36), leaves the 0–8 exit table untouched, and adds **no** tool, resource or prompt.
