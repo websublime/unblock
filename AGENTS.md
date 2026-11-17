@@ -5,7 +5,7 @@ This workspace is tracked by **unblock**. Issue-data operations are exposed over
 `unblock` CLI is lifecycle/ops only.
 
 - Start the server: `unblock mcp` (MCP over stdio).
-- Contract: `unblock.mcp.v1.12`.
+- Contract: `unblock.mcp.v1.13`.
 - Machine-readable discovery: read `unblock://capabilities` (the source of these tables) and
 `unblock://schema` (the full JsonSchema bundle for every tool I/O).
 
@@ -134,4 +134,13 @@ Discriminant keys: `action` — `issue`, `defer`, `dep`, `sync`, `comment`; `kin
 | `IO_ERROR` | 8 | no |
 | `JSON_ERROR` | 8 | no |
 | `INTERNAL_ERROR` | 1 | no |
+
+### MCP client-visible behaviour
+
+- A request whose _meta names an unsupported io.modelcontextprotocol/protocolVersion gets the JSON-RPC error -32022 and does not run.
+- A final line without a terminating newline at end of input is dropped and does not run.
+- A cancelled request gets no reply, and a write it started may still have happened; the client must re-read the state before acting on it.
+- A tool's inputSchema root carries no title and no description.
+- A tools/call whose inputResponses is present and neither null nor an object, or whose requestState is present and neither null nor a string, gets the JSON-RPC error -32601 and does not run.
+- A request that reuses the id of a request still in flight may get no reply; 1 and 1.0 are the same id.
 <!-- END unblock -->

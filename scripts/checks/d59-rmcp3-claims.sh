@@ -36,10 +36,9 @@
 # that a cancelled request's mutation commits, or that the `initialize` answers equal the pre-D59 ones.
 # The differential, lifecycle and wire cells D59 clause (17) names carry those.
 #
-# THE CONTRACT KNOB MOVES WITH THE IMPLEMENTATION COMMIT. The spec commit moves no contract byte, so
-# this file pins the LIVE id `unblock.mcp.v1.12` at the code constant and in every sibling's knob. The
-# implementation commit moves the constant, every sibling's CONTRACT_RE and this one to
-# `unblock.mcp.v1.13` together (ci-cd §2.1).
+# THE CONTRACT KNOB MOVED WITH THE IMPLEMENTATION COMMIT. The spec commit moved no contract byte and
+# pinned `unblock.mcp.v1.12`; the implementation commit moved the constant, every sibling's CONTRACT_RE,
+# this one and Q27's live minor to `unblock.mcp.v1.13` together (ci-cd §2.1).
 #
 # PRE-FIX TREE: `main` at 60d9551, the tree before D59's spec commit. Every row asserting a NEW landing
 # FAILS there. Exactly the rows that pin what already holds pass: P1 and P2 (both ids are already
@@ -72,7 +71,7 @@ RANGE_ALT_RE='D\(59\|58\|'
 
 # The LIVE published contract version. The D59 SPEC commit does NOT move it; its IMPLEMENTATION commit
 # moves it to unblock\.mcp\.v1\.13 here and in every sibling's knob, with the code constant.
-CONTRACT_RE='unblock\.mcp\.v1\.12'
+CONTRACT_RE='unblock\.mcp\.v1\.13'
 
 # The SAME spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte. DERIVED, never hand-written a second time.
@@ -102,6 +101,12 @@ CI_IGNORE_RE='^ +ignore: |--ignore[ =]'
 # =================================================================================================
 REQUIRE="
 P1@.unblock/issues.jsonl@\"id\":\"ub-9ov\"@the tracker record names the work D59 implements. The export keeps closed rows, so the row survives the merge-time close
+P3@Cargo.lock@^checksum = .b5949e504d5ab9944a168259afc0c39ac0230627b6ec5367ace194c59bcbe163.@criterion (a): Cargo.lock carries rmcp 3.10.0 (its registry checksum, a line no other version can carry)
+P4@Cargo.lock@^checksum = .b98a686693ee91b665c6f89f182fca6e141c8a63dc113b11b38c1bf3491606b7.@criterion (a): Cargo.lock carries rmcp-macros 3.10.0
+P5@Cargo.lock@^checksum = .af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016.@criterion (a): Cargo.lock carries quinn-udp 0.5.16 (RUSTSEC-2026-0538)
+P6@Cargo.lock@^checksum = .e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa.@criterion (a): Cargo.lock carries rustix 1.1.6 (RUSTSEC-2026-0486)
+P7@Cargo.lock@^checksum = .fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154.@criterion (a): rustix 0.38.44, outside the advisory, is KEPT
+P8@deny.toml@^ +\{ id = .RUSTSEC-2026-0543., reason = .*ub-4db@[D59 amendment, 2026-11-17] criterion (b): deny.toml carries the ONE dated ignore, RUSTSEC-2026-0543 (chrono unmaintained, an unconditional rmcp 3.10 dependency), its reason naming ub-4db, which removes it
 P2@.unblock/issues.jsonl@\"id\":\"ub-o8s\"@the 16 MiB line-bound residual D59 clause (12) discloses as OUT of scope is a real, exported issue
 "
 
@@ -120,6 +125,14 @@ N8@crates/unblock-mcp@$DEPRECATED_ATTR_LINE_RE@NEGATIVE: no line of unblock-mcp 
 N9@crates/unblock-fuzz@$DEPRECATED_ATTR_LINE_RE@NEGATIVE: the same for unblock-fuzz (criterion (p))
 N19@deny.toml@$OTHER_ADVISORY_RE@NEGATIVE: [D59 amendment, 2026-11-17] deny.toml names no advisory other than the one dated ignore, RUSTSEC-2026-0543 (criterion (b))
 N20@.github/workflows@$CI_IGNORE_RE@NEGATIVE: [D59 amendment, 2026-11-17] no CI workflow passes an advisory ignore to the audit or deny step (criterion (b))
+N11@Cargo.lock@0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e@NEGATIVE: criterion (a) — no rmcp 1.7.0 entry survives in Cargo.lock (its registry checksum)
+N12@Cargo.lock@6aefac48c364756e97f04c0401ba3231e8607882c7c1d92da0437dc16307904d@NEGATIVE: criterion (a) — no rmcp-macros 1.7.0 entry survives
+N13@Cargo.lock@addec6a0dcad8a8d96a771f815f0eaf55f9d1805756410b39f5fa81332574cbd@NEGATIVE: criterion (a) — no quinn-udp 0.5.14 entry survives (RUSTSEC-2026-0538)
+N14@Cargo.lock@b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190@NEGATIVE: criterion (a) — no rustix 1.1.4 entry survives (RUSTSEC-2026-0486)
+N15@crates/unblock-mcp/src/wire.rs@INVALID_REQUEST_ID_MESSAGE@NEGATIVE: criterion (d) — the D47 reply constant is gone from every non-comment line of wire.rs
+N16@crates/unblock-mcp/src/pre_handshake.rs@PRE_HANDSHAKE_REJECTION_MESSAGE@NEGATIVE: criterion (g) — the gate declares no reply constant
+N17@crates/unblock-mcp/src/pre_handshake.rs@ErrorData@NEGATIVE: criterion (g) — no non-comment line of pre_handshake.rs names ErrorData, so the gate constructs no reply of its own
+N18@crates@VersionClampingTransport|clamp_unsupported_initialize_version|mcp_server_duplex_unclamped_for_test@NEGATIVE: criterion (h) — the CD-4 clamp, its rewrite and the old seam name are gone from every non-comment line under crates/
 N10@.cargo@$DEPRECATED_FLAG_RE@NEGATIVE: no cargo configuration under .cargo/ passes rustflags that allow deprecated, or any --cap-lints (=warn and the spaced form included), which would silence the deprecation build-wide (criterion (p))
 "
 
@@ -164,6 +177,12 @@ N10@.cargo@$DEPRECATED_FLAG_RE@NEGATIVE: no cargo configuration under .cargo/ pa
 #      numbered after the test commit's rows so no earlier code is reused.
 # Q241..Q242 (orchestrator ruling on the X01 drift, option (A), measured 2026-11-17) the [D59 amendment]
 #      to clause (12) and criterion (17)(c): the third divergence tier `Recoded` and the three-tier guard.
+# Q243..Q270 (IMPLEMENTATION commit) the manifest pin, the three-rule Err arm, the EOF drop, the 3.10
+#      standard lists, the gate's pass-through and stateless predicate, the clamp-free composition, the
+#      RequestMetaObject quota, get_info's ServerConfig, the io::ErrorKind disconnect predicate, the
+#      criterion-(s) AGENTS.md/instructions()/README landings and the cells the implementation commit
+#      lands. P3..P7 and N11..N14 pin the lockfile by registry checksum (a version string sits on a line
+#      of its own and cannot be row-anchored to its package); N15..N18 are criteria (d), (g) and (h).
 # =================================================================================================
 REQUIRE_ROW="
 Q1@scripts/checks/d44-create-deps-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D44 sibling's live-range knob carries the SAME range as this script — anchored on the knob line, so the file's own prose about the knob cannot satisfy the pin
@@ -192,7 +211,7 @@ Q23@scripts/checks/d57-config-layers-claims.sh@^RANGE_ALT_RE=@$RANGE_KNOB_ALT_RE
 Q24@scripts/checks/d58-health-full-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D58 sibling's live-range knob — the PREVIOUS newest script, which by the self-row rule pins everyone except itself and so needs this row
 Q25@scripts/checks/d58-health-full-claims.sh@^RANGE_ALT_RE=@$RANGE_KNOB_ALT_RE@…and that sibling's ALTERNATION knob, the other of the two knobs d58 cannot pin itself
 Q26@scripts/checks/d44-create-deps-claims.sh@^CONTRACT_RE=@$CONTRACT_KNOB_RE@that sibling's contract knob carries the id the code constant carries — the SPEC commit moves no contract byte, and the IMPLEMENTATION commit moves every knob to unblock.mcp.v1.13 with the constant (ci-cd §2.1)
-Q27@scripts/checks/ub-lp9.25-dangling-blocker-claims.sh@^CONTRACT_RE=@mcp.*v1.*[^0-9]12'\$@the D45 sibling's contract knob spells the id with its \\? segments, so this row checks the live minor at its end — the SPEC commit moves no contract byte; the IMPLEMENTATION commit moves this knob to .13 with the code constant
+Q27@scripts/checks/ub-lp9.25-dangling-blocker-claims.sh@^CONTRACT_RE=@mcp.*v1.*[^0-9]13'\$@the D45 sibling's contract knob spells the id with its \\? segments, so this row checks the live minor at its end — the SPEC commit moves no contract byte; the IMPLEMENTATION commit moves this knob to .13 with the code constant
 Q28@scripts/checks/d47-envelope-id-claims.sh@^CONTRACT_RE=@$CONTRACT_KNOB_RE@that sibling's contract knob carries the id the code constant carries — the SPEC commit moves no contract byte, and the IMPLEMENTATION commit moves every knob to unblock.mcp.v1.13 with the constant (ci-cd §2.1)
 Q29@scripts/checks/d48-stdout-channel-claims.sh@^CONTRACT_RE=@$CONTRACT_KNOB_RE@that sibling's contract knob carries the id the code constant carries — the SPEC commit moves no contract byte, and the IMPLEMENTATION commit moves every knob to unblock.mcp.v1.13 with the constant (ci-cd §2.1)
 Q30@scripts/checks/d49-startup-failure-render-claims.sh@^CONTRACT_RE=@$CONTRACT_KNOB_RE@that sibling's contract knob carries the id the code constant carries — the SPEC commit moves no contract byte, and the IMPLEMENTATION commit moves every knob to unblock.mcp.v1.13 with the constant (ci-cd §2.1)
@@ -412,6 +431,35 @@ Q294@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, 2026-11-17\] DISCLOSED besi
 Q291@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, 2026-11-17\] ONE DATED DENY IGNORE, RUSTSEC-2026-0543.*ub-4db.*rmcp-3\.10\.0/Cargo\.toml:1012-1025@clause (1) records the one dated deny ignore, its rationale and ub-4db (tracker comment 420)
 Q292@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, 2026-11-17\]\*\* The one exception is the dated .deny\.toml. ignore of .RUSTSEC-2026-0543.@criterion (b) records the one exception
 Q242@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, measured 2026-11-17\]\*\* A rule-\(α\) line whose typed decode fails on shape before .end\(\). reaches its trailing bytes@criterion (c) records that X01's shape draws rmcp's id-less -32600, graded by the Recoded tier
+Q243@Cargo.toml@^rmcp = @rmcp = \\{ version = .3\\.10., features = \\[.server., .transport-io.\\] \\}@criterion (a): the workspace pins rmcp 3.10 with the server and transport-io features
+Q244@crates/unblock-mcp/src/wire.rs@^ +ErrorData::invalid_request\\(@ErrorData::invalid_request\\(.Invalid request., None\\),@D59 clause (2) rule (γ): a strict-JSON line with no readable id gets rmcp 3.10's own id-less -32600, byte for byte
+Q245@crates/unblock-mcp/src/wire.rs@^ +if answers_invalid_request\\(@answers_invalid_request\\(&failure, id\\.as_ref\\(\\)\\)@D59 clause (2): the three-rule Err arm selects rule (γ) on a strict-JSON line whose id is unreadable
+Q246@crates/unblock-mcp/src/wire.rs@^ +Ok\\(_\\) if !self\\.line_buf\\.ends_with@=> return None,@D59 clause (7): the EOF arm drops an unterminated final line, as rmcp 3.10 does
+Q247@crates/unblock-mcp/src/wire.rs@^ +[|] .server/discover.@server/discover@D59 clause (12): the fork's standard-method list carries rmcp 3.10's server/discover
+Q248@crates/unblock-mcp/src/wire.rs@^ +[|] .subscriptions/listen.@subscriptions/listen@D59 clause (12): …and subscriptions/listen
+Q249@crates/unblock-mcp/src/wire.rs@^ +[|] .elicitation/create.@elicitation/create@D59 clause (12): …and elicitation/create
+Q250@crates/unblock-mcp/src/wire.rs@^ +[|] .notifications/subscriptions/acknowledged.@notifications/subscriptions/acknowledged@D59 clause (12): …and the standard notification notifications/subscriptions/acknowledged
+Q251@crates/unblock-mcp/src/pre_handshake.rs@^ +Disposition::Pass => @Disposition::Pass => return Some\\(message\\),@D59 clause (11): the gate PASSES a premature Request upward and writes nothing
+Q252@crates/unblock-mcp/src/pre_handshake.rs@^ +\\.missing_required_keys\\(@missing_required_keys\\(&ProtocolVersion::V_2026_07_28\\)@D59 clause (11): the stateless latch edge runs rmcp's own public predicate
+Q253@crates/unblock-mcp/src/server.rs@^ +PreHandshakeGateTransport::new\\(@PreHandshakeGateTransport::new\\(DupScanningTransport::new\\(read, write\\), supported\\);@D59 clause (10): the composition is clamp-free, the gate wraps the scanner and is built with the server's supported versions
+Q254@crates/unblock-mcp/src/server.rs@^ +meta: &RequestMetaObject,@meta: &RequestMetaObject,@D59 clauses (4) and (14): the quota measures RequestContext.meta as rmcp 3.10's RequestMetaObject
+Q255@crates/unblock-mcp/src/server.rs@^ +fn get_info\\(&self\\)@fn get_info\\(&self\\) -> ServerConfig \\{@D59 clause (14): get_info returns ServerConfig, never the deprecated ServerInfo
+Q256@crates/unblock-mcp/src/error.rs@^ +\\.is_some_and\\(\\|io\\| is_peer_gone@is_peer_gone\\(io\\.kind\\(\\)\\)@criterion (t): the disconnect predicate keys on the boxed io::ErrorKind, never on rmcp's context string (ruling 411)
+Q257@crates/unblock-mcp/src/error.rs@^ +std::io::ErrorKind::BrokenPipe@std::io::ErrorKind::BrokenPipe@criterion (t): BrokenPipe is a peer-gone kind
+Q258@crates/unblock-mcp/src/error.rs@^ +[|] std::io::ErrorKind::ConnectionReset@ConnectionReset@criterion (t): …and ConnectionReset
+Q259@crates/unblock-mcp/src/error.rs@^ +[|] std::io::ErrorKind::NotConnected@NotConnected@criterion (t): …and NotConnected
+Q260@AGENTS.md@^### MCP client-visible behaviour@### MCP client-visible behaviour@criterion (s): the regenerated managed block carries the client-visible-behaviour heading
+Q295@AGENTS.md@^- A request that reuses the id of a request still in flight@may get no reply; 1 and 1\\.0 are the same id\\.@criterion (s) as amended 2026-11-17: the sixth client-visible line, the reused in-flight id (tracker comment 422)
+Q261@AGENTS.md@^- A cancelled request gets no reply@the client must re-read the state before acting on it\\.@criterion (s): the cancelled-request line carries the re-read duty (ruling 406)
+Q262@crates/unblock-cli/src/commands/mcp.rs@Cancelling a write request@Cancelling a write request does not guarantee the write did not happen;@criterion (s): instructions() carries clause (8)'s cancel sentence
+Q263@README.md@^unblock mcp serves both MCP lifecycles@the initialize handshake \\(protocol revisions up to 2025-11-25\\) and the stateless 2026-07-28 lifecycle with server/discover\\.@criterion (s): README's MCP section carries clause (15)'s lifecycle sentence
+Q264@crates/unblock-mcp/src/wire.rs@^ +async fn the_id_less_server_discover@async fn the_id_less_server_discover_frame_gets_rmcps_verdict\\(\\)@criterion (o): the id-less server/discover cell against rmcp 3.10's live reader
+Q265@crates/unblock-mcp/src/wire.rs@^ +async fn a_read_error_resumes@async fn a_read_error_resumes_the_partial_line_like_rmcp\\(\\)@criterion (l): the inverted read-error cell
+Q266@crates/unblock-mcp/src/wire.rs@^ +Recoded,@Recoded,@D59 clause (12) as amended: the Recoded tier exists in the differential
+Q267@crates/unblock-mcp/tests/protocol_version.rs@^fn known_versions_latest@fn known_versions_latest_and_latest_with_initialize_are_pinned\\(\\)@criterion (h): the re-pointed CD-6 pins
+Q268@crates/unblock-cli/tests/error_channel.rs@^fn a_task_param_is_ignored@fn a_task_param_is_ignored_and_the_call_runs\\(\\)@criterion (i): the inverted params.task cell
+Q269@crates/unblock-cli/tests/mcp_lifecycle.rs@^fn a_closed_stdout_before_either_lifecycle@fn a_closed_stdout_before_either_lifecycle_exits_0\\(\\)@criterion (t): the closed-stdout real-binary cell
+Q270@crates/unblock-mcp/src/error.rs@^ +fn the_disconnect_predicate_keys_on_the_error_kind@fn the_disconnect_predicate_keys_on_the_error_kind_never_on_the_context\\(\\)@criterion (t): the context-independence pair
 "
 
 blocked=0
@@ -494,9 +542,9 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 
 # The floors are the counts this file shipped with; the implementation and test commits RAISE them in
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
-check_table_floor 'required-landing (P)' "$p_count" 2 || blocked=1
-check_table_floor 'negative (N)' "$n_count" 12 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 246 || blocked=1
+check_table_floor 'required-landing (P)' "$p_count" 8 || blocked=1
+check_table_floor 'negative (N)' "$n_count" 20 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 275 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D59 row and its reciprocal notes on D2, D25, D27, D38, D40, D42, D43, D47, D48, D49, D50, D53 and D54, FR-20, NFR-18 and PRD §9/§10/§13/RK-2, the spine's rmcp 3.10 notes and D59 ledger entry, the crate plans, both roadmaps and the T4.4 task are in the tree; no advisory is ignored and no deprecation is allowed; the contract knobs agree with the code constant; the tracker names ub-9ov and ub-o8s; the live range sits at every prose site and every SIBLING script's knob — including d58's two — and every newest-pointer row names this gate."

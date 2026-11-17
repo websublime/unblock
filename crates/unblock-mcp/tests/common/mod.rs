@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
 use unblock_engine::{Session, SessionConfig};
 use unblock_mcp::{
-    Quotas, UnblockServer, mcp_server_duplex_for_test, mcp_server_duplex_unclamped_for_test,
+    Quotas, UnblockServer, mcp_server_duplex_for_test, mcp_server_duplex_raw_for_test,
 };
 use unblock_storage::{LibsqlStorage, Storage};
 
@@ -191,7 +191,7 @@ pub async fn call_tool_with_meta(
         _ => Map::new(),
     };
     let mut params = CallToolRequestParams::new(name).with_arguments(arguments);
-    params.meta = Some(rmcp::model::Meta(meta_map));
+    params.meta = Some(rmcp::model::RequestMetaObject::from(meta_map));
     let result = client
         .call_tool(params)
         .await
@@ -433,8 +433,8 @@ pub async fn connect_raw_with_outbound_capacity(
     (client, server, cancel)
 }
 
-/// Like [`connect_raw`], but over the CD-6 RAW rmcp serve path
-/// ([`mcp_server_duplex_unclamped_for_test`]) — which installs **NO** duplicate-key scan.
+/// Like [`connect_raw`], but over the RAW rmcp serve path ([`mcp_server_duplex_raw_for_test`]) —
+/// which installs **NO** duplicate-key scan and no pre-lifecycle gate.
 ///
 /// This is the only in-tree path that reaches a handler with NO verdict, so it is the executable
 /// witness for the fail-closed ABSENT arm. Without it that arm — "the whole security property" —
@@ -449,7 +449,7 @@ pub async fn connect_raw_unscanned(
 ) {
     let (server_io, client_io) = tokio::io::duplex(1024 * 1024);
     let cancel = CancellationToken::new();
-    let server_task = tokio::spawn(mcp_server_duplex_unclamped_for_test(
+    let server_task = tokio::spawn(mcp_server_duplex_raw_for_test(
         session,
         quotas,
         None,

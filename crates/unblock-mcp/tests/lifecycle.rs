@@ -18,14 +18,19 @@ async fn handshake_advertises_unblock_identity_and_default_instructions() {
     let session = common::session().await;
     let (client, server, _cancel) = connect(session).await;
 
-    // After initialize, the client peer holds the server's `InitializeResult` (its `ServerInfo`).
+    // After initialize, the client peer holds the server's `InitializeResult` (rmcp 3.10's
+    // `ServerPeerInfo`, whose `server_info` is optional).
     let info = client.peer_info().expect("server info after handshake");
+    let identity = info
+        .server_info
+        .as_ref()
+        .expect("the server advertises its implementation identity");
     assert_eq!(
-        info.server_info.name, "unblock",
+        identity.name, "unblock",
         "server identity name must be `unblock`, not rmcp's build-env default"
     );
     assert_eq!(
-        info.server_info.version,
+        identity.version,
         env!("CARGO_PKG_VERSION"),
         "server version must be this crate's package version"
     );

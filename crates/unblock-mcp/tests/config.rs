@@ -411,7 +411,8 @@ async fn config_fault_gate_over_tools_resources_and_prompts() {
 
 /// D57 (o): the `config` arms sit LAST in the `issue` input and output unions, the tool count stays
 /// 8, both description copies carry the new sentence (and the live `tools/list` serves it),
-/// `CONFIG_ERROR`'s hint shape reads `contextual_text`, and the live id is `unblock.mcp.v1.12`.
+/// `CONFIG_ERROR`'s hint shape reads `contextual_text`, and the live id is the one D57 minted
+/// (`unblock.mcp.v1.12`) or later — `unblock.mcp.v1.13` since D59 moved it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_contract_arms_last_and_v1_12() {
     let bundle = unblock_mcp::schema_bundle();
@@ -452,7 +453,7 @@ async fn config_contract_arms_last_and_v1_12() {
         .find(|e| e.code == "CONFIG_ERROR")
         .expect("CONFIG_ERROR");
     assert_eq!(config_error.hint_shape.as_str(), "contextual_text");
-    assert_eq!(unblock_mcp::CONTRACT_VERSION, "unblock.mcp.v1.12");
+    assert_eq!(unblock_mcp::CONTRACT_VERSION, "unblock.mcp.v1.13");
 
     let (session, _spy) = session_recording().await;
     let (client, server, _cancel) = connect(session).await;

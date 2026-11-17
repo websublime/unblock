@@ -35,9 +35,7 @@ async fn read_resource_text(
     let contents = result.contents.into_iter().next().expect("one content");
     let text = match contents {
         rmcp::model::ResourceContents::TextResourceContents { text, .. } => text,
-        rmcp::model::ResourceContents::BlobResourceContents { .. } => {
-            panic!("expected text resource contents, got a blob")
-        }
+        other => panic!("expected text resource contents, got {other:?}"),
     };
     serde_json::from_str(&text).expect("resource body is valid JSON")
 }
@@ -54,9 +52,7 @@ async fn read_resource_mime_type(
     let contents = result.contents.into_iter().next().expect("one content");
     match contents {
         rmcp::model::ResourceContents::TextResourceContents { mime_type, .. } => mime_type,
-        rmcp::model::ResourceContents::BlobResourceContents { .. } => {
-            panic!("expected text resource contents, got a blob")
-        }
+        other => panic!("expected text resource contents, got {other:?}"),
     }
 }
 

@@ -20,6 +20,11 @@ all-features = false
 version = 2
 # Refuse a yanked crate in the lock (supply-chain hygiene); unmaintained/vulnerable use the defaults.
 yanked = "deny"
+# [D59 amendment, 2026-11-17] — the ONE dated ignore PRD §4 D59 clause (1) permits (Miguel, tracker
+# comment 420). Any other advisory ignore here is forbidden by `d59`'s N19; the three D59 advisories by N1.
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained: informational, no CVE, no patched version; an unconditional dependency of rmcp 3.10 (rmcp-3.10.0/Cargo.toml:1012-1025) that no rmcp release drops; ub-4db tracks it and removes this ignore" },
+]
 
 # -------------------------------------------------------------------------------------------------
 # Licenses — allowlist DERIVED from the committed Cargo.lock. No GPL/LGPL/AGPL/MPL (copyleft).

@@ -278,5 +278,5 @@ fn d56_arms_are_appended_last_and_the_tool_count_stays_eight() {
         ]
     );
     assert_eq!(unblock_mcp::capabilities().tools.len(), 8);
-    assert_eq!(unblock_mcp::CONTRACT_VERSION, "unblock.mcp.v1.12");
+    assert_eq!(unblock_mcp::CONTRACT_VERSION, "unblock.mcp.v1.13");
 }

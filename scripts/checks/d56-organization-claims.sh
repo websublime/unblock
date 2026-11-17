@@ -90,7 +90,7 @@ RANGE_ALT_RE='D\(59\|58\|'
 # The LIVE published contract version. D56 MOVES it (`unblock.mcp.v1.10` -> `unblock.mcp.v1.11`), so
 # this knob is LIVE from this file's first commit. It tracks the LIVE id, so a later decision's bump
 # moves it in that decision's implementation commit.
-CONTRACT_RE='unblock\.mcp\.v1\.12'
+CONTRACT_RE='unblock\.mcp\.v1\.13'
 
 # The SAME spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
 # literal byte rather than a regex operator. DERIVED, never hand-written a second time. `printf '%s'`

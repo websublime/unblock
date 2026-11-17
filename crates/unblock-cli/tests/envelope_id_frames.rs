@@ -1,4 +1,6 @@
-//! **[v1.0.1/D47] The UN-DECODABLE-ENVELOPE-`id` class over a REAL `unblock mcp` child.**
+//! **The envelope-`id` corpus over a REAL `unblock mcp` child** (first minted for D47; re-classified
+//! by PRD §4 D59 clauses (2) and (3): a duplicated EQUAL id draws rule (β), `-32700` on that id, and
+//! an unreadable id draws rule (γ), rmcp 3.10's id-less `-32600`).
 //!
 //! Homed in `unblock-cli` because only this crate may exec `CARGO_BIN_EXE_unblock`: this is the one
 //! suite that drives a real process, real pipes and real stdio framing, which is where the defect
@@ -27,12 +29,12 @@
 mod common;
 
 use common::{McpClient, Workspace};
-use unblock_mcp::envelope_id_corpus::divergence_corpus;
+use unblock_mcp::envelope_id_corpus::id_corpus;
 
-/// Fetch one divergence-corpus frame as text, so the CLI suite and the in-lib cells drive the
+/// Fetch one envelope-`id` corpus frame as text, so the CLI suite and the in-lib cells drive the
 /// SAME bytes rather than two hand-copied spellings that can drift.
 fn frame_text(entry: &str) -> String {
-    let frame = divergence_corpus()
+    let frame = id_corpus()
         .into_iter()
         .find(|f| f.id == entry)
         .unwrap_or_else(|| panic!("corpus entry {entry} is missing"))
@@ -72,8 +74,8 @@ fn the_recovered_id_is_answered_over_real_stdio() {
 
     let response = client.request_raw(90001, &frame_text("D01"));
     assert_eq!(
-        response["error"]["code"], -32600,
-        "the recovered-id frame must be answered -32600 ON that id: {response}"
+        response["error"]["code"], -32700,
+        "the recovered-id frame must be answered -32700 ON that id (rule (β)): {response}"
     );
     assert!(
         response.get("result").is_none(),
@@ -91,7 +93,7 @@ fn the_connection_recovers_after_an_answer() {
 
     let created = client.call_tool_envelope(
         "issue",
-        &serde_json::json!({"action":"create","title":"D47 recovery target"}),
+        &serde_json::json!({"action":"create","title":"D59 recovery target"}),
     );
     let id = created["result"]["structuredContent"]["id"]
         .as_str()
@@ -99,7 +101,7 @@ fn the_connection_recovers_after_an_answer() {
         .to_string();
 
     let answered = client.request_raw(90001, &frame_text("D01"));
-    assert_eq!(answered["error"]["code"], -32600);
+    assert_eq!(answered["error"]["code"], -32700);
 
     let (is_error, shown) =
         client.call_tool("issue", &serde_json::json!({"action":"show","id":id}));
@@ -111,7 +113,8 @@ fn the_connection_recovers_after_an_answer() {
     );
 }
 
-/// **D-P3** — the AMBIGUOUS frame is answered with the id OMITTED, and neither candidate is used.
+/// **D-P3** — the AMBIGUOUS frame is answered by rule (γ), rmcp's id-less `-32600`, and neither
+/// candidate is used.
 ///
 /// The `"id":null` half additionally pins the RATIFIED fallback spelling end to end: the missing id
 /// is spelled by OMISSION, never as a literal null. `rmcp::model::JsonRpcError.id` is
@@ -128,8 +131,9 @@ fn the_ambiguous_answer_omits_the_id() {
     sentinel(&mut client);
 
     assert!(
-        client.seen_lines.iter().any(|l| l.contains("-32600")),
-        "the ambiguous frame must still be ANSWERED: {:?}",
+        client.seen_lines.iter().any(|l| l
+            .contains(r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid request"}}"#)),
+        "the ambiguous frame must still be ANSWERED with rmcp's id-less -32600: {:?}",
         client.seen_lines
     );
     assert!(
@@ -162,7 +166,7 @@ fn a_string_id_is_recovered() {
         .find(|l| l.contains(r#""id":"e2e-abc""#))
         .unwrap_or_else(|| panic!("no reply on the string id: {:?}", client.seen_lines));
     let parsed: serde_json::Value = serde_json::from_str(hit).expect("the reply is JSON");
-    assert_eq!(parsed["error"]["code"], -32600);
+    assert_eq!(parsed["error"]["code"], -32700);
 }
 
 /// **D-P5** — the `\u`-escaped `id` KEY is recovered, over a real process.
@@ -187,16 +191,16 @@ fn an_escaped_key_duplicate_is_recovered() {
 
     let response = client.request_raw(90015, &raw);
     assert_eq!(
-        response["error"]["code"], -32600,
+        response["error"]["code"], -32700,
         "the escaped key IS a genuine envelope id and must be recovered: {response}"
     );
 }
 
 /// **D-N1** — a genuine id-LESS notification is still ignored, over real stdio.
 ///
-/// The false-positive guard for D47's explicit carve-out, and a JSON-RPC requirement.
+/// The false-positive guard, and a JSON-RPC requirement.
 ///
-/// Mutant: deleting the `Absent` arm.
+/// Mutant: a reply arm that fires on a frame that typed.
 #[test]
 fn a_genuine_notification_is_still_ignored() {
     let ws = Workspace::init();
@@ -206,7 +210,7 @@ fn a_genuine_notification_is_still_ignored() {
     sentinel(&mut client);
 
     assert!(
-        !client.seen_lines.iter().any(|l| l.contains("-32600")),
+        !client.seen_lines.iter().any(|l| l.contains("\"error\"")),
         "a notification with NO id must NEVER be answered: {:?}",
         client.seen_lines
     );
@@ -214,7 +218,7 @@ fn a_genuine_notification_is_still_ignored() {
 
 /// **D-N2** — the Decision-4 parity drop is still silent over real stdio.
 ///
-/// F17 carries an `id`, so it looks like a class frame, but rmcp itself drops it — and our fork
+/// F17 carries a readable `id`, so it looks like a rule-(β) frame, but rmcp itself drops it — and our fork
 /// exists to match rmcp byte for byte. The exclusion is structural: the frame returns `Ok(None)`
 /// from the compatibility filter and never becomes a delivered message at all.
 ///
@@ -228,7 +232,7 @@ fn the_parity_drop_is_still_silent_over_real_stdio() {
     sentinel(&mut client);
 
     assert!(
-        !client.seen_lines.iter().any(|l| l.contains("-32600")),
+        !client.seen_lines.iter().any(|l| l.contains("\"error\"")),
         "the deliberate parity drop must stay SILENT: {:?}",
         client.seen_lines
     );

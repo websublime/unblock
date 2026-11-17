@@ -150,8 +150,27 @@ fn managed_block(digest: &unblock_mcp::AgentsDigest) -> String {
         );
     }
 
+    out.push_str("\n### MCP client-visible behaviour\n\n");
+    for line in CLIENT_VISIBLE_BEHAVIOUR {
+        let _ = writeln!(out, "{line}");
+    }
+
     out
 }
+
+/// The six documented client-visible behaviours of the MCP server, verbatim from PRD §4 D59 clause
+/// (15) (RULED by Miguel, tracker comment 406) and its 2026-11-17 amendment (f) (tracker comment 422). Each narrows only what a client that departs from the
+/// MCP specification may do, so the contract bump stays additive; they are documented here because
+/// `AGENTS.md` is the one place every connected agent reads. Static text outside the hashed
+/// discovery documents: it moves no contract byte.
+const CLIENT_VISIBLE_BEHAVIOUR: [&str; 6] = [
+    "- A request whose _meta names an unsupported io.modelcontextprotocol/protocolVersion gets the JSON-RPC error -32022 and does not run.",
+    "- A final line without a terminating newline at end of input is dropped and does not run.",
+    "- A cancelled request gets no reply, and a write it started may still have happened; the client must re-read the state before acting on it.",
+    "- A tool's inputSchema root carries no title and no description.",
+    "- A tools/call whose inputResponses is present and neither null nor an object, or whose requestState is present and neither null nor a string, gets the JSON-RPC error -32601 and does not run.",
+    "- A request that reuses the id of a request still in flight may get no reply; 1 and 1.0 are the same id.",
+];
 
 /// The ONE intro sentence naming which tools use which discriminant key (ub-q2v, spine §5b), derived
 /// from the digest, never hard-coded. Shape: ``Discriminant keys: `<key>` — `<tool>`, `<tool>`;

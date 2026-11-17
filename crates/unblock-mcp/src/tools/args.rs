@@ -4,7 +4,7 @@
 //!
 //! `rmcp-macros` picks the type it publishes as a tool's `inputSchema` by matching the **last path
 //! segment ident** of a handler argument against the literal ident `Parameters`
-//! (`rmcp-macros-1.7.0/src/common.rs::find_parameters_type_in_sig`). If this type were called
+//! (`rmcp-macros-3.10.0/src/common.rs:56`, `find_parameters_type_in_sig`). If this type were called
 //! `Deferred`, `RawArgs` or anything else, `#[tool]` would fall through to
 //! `rmcp::handler::server::common::schema_for_empty_input()` and **every one of the 8 published
 //! `inputSchema`s would silently collapse to `{"type":"object","properties":{}}`** — a total
@@ -16,7 +16,7 @@
 //! # Why defer at all (facet (a))
 //!
 //! rmcp's `Parameters<P>` deserializes `P` **inside the extractor**
-//! (`rmcp-1.7.0/src/handler/server/tool.rs:181-195`) and maps any serde failure to
+//! (`rmcp-3.10.0/src/handler/server/tool.rs:235-250`) and maps any serde failure to
 //! `ErrorData::invalid_params` — an **out-of-band** JSON-RPC `-32602` with `data: null`. That
 //! escapes the FR-11 in-band structured-error channel entirely (spine §5.6).
 //!
@@ -81,11 +81,12 @@ use unblock_error::{ErrorCode, StructuredError, clip};
 /// load-bearing and must stay `Parameters`.**
 ///
 /// Holds the raw `arguments` object plus a `PhantomData<T>` that carries the schema type through to
-/// `#[tool]`'s `schema_for_type::<Parameters<T>>()` call. `T` is never deserialized here.
+/// `#[tool]`'s `schema_for_input::<Parameters<T>>()` call (`rmcp-macros-3.10.0/src/tool.rs:202`).
+/// `T` is never deserialized here.
 pub(crate) struct Parameters<T>(pub(crate) JsonObject, pub(crate) PhantomData<T>);
 
 /// Byte-identical `JsonSchema` delegation to `T` — exactly what rmcp's own wrapper does
-/// (`rmcp-1.7.0/src/handler/server/wrapper/parameters.rs:48-56`). This is what makes the extractor
+/// (`rmcp-3.10.0/src/handler/server/wrapper/parameters.rs:48-56`). This is what makes the extractor
 /// swap `CONTRACT_HASH`-neutral **on its own**: the published `inputSchema` is unchanged.
 impl<T: JsonSchema> JsonSchema for Parameters<T> {
     fn schema_name() -> Cow<'static, str> {
@@ -347,7 +348,7 @@ fn build_hint_index(schema: &JsonObject) -> HintIndex {
 /// The memoized [`HintIndex`] for `T`.
 ///
 /// Mirrors the thread-local, `TypeId`-keyed memo `rmcp` uses for the schema itself
-/// (`rmcp-1.7.0/src/handler/server/common.rs:12-16`): the schema walk, the `BTreeMap` build and
+/// (`rmcp-3.10.0/src/handler/server/common.rs:17-28`): the schema walk, the `BTreeMap` build and
 /// every hint string are produced ONCE per type per thread, so a rejection costs one map lookup and
 /// one `Arc` clone rather than a schema clone plus a full re-walk.
 fn hint_index_of<T: JsonSchema + std::any::Any>() -> std::sync::Arc<HintIndex> {
