@@ -36,3 +36,8 @@ checksum = "sha256"
 # the CI on `dist generate`, protecting the hand-applied pins from being clobbered. `cargo xtask
 # verify-pins` is the replacement freshness guard (it asserts the pins stay 40-char SHAs).
 allow-dirty = ["ci"]
+# Build only the shipped package (`-p unblock-cli`), never `--workspace` (D17 amendment, `ub-2vp`).
+# A workspace build unifies features across every member, and `unblock-fuzz` turns on
+# `unblock-storage/testkit` on a normal edge, so the shipped `unblock` would compile the storage
+# testkit.
+precise-builds = true

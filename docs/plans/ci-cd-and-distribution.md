@@ -964,6 +964,11 @@ checksum = "sha256"
 # without it the real release would refuse — and (b) refuse to regenerate the CI, protecting the pins
 # from being clobbered. `cargo xtask verify-pins` is the replacement freshness guard.
 allow-dirty = ["ci"]
+# Build only the shipped package (`-p unblock-cli`), never `--workspace` (D17 amendment, `ub-2vp`).
+# A workspace build unifies features across every member, and `unblock-fuzz` turns on
+# `unblock-storage/testkit` on a normal edge, so the shipped `unblock` would compile the storage
+# testkit.
+precise-builds = true
 
 # MANDATORY force-include (every workspace crate is publish=false, so dist would otherwise ship ZERO
 # apps): mark the shipped `unblock` binary in crates/unblock-cli/Cargo.toml —
@@ -974,6 +979,12 @@ allow-dirty = ["ci"]
 > Exact key names track the pinned `dist` version (`0.32.0`, managed via `dist init`/`dist generate`); the
 > config lives in `dist-workspace.toml` `[dist]` (canonical since dist 0.24.0). The single distributed binary
 > is `unblock` (from `unblock-cli`), force-included via `[package.metadata.dist] dist = true` on that crate.
+> **[D17 amendment, `ub-2vp`, tracker comment 436, Miguel's ruling V2 of 2026-11-18]** `precise-builds = true`
+> makes `dist build` compile only the shipped package (`-p unblock-cli`). Without it dist 0.32.0 builds
+> `--workspace` (the v1.0.2 release job logs "using cargo profile dist --workspace"), Cargo unifies features
+> across the workspace, and `unblock-fuzz`'s normal-edge `unblock-storage/testkit` compiles the storage testkit
+> into the shipped `unblock`. The generated `release.yml` passes no `--workspace` of its own, because `dist
+> build` reads this config at run time, so the key needs no `release.yml` regeneration.
 > `dist init` also adds a `[profile.dist]` (`inherits = "release"`, `lto = "thin"`) to the root `Cargo.toml`
 > — REQUIRED, since the generated `release.yml` builds with `--profile dist`. dist derives the release App
 > from the **package** name (`unblock-cli`), so archives/installers/the axoupdater install receipt are named
