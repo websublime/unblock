@@ -73,9 +73,10 @@ const CHUNK_LEN: usize = 64 * 1024;
 #[cfg(windows)]
 const LOCK_BYTE_RANGE: (u64, u64) = (0x4000_0000, 0x4000_0200);
 
-/// The testkit hook that runs between steps (b) and (c).
+/// A testkit hook the window calls with the database path. It runs between steps (b) and (c), or at
+/// one of the two observation points inside step (c).
 #[cfg(feature = "testkit")]
-type AfterRawCopies = Box<dyn Fn(&Path) + Send + Sync>;
+type WindowHook = Box<dyn Fn(&Path) + Send + Sync>;
 
 /// The pre-open repairs one [`exclusive_window`] runs (spine §3.1).
 ///
@@ -87,7 +88,11 @@ pub struct ExclusiveRequest {
     quarantine_journal: bool,
     checkpoint_truncate: bool,
     #[cfg(feature = "testkit")]
-    after_raw_copies: Option<AfterRawCopies>,
+    after_raw_copies: Option<WindowHook>,
+    #[cfg(feature = "testkit")]
+    after_exclusive_lock: Option<WindowHook>,
+    #[cfg(feature = "testkit")]
+    after_evidence_check: Option<WindowHook>,
 }
 
 impl ExclusiveRequest {
@@ -102,6 +107,10 @@ impl ExclusiveRequest {
             checkpoint_truncate: false,
             #[cfg(feature = "testkit")]
             after_raw_copies: None,
+            #[cfg(feature = "testkit")]
+            after_exclusive_lock: None,
+            #[cfg(feature = "testkit")]
+            after_evidence_check: None,
         }
     }
 
@@ -135,6 +144,25 @@ impl ExclusiveRequest {
         self.after_raw_copies = Some(hook);
         self
     }
+
+    /// Run `hook` with the database path once step (c)'s `locking_mode=EXCLUSIVE` holds the
+    /// database and before the evidence check, so a test can observe the window's locks before the
+    /// check opens the `-wal` and `-shm` (PRD §4 D58 criterion (n), cell fd7, point P1).
+    #[cfg(feature = "testkit")]
+    #[must_use]
+    pub fn with_after_exclusive_lock(mut self, hook: Box<dyn Fn(&Path) + Send + Sync>) -> Self {
+        self.after_exclusive_lock = Some(hook);
+        self
+    }
+
+    /// Run `hook` with the database path once the evidence check has passed, so a test can observe
+    /// that the check kept the window's lock (PRD §4 D58 criterion (n), cell fd7, point P2).
+    #[cfg(feature = "testkit")]
+    #[must_use]
+    pub fn with_after_evidence_check(mut self, hook: Box<dyn Fn(&Path) + Send + Sync>) -> Self {
+        self.after_evidence_check = Some(hook);
+        self
+    }
 }
 
 impl fmt::Debug for ExclusiveRequest {
@@ -147,6 +175,10 @@ impl fmt::Debug for ExclusiveRequest {
             .field("checkpoint_truncate", &self.checkpoint_truncate);
         #[cfg(feature = "testkit")]
         debug.field("after_raw_copies", &self.after_raw_copies.is_some());
+        #[cfg(feature = "testkit")]
+        debug.field("after_exclusive_lock", &self.after_exclusive_lock.is_some());
+        #[cfg(feature = "testkit")]
+        debug.field("after_evidence_check", &self.after_evidence_check.is_some());
         debug.finish()
     }
 }
@@ -343,8 +375,16 @@ async fn run_window(
     if let Err(error) = lock_exclusively(&conn).await {
         return open_refusal(error).map(Some);
     }
+    #[cfg(feature = "testkit")]
+    if let Some(hook) = &request.after_exclusive_lock {
+        hook(db_path);
+    }
     if check_evidence(db_path, recorded).await? {
         return Ok(Some(ExclusiveRefusal::EvidenceChanged));
+    }
+    #[cfg(feature = "testkit")]
+    if let Some(hook) = &request.after_evidence_check {
+        hook(db_path);
     }
 
     // (d)
