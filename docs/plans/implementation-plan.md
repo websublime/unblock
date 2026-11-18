@@ -720,9 +720,13 @@
   unblock-health plan, the engine, cli, storage, config and sync crate plans, `docs/plans/README.md`'s CF-E note, and
   ci-cd §2's `exclusivity-macos` row and §2.1's D58 paragraph — **read those before implementing; this bullet is a
   checklist of touched sites and never the spec.** Tracked as `ub-lp9.3`. OUT of scope: `ub-2vp` (the shipped v1
-  header probe that reads the database file inside a live session — a v1.0.x candidate, measured first; D58 only
-  requires that no NEW probe or evidence copy repeats it), `ub-p1h` (not a prerequisite — `Drifted` is
-  database-internal), dangling-edge repair (D45 stands), `VACUUM`, salvage, MCP exposure, REMOTE-mode health (the v1.3
+  header probe that reads the database file inside a live session; D58 only requires that no NEW probe or evidence
+  copy repeats it) **[D58 amendment, measured 2026-11-18 on local macOS 27.2.1 and on CI `macos-15-arm64` and
+  `ubuntu-26.04` (run 44251096720), `sqlite_version` 3.45.1, tracker comments 434 and 435: the lock loss is CONFIRMED
+  in the shipped v1.0.0–v1.0.2 and in the real v1.0.2 `unblock doctor` binary, with an exposure window of 1.82 ms ±
+  0.37 ms empty and 0.698 s ± 0.27 ms at 250k issues on the shipped build; main does not carry it (cells fd4, fd7
+  and G3); v1.0.3 patch planned under ub-kpe (ruling (b) = B1a, 2026-11-18)]**, `ub-p1h` (not a prerequisite —
+  `Drifted` is database-internal), dangling-edge repair (D45 stands), `VACUUM`, salvage, MCP exposure, REMOTE-mode health (the v1.3
   lock). `unblock init`'s DATABASE-ONLY mode (D58 clause (7), Miguel's ruling 2026-11-13) is IN scope. ONE PR. **DAG:** depends on T3.3 (the lite seam), T3.4 (the NFR-5
   failure-replay fixtures), D46's ladder and T4.2 (the D57 fail-closed gate `recover()` stays behind, and the
   `unblock.mcp.v1.12` baseline that must NOT move); blocks nothing inside v1.1. The SPEC commit first (D58, the
@@ -739,7 +743,7 @@
   `integrity_check(` call in `crates/unblock-cli/src/commands/doctor.rs` — its floors raised in the same commit), then
   the TEST commit (the new cells and goldens, the `storage-testkit` job's added `--test exclusive_window` step, the NEW
   `exclusivity-macos` job (runner `macos-15`, SHA-pinned `actions/checkout`, `dtolnay/rust-toolchain` and
-  `Swatinem/rust-cache`, only the filtered exclusivity cells) — made a REQUIRED check on `main` by Miguel immediately AFTER
+  `Swatinem/rust-cache`, the whole `exclusive_window` file: criteria (f), (g), (h) and (n), including the `ub-2vp` descriptor-close lock-loss cells) — made a REQUIRED check on `main` by Miguel immediately AFTER
   the T4.3 PR merges (the ci-cd §2.3.3 flip precedent) — and the `d58` cell rows), then the tracker commit (Track step: the
   run-report, the `.unblock/issues.jsonl` re-export and the `ub-lp9.3` comment thread). Every commit of the branch
   passes the workspace suite in CI (locally only targeted tests, `docs/PROCESS.md` §4). Scope: (1) `unblock-health` —
