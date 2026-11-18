@@ -92,9 +92,11 @@ jobs:
         with:
           toolchain: 1.96.0
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      # The always-on unit + proptest + behaviour.rs set. The testkit-gated contract.rs /
-      # contention_lab.rs are `#![cfg(feature = "testkit")]` and compile to 0 tests here — they run
-      # in the dedicated `storage-testkit` job.
+      # The always-on unit + proptest + behaviour.rs set. The storage files gated on
+      # `#![cfg(feature = "testkit")]` (contract.rs, contention_lab.rs, the exclusive_window cells,
+      # read_only.rs, scale.rs) ALSO run here, because unblock-fuzz turns on the storage `testkit`
+      # feature and Cargo unifies features across the workspace. Their dedicated jobs below remain
+      # the named gates.
       - run: cargo test --workspace --locked
 
   storage-testkit:
@@ -127,9 +129,10 @@ jobs:
       # Specified in ci-cd-and-distribution.md §2.1 (the D45 sub-check), which is normative here.
       - name: D45 dangling diagnostics + doctor fold (engine testkit)
         run: cargo test -p unblock-engine --features testkit --locked --test dangling
-      # D58 (v1.1) — criterion (f): the exclusive window's `locking_mode=EXCLUSIVE` proof, MEASURED on
-      # Linux here and on macOS in `exclusivity-macos` below. The engine's `health` cells read the
-      # testkit call counters (criterion (d)), so they run under the engine's `testkit` feature too.
+      # D58 (v1.1) criterion (f) is the exclusive window's `locking_mode=EXCLUSIVE` proof,
+      # MEASURED on Linux here and on macOS in `exclusivity-macos` below. The same file holds the
+      # (n) descriptor-close lock-loss cells (ub-2vp). The engine's `health` cells read the testkit
+      # call counters (criterion (d)), so they run under the engine's `testkit` feature too.
       - name: D58 exclusive window, criterion (f) measured on Linux
         run: cargo test -p unblock-storage --features testkit --locked --test exclusive_window
       - name: D58 read-only open (criterion (l))
@@ -139,9 +142,10 @@ jobs:
 
   exclusivity-macos:
     name: exclusivity (macOS, D58 criterion (f))
-    # D58 (ci-cd §2 job table): the SAME criterion (f) cells as the `storage-testkit` step above, on the
-    # second shipped OS family. Pinned image (the update-smoke.yml precedent). The cache matters: a cold
-    # libsql-ffi C build on a macOS runner bills at ten times the Linux rate.
+    # D58 (ci-cd §2 job table) runs the SAME exclusive-window cells, criterion (f) and the (n)
+    # lock-loss cells, as the `storage-testkit` step above, on the second shipped OS family. Pinned
+    # image (the update-smoke.yml precedent). The cache matters because a cold libsql-ffi C build on
+    # a macOS runner bills at ten times the Linux rate.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0

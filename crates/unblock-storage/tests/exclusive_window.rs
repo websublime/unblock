@@ -4,16 +4,29 @@
 //! The `f*` cells measure the exclusivity proof against a REAL second process, the
 //! `exclusive_window_holder` helper `[[bin]]`. It holds a libsql reader that has served one read,
 //! the `.write.lock`, or a killed write transaction's hot `-journal`, and it runs the (f5) control.
-//! The cells run on Linux in `storage-testkit` and on macOS in `exclusivity-macos`. Windows takes
+//! The cells run on Linux in `storage-testkit` and on macOS in `exclusivity-macos`, and on Linux
+//! again in `test (workspace)`, where `unblock-fuzz` turns the storage `testkit` on. Windows takes
 //! another VFS locking path and stays unmeasured, so the file is Unix-only. The `f6` cells need the
 //! testkit-only `with_after_raw_copies` hook.
+//!
+//! The `fd*` cells are criterion (n)'s descriptor-close lock-loss cells (`ub-2vp`). The holder runs
+//! the v1.0.x header probe, copied verbatim, beside its live libsql connections, and
+//! `common::posix_locks` reads who holds `SQLite`'s SHARED byte range from this process (`F_GETLK`,
+//! plus `/proc/locks` on Linux). A fresh observer process trying `locking_mode=EXCLUSIVE` is the
+//! behavioural witness. `fd7` observes the real window through the testkit-only
+//! `with_after_exclusive_lock` and `with_after_evidence_check` hooks. Each observation prints one
+//! `UB2VP-MEASURE` evidence line.
 #![cfg(all(unix, feature = "testkit"))]
 
+mod common;
+
 use std::fs;
-use std::io::{BufRead as _, BufReader};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+
+use common::posix_locks::{self, LockKind, Observation};
 
 use tempfile::TempDir;
 use unblock_model::ListFilters;
@@ -85,38 +98,75 @@ impl Workspace {
     }
 }
 
-/// A running `exclusive_window_holder`. Dropping it kills the process and reaps it.
+/// A running `exclusive_window_holder`. It owns the child's stdin and stdout for its whole life,
+/// so a reply written after `READY` never meets a closed pipe. Dropping it kills the process and
+/// reaps it.
 struct Holder {
     child: Child,
-    _stdin: Option<ChildStdin>,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+    mode: String,
 }
 
 impl Holder {
     /// Spawn `mode` on `db` and wait for its `READY` line.
     fn spawn(mode: &str, db: &Path) -> Self {
+        Self::spawn_with(mode, db, &[])
+    }
+
+    /// Spawn `mode` on `db` with `extra` arguments and wait for its `READY` line. The `Holder`
+    /// exists before `READY` is asserted, so a mismatch still kills and reaps the child.
+    fn spawn_with(mode: &str, db: &Path, extra: &[&Path]) -> Self {
         let mut child = Command::new(HOLDER)
             .arg(mode)
             .arg(db)
+            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn exclusive_window_holder");
-        let stdout = child.stdout.take().expect("holder stdout");
+        let stdin = child.stdin.take();
+        let stdout = BufReader::new(child.stdout.take().expect("holder stdout"));
+        let mut holder = Self {
+            child,
+            stdin,
+            stdout,
+            mode: mode.to_owned(),
+        };
+        let line = holder.read_line();
+        assert_eq!(line, "READY", "the {mode} holder never got ready");
+        holder
+    }
+
+    /// The holder's pid.
+    fn pid(&self) -> i32 {
+        i32::try_from(self.child.id()).expect("a pid fits i32")
+    }
+
+    /// One line of the holder's stdout, without its line ending. EOF panics with the mode name.
+    fn read_line(&mut self) -> String {
         let mut line = String::new();
-        BufReader::new(stdout)
+        let read = self
+            .stdout
             .read_line(&mut line)
             .expect("read the holder's stdout");
-        assert_eq!(
-            line.trim_end(),
-            "READY",
-            "the {mode} holder never got ready"
-        );
-        let stdin = child.stdin.take();
-        Self {
-            child,
-            _stdin: stdin,
-        }
+        assert!(read > 0, "the {} holder closed its stdout", self.mode);
+        line.trim_end().to_owned()
+    }
+
+    /// Write `line` to the holder, then read exactly one reply line.
+    fn send(&mut self, line: &str) -> String {
+        let stdin = self.stdin.as_mut().expect("the holder's stdin is open");
+        writeln!(stdin, "{line}").expect("write to the holder");
+        stdin.flush().expect("flush the holder's stdin");
+        self.read_line()
+    }
+
+    /// Close the holder's stdin and wait for it. The holder drops its store gracefully.
+    fn quit(mut self) -> ExitStatus {
+        drop(self.stdin.take());
+        self.child.wait().expect("reap the holder")
     }
 
     /// SIGKILL the holder: no destructor runs, so an open transaction is abandoned mid-flight.
@@ -870,4 +920,678 @@ async fn live_connections_to_counts_per_file() {
     drop(second_store);
     drop(in_memory);
     assert_eq!(live_connections_to(&second.db).expect("live"), 0);
+}
+
+// ---- foreign descriptor on the database file (ub-2vp) ----
+
+/// What one observer process O printed.
+struct Observed {
+    line: String,
+    stderr: String,
+}
+
+impl Observed {
+    /// `BUSY <code>` with `code & 0xff == SQLITE_BUSY`.
+    fn is_busy(&self) -> bool {
+        self.line
+            .strip_prefix("BUSY ")
+            .and_then(|code| code.parse::<i32>().ok())
+            .is_some_and(|code| code & 0xff == 5)
+    }
+
+    fn is_locked(&self) -> bool {
+        self.line == "LOCKED"
+    }
+}
+
+/// Run a fresh observer O on `db` to completion. It tries `locking_mode=EXCLUSIVE` once.
+fn observe(db: &Path) -> Observed {
+    let output = Command::new(HOLDER)
+        .arg("observe-exclusive")
+        .arg(db)
+        .output()
+        .expect("run the observer");
+    let line = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "the observer exits 0 (line {line:?}, stderr {stderr})"
+    );
+    Observed { line, stderr }
+}
+
+/// Run a one-shot ordinary process B on `db` to completion. It opens the database, reads once and
+/// closes.
+fn read_and_close(db: &Path) {
+    let output = Command::new(HOLDER)
+        .arg("read-and-close")
+        .arg(db)
+        .output()
+        .expect("run read-and-close");
+    assert!(
+        output.status.success(),
+        "read-and-close exits 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "CLOSED");
+}
+
+/// Whether `unblock.db-wal` and `unblock.db-shm` exist.
+fn sidecars(workspace: &Workspace) -> (bool, bool) {
+    (
+        workspace.sidecar("-wal").exists(),
+        workspace.sidecar("-shm").exists(),
+    )
+}
+
+/// The holder's `LIVE` reply as a count.
+fn live(holder: &mut Holder) -> usize {
+    let reply = holder.send("LIVE");
+    reply
+        .strip_prefix("LIVE ")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("unexpected LIVE reply {reply:?}"))
+}
+
+/// Print the `UB2VP-MEASURE` line of one observation and return the observation.
+fn measure(
+    cell: &str,
+    point: &str,
+    holder_pid: i32,
+    observation: Observation,
+    observer: Option<&Observed>,
+    live: Option<usize>,
+) -> Observation {
+    eprintln!(
+        "{}",
+        posix_locks::measure_line(
+            cell,
+            point,
+            holder_pid,
+            &observation,
+            observer.map(|observed| observed.line.as_str()),
+            live,
+        )
+    );
+    observation
+}
+
+/// Print one `UB2VP-MEASURE` line recording a protocol reply or a file state.
+fn record(cell: &str, point: &str, what: &str) {
+    eprintln!(
+        "UB2VP-MEASURE leg={} cell={cell} point={point} {what}",
+        posix_locks::leg()
+    );
+}
+
+/// The advice a red fd1, fd5 or fd6 prints. Each of those cells pins a measured result, and the
+/// two guards it names exist because of that result.
+fn red_advice(cell: &str) -> String {
+    format!(
+        "a red {cell} is a MEASUREMENT, so re-measure and amend PRD §4 D58; never remove the two \
+         live-connection guards, which are gather_preopen's `live > 0` refusal \
+         (`PreOpenWithLiveConnection`, crates/unblock-engine/src/preopen.rs) and step (a2) of \
+         `run_window` in crates/unblock-storage/src/libsql/health.rs \
+         (`ExclusiveRefusal::ProcessHoldsConnection`)"
+    )
+}
+
+/// A migrated workspace and a `lock-probe` holder A whose SHARED lock is asserted, not assumed.
+async fn probe_holder(cell: &str) -> (Workspace, Holder) {
+    let workspace = Workspace::migrated().await;
+    assert_eq!(live_connections_to(&workspace.db).expect("live"), 0);
+    let mut holder = Holder::spawn("lock-probe", &workspace.db);
+    let pid = holder.pid();
+    let live = live(&mut holder);
+    let baseline = measure(
+        cell,
+        "baseline",
+        pid,
+        posix_locks::shared_range(&workspace.db, pid),
+        None,
+        Some(live),
+    );
+    assert_eq!(
+        baseline.kind(),
+        Some(LockKind::Read),
+        "{cell}: the holder's store holds SQLite's SHARED lock before the step"
+    );
+    assert_eq!(live, 2, "{cell}: the holder's store has two connections");
+    let version = holder.send("VERSION");
+    record(cell, "version", &format!("reply={version:?}"));
+    (workspace, holder)
+}
+
+/// The SHARED observation of `holder` after a step, with the observer O run last.
+fn shared_then_observer(
+    cell: &str,
+    point: &str,
+    workspace: &Workspace,
+    holder: &mut Holder,
+) -> (Observation, Observed) {
+    let pid = holder.pid();
+    let live = live(holder);
+    let observation = posix_locks::shared_range(&workspace.db, pid);
+    let observed = observe(&workspace.db);
+    let observation = measure(cell, point, pid, observation, Some(&observed), Some(live));
+    assert_eq!(live, 2, "{cell}: LIVE 2 at {point}");
+    (observation, observed)
+}
+
+/// (n, fd0) The holder's store holds `SQLite`'s SHARED lock, and the observer detects it. This
+/// cell checks the detector and the precondition of every other fd cell.
+#[tokio::test]
+async fn fd0_store_holds_the_shared_lock() {
+    let (workspace, mut holder) = probe_holder("fd0").await;
+    let (observation, observed) = shared_then_observer("fd0", "held", &workspace, &mut holder);
+    assert_eq!(observation.kind(), Some(LockKind::Read));
+    assert!(
+        observed.is_busy(),
+        "the observer must be BUSY beside a live store, got {:?} (stderr {})",
+        observed.line,
+        observed.stderr
+    );
+}
+
+/// (n, fd1) THE REPRODUCTION. The v1.0.x header probe, copied verbatim and run in a process holding
+/// libsql WAL connections, drops that process's SHARED lock, and neither a later read nor a
+/// SQLite-owned close takes it back. Asserted in the MEASURED direction (PRD §4 D58 criterion (n),
+/// measured 2026-11-18 on Linux and macOS, tracker comment 434).
+#[tokio::test]
+async fn fd1_v1_header_probe_close_drops_the_shared_lock() {
+    let (workspace, mut holder) = probe_holder("fd1").await;
+    let pid = holder.pid();
+
+    let probed = holder.send("PROBE-V1");
+    record("fd1", "probe", &format!("reply={probed:?}"));
+    let live_probe = live(&mut holder);
+    let after_probe = measure(
+        "fd1",
+        "after-probe",
+        pid,
+        posix_locks::shared_range(&workspace.db, pid),
+        None,
+        Some(live_probe),
+    );
+    let read = holder.send("READ");
+    record("fd1", "read", &format!("reply={read:?}"));
+    let live_read = live(&mut holder);
+    let after_read = measure(
+        "fd1",
+        "after-read",
+        pid,
+        posix_locks::shared_range(&workspace.db, pid),
+        None,
+        Some(live_read),
+    );
+    let reopened = holder.send("SQLITE-REOPEN");
+    let (after_reopen, observed) =
+        shared_then_observer("fd1", "after-sqlite-reopen", &workspace, &mut holder);
+
+    let advice = red_advice("fd1");
+    assert_eq!(
+        probed, "PROBED mismatch=false",
+        "the probe reads a valid header"
+    );
+    assert!(
+        read.starts_with("READ "),
+        "the store still reads, got {read:?}"
+    );
+    assert_eq!(reopened, "REOPENED");
+    assert_eq!(live_probe, 2, "LIVE 2 after the probe");
+    assert_eq!(live_read, 2, "LIVE 2 after the read");
+    assert_eq!(
+        after_probe.kind(),
+        None,
+        "the probe's close drops the SHARED lock; {advice}"
+    );
+    assert_eq!(
+        after_read.kind(),
+        None,
+        "a later read does not retake the SHARED lock; {advice}"
+    );
+    assert_eq!(
+        after_reopen.kind(),
+        None,
+        "a SQLite-owned reopen does not retake the SHARED lock; {advice}"
+    );
+    assert!(
+        observed.is_locked(),
+        "the observer takes the database the holder no longer guards, got {:?} (stderr {}); \
+         {advice}",
+        observed.line,
+        observed.stderr
+    );
+}
+
+/// (n, fd2) The no-op control shows that a round trip of the protocol drops nothing.
+#[tokio::test]
+async fn fd2_control_noop_keeps_the_shared_lock() {
+    let (workspace, mut holder) = probe_holder("fd2").await;
+    assert_eq!(holder.send("NOOP"), "OK");
+    let (observation, observed) =
+        shared_then_observer("fd2", "after-noop", &workspace, &mut holder);
+    assert_eq!(observation.kind(), Some(LockKind::Read));
+    assert!(
+        observed.is_busy(),
+        "got {:?} (stderr {})",
+        observed.line,
+        observed.stderr
+    );
+}
+
+/// (n, fd3) In this control, closing descriptors `SQLite` itself opened keeps the lock, because
+/// `setPendingFd` defers their close. The hazard is specific to foreign descriptors.
+#[tokio::test]
+async fn fd3_control_sqlite_owned_close_keeps_the_shared_lock() {
+    let (workspace, mut holder) = probe_holder("fd3").await;
+    assert_eq!(holder.send("SQLITE-REOPEN"), "REOPENED");
+    let (observation, observed) =
+        shared_then_observer("fd3", "after-sqlite-reopen", &workspace, &mut holder);
+    assert_eq!(observation.kind(), Some(LockKind::Read));
+    assert!(
+        observed.is_busy(),
+        "got {:?} (stderr {})",
+        observed.line,
+        observed.stderr
+    );
+}
+
+/// (n, fd4 = G1) Main's pre-open primitives (`lost_database`, `live_connections_to`,
+/// `probe_write_lock`) open no descriptor on the database file, so a live store keeps its lock.
+#[tokio::test]
+async fn fd4_preopen_primitives_keep_the_shared_lock() {
+    let (workspace, mut holder) = probe_holder("fd4").await;
+    let primitives = holder.send("PRIMITIVES");
+    record("fd4", "primitives", &format!("reply={primitives:?}"));
+    assert_eq!(primitives, "PRIMITIVES lost=false live=2 write_lock=false");
+    let (observation, observed) =
+        shared_then_observer("fd4", "after-primitives", &workspace, &mut holder);
+    assert_eq!(
+        observation.kind(),
+        Some(LockKind::Read),
+        "a pre-open primitive opened the database file and dropped the store's lock"
+    );
+    assert!(
+        observed.is_busy(),
+        "got {:?} (stderr {})",
+        observed.line,
+        observed.stderr
+    );
+}
+
+/// Build the fd5 state, in which a probed holder A sees an ordinary process B run to completion.
+/// Returns the workspace, A, and the sidecars' presence after B.
+async fn probed_then_closed_elsewhere(cell: &str) -> (Workspace, Holder, (bool, bool)) {
+    let (workspace, mut holder) = probe_holder(cell).await;
+    assert_eq!(
+        sidecars(&workspace),
+        (true, true),
+        "{cell}: the holder's WAL open has a -wal and a -shm"
+    );
+    let probed = holder.send("PROBE-V1");
+    record(cell, "probe", &format!("reply={probed:?}"));
+    assert_eq!(probed, "PROBED mismatch=false");
+    read_and_close(&workspace.db);
+    let after = sidecars(&workspace);
+    record(cell, "after-b", &format!("wal={} shm={}", after.0, after.1));
+    (workspace, holder, after)
+}
+
+/// (n, fd5) The consequence. After the probe, another process's last close takes EXCLUSIVE,
+/// checkpoints and unlinks the `-wal` and `-shm` while the holder is alive and still has them open.
+/// Asserted in the MEASURED direction (PRD §4 D58 criterion (n), measured 2026-11-18).
+#[tokio::test]
+async fn fd5_last_close_elsewhere_unlinks_the_live_sidecars_after_the_probe() {
+    let (_workspace, mut holder, after) = probed_then_closed_elsewhere("fd5").await;
+    let alive = holder.child.try_wait().expect("try_wait").is_none();
+    let live = live(&mut holder);
+    let read = holder.send("READ");
+    record(
+        "fd5",
+        "holder-after-b",
+        &format!("alive={alive} live={live} reply={read:?}"),
+    );
+    assert!(alive, "the holder is alive");
+    assert_eq!(live, 2, "the holder's store still has two connections");
+    assert!(
+        read.starts_with("READ "),
+        "the holder still reads after the unlink, got {read:?}"
+    );
+    assert_eq!(
+        after,
+        (false, false),
+        "another process's last close unlinks the -wal and -shm the holder still has open; {}",
+        red_advice("fd5")
+    );
+}
+
+/// (n, fd5c) In this control there is no probe, so the holder's SHARED lock blocks B's EXCLUSIVE
+/// and B's close keeps the sidecars.
+#[tokio::test]
+async fn fd5c_control_last_close_elsewhere_keeps_the_sidecars_without_the_probe() {
+    let (workspace, mut holder) = probe_holder("fd5c").await;
+    read_and_close(&workspace.db);
+    let present = sidecars(&workspace);
+    record(
+        "fd5c",
+        "after-b",
+        &format!("wal={} shm={}", present.0, present.1),
+    );
+    let pid = holder.pid();
+    let live = live(&mut holder);
+    let observation = measure(
+        "fd5c",
+        "after-b",
+        pid,
+        posix_locks::shared_range(&workspace.db, pid),
+        None,
+        Some(live),
+    );
+    assert_eq!(present, (true, true), "the sidecars stay");
+    assert_eq!(observation.kind(), Some(LockKind::Read));
+}
+
+/// Open the workspace's database in this process, record each id's presence and the
+/// `integrity_check` rows, and return both.
+async fn final_state(cell: &str, workspace: &Workspace, ids: &[&str]) -> (Vec<bool>, Vec<String>) {
+    let store = LibsqlStorage::open_local(&workspace.db, DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+        .await
+        .expect("open_local");
+    let mut found = Vec::new();
+    for id in ids {
+        found.push(store.get_issue(id).await.expect("get_issue").is_some());
+    }
+    let integrity = store.integrity_check().await.expect("integrity_check");
+    record(
+        cell,
+        "final",
+        &format!("ids={ids:?} get={found:?} integrity={integrity:?}"),
+    );
+    drop(store);
+    (found, integrity)
+}
+
+/// (n, fd6) The worst case for a writing orphan, MEASURED 2026-11-18 (tracker comment 434) and
+/// pinned. After the unlink the holder's commit succeeds, a second holder A2 that holds the NEW
+/// files never sees it, before or after the first holder quits, and the row is LOST with a clean
+/// `integrity_check`, so the loss is silent. A2's own control write is FOUND, so the protocol and
+/// the store work. The cell is the rationale for main's live-connection guards before a repair.
+#[tokio::test]
+async fn fd6_commit_after_unlink_is_lost_while_another_process_holds_the_new_files() {
+    let (workspace, mut holder, _) = probed_then_closed_elsewhere("fd6").await;
+    let wrote = holder.send("WRITE ub2vp-fd6");
+    record("fd6", "a-write", &format!("reply={wrote:?}"));
+    let mut second = Holder::spawn("lock-probe", &workspace.db);
+    let a2_first = second.send("GET ub2vp-fd6");
+    record(
+        "fd6",
+        "a2-get-before-a-quits",
+        &format!("reply={a2_first:?}"),
+    );
+    let bye = holder.send("QUIT");
+    let holder_status = holder.quit();
+    record(
+        "fd6",
+        "a-quit",
+        &format!("reply={bye:?} status={holder_status}"),
+    );
+    let a2_second = second.send("GET ub2vp-fd6");
+    record(
+        "fd6",
+        "a2-get-after-a-quits",
+        &format!("reply={a2_second:?}"),
+    );
+    let control_wrote = second.send("WRITE ub2vp-fd6-control");
+    let control_got = second.send("GET ub2vp-fd6-control");
+    record(
+        "fd6",
+        "a2-control",
+        &format!("write={control_wrote:?} get={control_got:?}"),
+    );
+    let second_bye = second.send("QUIT");
+    let second_status = second.quit();
+    let (found, integrity) =
+        final_state("fd6", &workspace, &["ub2vp-fd6", "ub2vp-fd6-control"]).await;
+
+    let advice = red_advice("fd6");
+    assert_eq!(
+        wrote, "WROTE ub2vp-fd6",
+        "the orphaned holder's commit succeeds"
+    );
+    assert_eq!(bye, "BYE");
+    assert_eq!(second_bye, "BYE");
+    assert!(
+        holder_status.success(),
+        "the orphaned holder exits 0, got {holder_status}"
+    );
+    assert!(
+        second_status.success(),
+        "the second holder exits 0, got {second_status}"
+    );
+    assert_eq!(
+        control_wrote, "WROTE ub2vp-fd6-control",
+        "the second holder's control commit succeeds"
+    );
+    assert_eq!(
+        control_got, "FOUND",
+        "the second holder reads its own control row, so WRITE and GET work"
+    );
+    assert_eq!(
+        a2_first, "ABSENT",
+        "the second holder never sees the orphan's commit; {advice}"
+    );
+    assert_eq!(a2_second, "ABSENT", "nor after the orphan quits; {advice}");
+    assert_eq!(
+        found,
+        [false, true],
+        "the orphan's row is lost and the control row is present; {advice}"
+    );
+    assert!(
+        integrity.is_empty(),
+        "the loss is silent because integrity_check is clean, got {integrity:?}; {advice}"
+    );
+}
+
+/// (n/(c), fd7) The real exclusive window, observed inside step (c). At P1 (after
+/// `locking_mode=EXCLUSIVE` holds, before the evidence check opens the sidecars) the window holds
+/// Write on the SHARED range, nothing locks the `-wal` or the `-shm`, and the observer is BUSY. At
+/// P2 (after the evidence check) the window still holds Write. The combined lone `-shm` + 5-byte
+/// `-wal` setup reaches P2 and completes (`refused=None checkpoint_truncated=true renamed=1`,
+/// measured 2026-11-18 on every leg, tracker comment 434).
+#[tokio::test]
+async fn fd7_window_sidecar_reread_keeps_its_exclusive_lock() {
+    let workspace = Workspace::migrated().await;
+    let wal = workspace.sidecar("-wal");
+    let shm = workspace.sidecar("-shm");
+    fs::write(&shm, pattern(32 * 1024)).expect("write a lone -shm");
+    fs::write(&wal, [1_u8, 2, 3, 4, 5]).expect("write a truncated -wal");
+    assert!(
+        workspace.run_dir.is_dir(),
+        "the run directory is under .recovery/"
+    );
+    let mut window = Holder::spawn_with("window", &workspace.db, &[&workspace.run_dir]);
+    let pid = window.pid();
+
+    // P1 sits after step (c)'s lock and before the evidence check.
+    let held = window.send("GO");
+    record("fd7", "p1", &format!("reply={held:?}"));
+    assert_eq!(held, "EXCLUSIVE-HELD", "the window reached P1");
+    assert!(wal.exists() && shm.exists(), "both sidecars exist at P1");
+    let p1_shared = posix_locks::shared_range(&workspace.db, pid);
+    let p1_wal = measure(
+        "fd7",
+        "p1-wal",
+        pid,
+        posix_locks::whole_file(&wal),
+        None,
+        None,
+    );
+    let p1_shm = measure(
+        "fd7",
+        "p1-shm",
+        pid,
+        posix_locks::whole_file(&shm),
+        None,
+        None,
+    );
+    let p1_observed = observe(&workspace.db);
+    let p1_shared = measure("fd7", "p1", pid, p1_shared, Some(&p1_observed), None);
+    assert_eq!(
+        p1_shared.kind(),
+        Some(LockKind::Write),
+        "the window holds EXCLUSIVE"
+    );
+    for (name, observation) in [("-wal", &p1_wal), ("-shm", &p1_shm)] {
+        assert_eq!(
+            observation.kind(),
+            None,
+            "the window holds a lock on the {name}, so it likely mapped the -shm (DMS lock) or \
+             reopened a sidecar before `locking_mode=EXCLUSIVE` (`connect_raw`/`lock_exclusively` \
+             order)"
+        );
+        assert!(
+            observation
+                .proc_locks
+                .as_ref()
+                .is_none_or(std::vec::Vec::is_empty),
+            "/proc/locks has no line for the {name}, got {:?}",
+            observation.proc_locks
+        );
+    }
+    assert!(
+        p1_observed.is_busy(),
+        "the observer is BUSY at P1, got {:?} (stderr {})",
+        p1_observed.line,
+        p1_observed.stderr
+    );
+
+    // P2 sits after the evidence check, which passes on the combined setup.
+    let checked = window.send("NEXT");
+    record("fd7", "p2", &format!("reply={checked:?}"));
+    assert_eq!(
+        checked, "EVIDENCE-CHECKED",
+        "the evidence check passes on the combined setup and the window reaches P2"
+    );
+    let p2_shared = posix_locks::shared_range(&workspace.db, pid);
+    let p2_observed = observe(&workspace.db);
+    let p2_shared = measure("fd7", "p2", pid, p2_shared, Some(&p2_observed), None);
+    assert_eq!(
+        p2_shared.kind(),
+        Some(LockKind::Write),
+        "the evidence check kept the window's EXCLUSIVE lock"
+    );
+    assert!(
+        p2_observed.is_busy(),
+        "the observer is BUSY at P2, got {:?} (stderr {})",
+        p2_observed.line,
+        p2_observed.stderr
+    );
+
+    let outcome = window.send("NEXT");
+    record("fd7", "outcome", &format!("reply={outcome:?}"));
+    assert_eq!(
+        outcome, "OUTCOME refused=None checkpoint_truncated=true renamed=1",
+        "the combined lone -shm + 5-byte -wal setup completes, so the -shm is quarantined and \
+         the TRUNCATE checkpoint runs"
+    );
+    assert!(window.quit().success());
+}
+
+/// (n, fdp) The storage `/proc/locks` parser reads canned lines. It keeps the POSIX lines of one
+/// inode and pid, decodes the hex device, skips a blocked waiter's `->` line and reads `EOF` as
+/// length 0. A line on the inode with another device is excluded when some line carries the
+/// `stat` device, and kept when none does (the btrfs fallback).
+#[cfg(target_os = "linux")]
+#[test]
+fn fd_proc_locks_parser_reads_canned_lines() {
+    use posix_locks::{HeldLock, dev_major_minor, parse_proc_locks, raw_lines_on_inode};
+
+    let text = "\
+1: POSIX  ADVISORY  READ  4242 08:01:123456 1073741826 1073742335
+1: -> POSIX  ADVISORY  WRITE 4343 08:01:123456 1073741826 1073742335
+2: POSIX  ADVISORY  WRITE 4242 fd:00:999 0 EOF
+3: FLOCK  ADVISORY  WRITE 5151 08:01:777 0 EOF
+4: POSIX  ADVISORY  WRITE 4242 08:01:123456 128 255
+5: POSIX  ADVISORY  READ  4242 00:2a:123456 0 EOF
+6: POSIX  ADVISORY  READ  5353 00:2c:4040 1073741826 1073742335
+7: POSIX  ADVISORY  READ  5353 00:2c:4040 1073741826 1073742335
+";
+    assert_eq!(
+        parse_proc_locks(text, (8, 1), 123_456, Some(4242)),
+        [
+            HeldLock {
+                kind: LockKind::Read,
+                pid: 4242,
+                start: 1_073_741_826,
+                len: 510,
+                dev: Some("08:01".to_owned()),
+            },
+            HeldLock {
+                kind: LockKind::Write,
+                pid: 4242,
+                start: 128,
+                len: 128,
+                dev: Some("08:01".to_owned()),
+            },
+        ],
+        "a line carries the stat device 08:01, so the same inode on device 00:2a is excluded"
+    );
+    assert_eq!(
+        parse_proc_locks(text, (0xfd, 0), 999, None),
+        [HeldLock {
+            kind: LockKind::Write,
+            pid: 4242,
+            start: 0,
+            len: 0,
+            dev: Some("fd:00".to_owned()),
+        }],
+        "the device is read as hex"
+    );
+    assert_eq!(
+        parse_proc_locks(text, (0, 0x2a), 123_456, None),
+        [HeldLock {
+            kind: LockKind::Read,
+            pid: 4242,
+            start: 0,
+            len: 0,
+            dev: Some("00:2a".to_owned()),
+        }],
+        "a line carries the stat device 00:2a, so the lines on device 08:01 are excluded"
+    );
+    assert_eq!(
+        parse_proc_locks(text, (0, 0x3a), 4040, Some(5353)),
+        [HeldLock {
+            kind: LockKind::Read,
+            pid: 5353,
+            start: 1_073_741_826,
+            len: 510,
+            dev: Some("00:2c".to_owned()),
+        }],
+        "no line carries the subvolume device 00:3a (btrfs), so the inode alone matches"
+    );
+    assert_eq!(
+        parse_proc_locks(text, (8, 2), 123_456, None).len(),
+        3,
+        "no line carries device 08:02, so every line on the inode matches"
+    );
+    assert_eq!(
+        parse_proc_locks(text, (0, 0x3a), 4040, None).len(),
+        1,
+        "a torn read that repeats a line yields one record"
+    );
+    assert_eq!(
+        raw_lines_on_inode(text, 4040).len(),
+        2,
+        "the failure evidence keeps every raw line on the inode"
+    );
+    assert_eq!(
+        raw_lines_on_inode(text, 123_456).len(),
+        4,
+        "the failure evidence keeps waiters and every device"
+    );
+    assert!(parse_proc_locks(text, (8, 1), 123_456, Some(1)).is_empty());
+    assert!(parse_proc_locks(text, (8, 1), 31_337, None).is_empty());
+    assert_eq!(dev_major_minor(0x0801), (8, 1));
+    assert_eq!(dev_major_minor(0x1001_0305), (0x103, 0x1_0005));
 }
