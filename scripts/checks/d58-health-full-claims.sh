@@ -156,6 +156,9 @@ N4@crates/unblock-health/src/*.rs@<{7}|>{7}@NEGATIVE: unblock-health spells no c
 # Q278..Q282 (ub-2vp spec commit, tracker comment 432) the criterion (n) descriptor-close amendment
 #      anchor, the spine §3.1 testkit setters with_after_exclusive_lock and with_after_evidence_check,
 #      and the fd7 citations in PRD clause (6)(c) and spine §3.3 step (c).
+# Q283..Q291 (ub-2vp storage test commit) one row per cell declaration fd0, fd1, fd2, fd3, fd4, fd5,
+#      fd5c, fd7 and fdp in crates/unblock-storage/tests/exclusive_window.rs.
+# Q294 (ub-2vp, after outcome M1, tracker comments 434 and 435) the pinned fd6 cell declaration.
 # Q295..Q303 (ub-2vp measured-note commit) the dated measured note in PRD clause (6)(a2) with its
 #      exposure window and the ruling (b) disposition (v1.0.3 under ub-kpe), criterion (n)'s measured
 #      result and fd6's silent loss, the measured fd7 citations in PRD clause (6)(c) and spine §3.3
@@ -444,6 +447,16 @@ Q279@docs/plans/01-design-spine.md@^    pub fn with_after_exclusive_lock\(@#\[cf
 Q280@docs/plans/01-design-spine.md@^    pub fn with_after_evidence_check\(@#\[cfg|with_after_evidence_check@spine §3.1 as amended (ub-2vp): the fd7 P2 hook setter exists only under testkit
 Q281@docs/PRD.md@^\| \*\*D58\*\* \|@criterion \(n\)'s cell fd7 measures this claim inside the real window \[D58 amendment, ub-2vp\]@clause (6)(c) as amended (ub-2vp): fd7 measures the no-lock-on-the-sidecars claim
 Q282@docs/plans/01-design-spine.md@^- \*\*Pre-open health primitives and the read-only open \(D58@criterion \(n\)'s cell fd7 measures this claim inside the real window \[D58 amendment, ub-2vp\]@spine §3.3 step (c) as amended (ub-2vp): fd7 measures the no-lock-on-the-sidecars claim
+Q283@crates/unblock-storage/tests/exclusive_window.rs@fn fd0_store_holds_the_shared_lock\(@fn fd0_store_holds_the_shared_lock\(@criterion (n) (ub-2vp): fd0, the holder store holds SHARED and the observer detects it
+Q284@crates/unblock-storage/tests/exclusive_window.rs@fn fd1_v1_header_probe_close_drops_the_shared_lock\(@fn fd1_v1_header_probe_close_drops_the_shared_lock\(@criterion (n) (ub-2vp): fd1, the reproduction — the verbatim v1.0.x probe close drops SHARED
+Q285@crates/unblock-storage/tests/exclusive_window.rs@fn fd2_control_noop_keeps_the_shared_lock\(@fn fd2_control_noop_keeps_the_shared_lock\(@criterion (n) (ub-2vp): fd2, the no-op control
+Q286@crates/unblock-storage/tests/exclusive_window.rs@fn fd3_control_sqlite_owned_close_keeps_the_shared_lock\(@fn fd3_control_sqlite_owned_close_keeps_the_shared_lock\(@criterion (n) (ub-2vp): fd3, the SQLite-owned close control
+Q287@crates/unblock-storage/tests/exclusive_window.rs@fn fd4_preopen_primitives_keep_the_shared_lock\(@fn fd4_preopen_primitives_keep_the_shared_lock\(@criterion (n) (ub-2vp): fd4 = G1, main pre-open primitives keep SHARED
+Q288@crates/unblock-storage/tests/exclusive_window.rs@fn fd5_last_close_elsewhere_unlinks_the_live_sidecars_after_the_probe\(@fn fd5_last_close_elsewhere_unlinks_the_live_sidecars_after_the_probe\(@criterion (n) (ub-2vp): fd5, another process last close unlinks the live sidecars after the probe
+Q289@crates/unblock-storage/tests/exclusive_window.rs@fn fd5c_control_last_close_elsewhere_keeps_the_sidecars_without_the_probe\(@fn fd5c_control_last_close_elsewhere_keeps_the_sidecars_without_the_probe\(@criterion (n) (ub-2vp): fd5c, the control without the probe
+Q290@crates/unblock-storage/tests/exclusive_window.rs@fn fd7_window_sidecar_reread_keeps_its_exclusive_lock\(@fn fd7_window_sidecar_reread_keeps_its_exclusive_lock\(@criterion (n) (ub-2vp): fd7, the window sidecar re-read keeps its exclusive lock
+Q291@crates/unblock-storage/tests/exclusive_window.rs@fn fd_proc_locks_parser_reads_canned_lines\(@fn fd_proc_locks_parser_reads_canned_lines\(@criterion (n) (ub-2vp): fdp, the storage /proc/locks parser cell
+Q294@crates/unblock-storage/tests/exclusive_window.rs@fn fd6_commit_after_unlink_is_lost_while_another_process_holds_the_new_files\(@fn fd6_commit_after_unlink_is_lost_while_another_process_holds_the_new_files\(@criterion (n) as measured (ub-2vp, tracker comment 434): fd6, a commit after the unlink is lost while another process holds the new files — pinned after M1
 Q295@docs/PRD.md@^\| \*\*D58\*\* \|@tracked separately as .ub-2vp. and is not fixed here \*\*\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1 and on CI .macos-15-arm64. and .ubuntu-26\.04. \(run 44251096720\)@clause (6)(a2) as measured (ub-2vp, tracker comments 434 and 435): the dated measured note replaces the v1.0.x-candidate wording
 Q296@docs/PRD.md@^\| \*\*D58\*\* \|@1\.82 ms ± 0\.37 ms on an empty database and 0\.698 s ± 0\.27 ms at 250k issues.*v1\.0\.3 patch planned under ub-kpe \(ruling \(b\) = B1a, 2026-11-18\)@clause (6)(a2) as measured: the exposure window on the shipped build and the ruling (b) disposition
 Q297@docs/PRD.md@^\| \*\*D58\*\* \|@\[D58 amendment, ub-2vp, tracker comment 432\]: the descriptor-close lock-loss cells, MEASURED \[D58 amendment, measured 2026-11-18@criterion (n) as measured: the predicted direction became the measured result
@@ -537,7 +550,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 4 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 291 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 301 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."

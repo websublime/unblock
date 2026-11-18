@@ -123,6 +123,9 @@ tempfile = "3"
 # Whole-process CPU time across all tokio worker threads (no raw libc, unsafe-free). Drives the
 # T0.8 contention lab's baseline-relative CPU-per-write ratio (NFR-3 / RK-1). Test-only.
 cpu-time = "1"
+# Safe `fcntl(F_GETLK)` for the PRD §4 D58 criterion (n) lock-observation helper (ub-2vp). Test-only;
+# already locked at 0.30.1 through `homedir`, so it adds no crate. Crates reach `libc` as `nix::libc`.
+nix = { version = "0.30", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -26,11 +26,12 @@ path = "tests/bin/c5_abandoned_tx.rs"
 name = "write_lock_race"
 path = "tests/bin/write_lock_race.rs"
 
-# PRD §4 D58 criteria (f)/(g) test-only helper: the SECOND process that holds a libsql reader, the
-# `.write.lock`, or a killed write transaction's hot `-journal`, and runs the (f5) `BEGIN EXCLUSIVE`
-# control. Located from `tests/exclusive_window.rs` via `env!("CARGO_BIN_EXE_exclusive_window_holder")`.
-# Source under `tests/bin/` (never `src/`), so it never ships via `dist`; existing deps only
-# (libsql/tokio), NO new dep.
+# The PRD §4 D58 criteria (f)/(g)/(n) test-only helper is the SECOND process that holds a libsql
+# reader, the `.write.lock`, or a killed write transaction's hot `-journal`, runs the (f5) `BEGIN
+# EXCLUSIVE` control, and plays the (n) descriptor-close processes (ub-2vp). Located from
+# `tests/exclusive_window.rs` via `env!("CARGO_BIN_EXE_exclusive_window_holder")`. Source under
+# `tests/bin/` (never `src/`), so it never ships via `dist`; existing deps only (the crate's own lib,
+# unblock-model, libsql, tokio, chrono), NO new dep; the `window` mode is testkit-gated.
 [[bin]]
 name = "exclusive_window_holder"
 path = "tests/bin/exclusive_window_holder.rs"
@@ -76,6 +77,12 @@ cpu-time = { workspace = true }
 # (`benches/storage.rs`). Already declared workspace-wide (root Cargo.toml, `features=[async_tokio]`),
 # unused until now; adds no NEW transitive surface.
 criterion = { workspace = true }
+
+# Safe `fcntl(F_GETLK)` for `tests/common/posix_locks.rs`, the PRD §4 D58 criterion (n) observer of
+# who holds SQLite's SHARED byte range (ub-2vp). Test-only and Unix-only; already locked through
+# `homedir`, so it adds no crate. `libc` is reached as `nix::libc`, never as a direct dependency.
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true, features = ["fs"] }
 
 # NFR-1 storage perf gate (T3.5/D34): create/list/ready/count/search over a file-backed libsql DB.
 # `harness = false` → criterion owns `main`. The bench BODY is `#[cfg(feature = "testkit")]` (it needs
