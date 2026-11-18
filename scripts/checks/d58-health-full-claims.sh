@@ -158,6 +158,7 @@ N4@crates/unblock-health/src/*.rs@<{7}|>{7}@NEGATIVE: unblock-health spells no c
 #      and the fd7 citations in PRD clause (6)(c) and spine §3.3 step (c).
 # Q283..Q291 (ub-2vp storage test commit) one row per cell declaration fd0, fd1, fd2, fd3, fd4, fd5,
 #      fd5c, fd7 and fdp in crates/unblock-storage/tests/exclusive_window.rs.
+# Q292..Q293 (ub-2vp engine test commit) G3 and G3p in crates/unblock-engine/tests/health.rs.
 # Q294 (ub-2vp, after outcome M1, tracker comments 434 and 435) the pinned fd6 cell declaration.
 # Q295..Q303 (ub-2vp measured-note commit) the dated measured note in PRD clause (6)(a2) with its
 #      exposure window and the ruling (b) disposition (v1.0.3 under ub-kpe), criterion (n)'s measured
@@ -456,6 +457,8 @@ Q288@crates/unblock-storage/tests/exclusive_window.rs@fn fd5_last_close_elsewher
 Q289@crates/unblock-storage/tests/exclusive_window.rs@fn fd5c_control_last_close_elsewhere_keeps_the_sidecars_without_the_probe\(@fn fd5c_control_last_close_elsewhere_keeps_the_sidecars_without_the_probe\(@criterion (n) (ub-2vp): fd5c, the control without the probe
 Q290@crates/unblock-storage/tests/exclusive_window.rs@fn fd7_window_sidecar_reread_keeps_its_exclusive_lock\(@fn fd7_window_sidecar_reread_keeps_its_exclusive_lock\(@criterion (n) (ub-2vp): fd7, the window sidecar re-read keeps its exclusive lock
 Q291@crates/unblock-storage/tests/exclusive_window.rs@fn fd_proc_locks_parser_reads_canned_lines\(@fn fd_proc_locks_parser_reads_canned_lines\(@criterion (n) (ub-2vp): fdp, the storage /proc/locks parser cell
+Q292@crates/unblock-engine/tests/health.rs@fn gather_preopen_refusal_opens_no_descriptor_on_the_database\(@fn gather_preopen_refusal_opens_no_descriptor_on_the_database\(@criterion (n) (ub-2vp): G3, a refused gather_preopen opens no descriptor on the database
+Q293@crates/unblock-engine/tests/health.rs@fn proc_locks_parser_reads_canned_lines\(@fn proc_locks_parser_reads_canned_lines\(@criterion (n) (ub-2vp): G3p, the engine /proc/locks parser copy cell
 Q294@crates/unblock-storage/tests/exclusive_window.rs@fn fd6_commit_after_unlink_is_lost_while_another_process_holds_the_new_files\(@fn fd6_commit_after_unlink_is_lost_while_another_process_holds_the_new_files\(@criterion (n) as measured (ub-2vp, tracker comment 434): fd6, a commit after the unlink is lost while another process holds the new files — pinned after M1
 Q295@docs/PRD.md@^\| \*\*D58\*\* \|@tracked separately as .ub-2vp. and is not fixed here \*\*\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1 and on CI .macos-15-arm64. and .ubuntu-26\.04. \(run 44251096720\)@clause (6)(a2) as measured (ub-2vp, tracker comments 434 and 435): the dated measured note replaces the v1.0.x-candidate wording
 Q296@docs/PRD.md@^\| \*\*D58\*\* \|@1\.82 ms ± 0\.37 ms on an empty database and 0\.698 s ± 0\.27 ms at 250k issues.*v1\.0\.3 patch planned under ub-kpe \(ruling \(b\) = B1a, 2026-11-18\)@clause (6)(a2) as measured: the exposure window on the shipped build and the ruling (b) disposition
@@ -550,7 +553,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 4 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 301 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 303 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."
