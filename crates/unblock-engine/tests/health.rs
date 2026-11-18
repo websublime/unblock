@@ -852,6 +852,158 @@ async fn gather_preopen_with_a_live_session_is_refused_pre_open_with_live_connec
     gather_preopen(&ws.paths).expect("no live connection once the session is gone");
 }
 
+/// (n, G3, `ub-2vp`) A refused `gather_preopen` opens no descriptor on the database file, so this
+/// process's store holds `SQLite`'s SHARED lock before AND after the refusal (`/proc/locks`). It
+/// catches a reorder of `read_db_fact` above the live-connection check.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn gather_preopen_refusal_opens_no_descriptor_on_the_database() {
+    use common::proc_locks::{LockKind, PROC_LOCKS_ATTEMPTS, SharedRangeReads, shared_range};
+
+    let ws = Workspace::new().await;
+    let (session, storage) = ws.open().await;
+    storage.schema_version().await.expect("one read");
+    let pid = i32::try_from(std::process::id()).expect("a pid fits i32");
+    let before = shared_range(ws.db(), pid);
+    match gather_preopen(&ws.paths) {
+        Err(EngineError::PreOpenWithLiveConnection { path }) => assert_eq!(path, ws.db()),
+        other => panic!("expected PreOpenWithLiveConnection, got {other:?}"),
+    }
+    let after = shared_range(ws.db(), pid);
+    let leg = std::env::var("GITHUB_JOB").unwrap_or_else(|_| "local".to_owned());
+    for (point, seen) in [("before-refusal", &before), ("after-refusal", &after)] {
+        eprintln!(
+            "UB2VP-MEASURE leg=linux/{leg} cell=G3 point={point} holder_pid={pid} sh={:?} \
+             attempts={} proc_reads={} proc_bytes={}",
+            seen.kind, seen.attempts, seen.proc_reads, seen.proc_bytes
+        );
+    }
+    let explain = |seen: &SharedRangeReads| match seen.kind {
+        None => format!("it was absent on all {PROC_LOCKS_ATTEMPTS} /proc/locks reads"),
+        Some(kind) => format!(
+            "expected Read, saw {kind:?} over {} /proc/locks reads",
+            seen.attempts
+        ),
+    };
+    assert_eq!(
+        before.kind,
+        Some(LockKind::Read),
+        "the store holds SHARED before, yet {}; raw lines on the inode per read {:?}",
+        explain(&before),
+        before.raw_on_inode
+    );
+    assert_eq!(
+        after.kind,
+        Some(LockKind::Read),
+        "a refused gather_preopen lost the store's SHARED read lock ({}), so a std::fs open/close \
+         of the database ran before gather_preopen's `live > 0` check \
+         (`PreOpenWithLiveConnection`), e.g. `read_db_fact` reordered above it; raw lines on the \
+         inode per read {:?}",
+        explain(&after),
+        after.raw_on_inode
+    );
+    drop(session);
+    drop(storage);
+}
+
+/// (n, G3p, `ub-2vp`) The engine's copy of the `/proc/locks` parser reads the same canned lines as
+/// fdp, including the same inode on another device and the btrfs inode-only fallback.
+#[cfg(target_os = "linux")]
+#[test]
+fn proc_locks_parser_reads_canned_lines() {
+    use common::proc_locks::{
+        HeldLock, LockKind, dev_major_minor, parse_proc_locks, raw_lines_on_inode,
+    };
+
+    let text = "\
+1: POSIX  ADVISORY  READ  4242 08:01:123456 1073741826 1073742335
+1: -> POSIX  ADVISORY  WRITE 4343 08:01:123456 1073741826 1073742335
+2: POSIX  ADVISORY  WRITE 4242 fd:00:999 0 EOF
+3: FLOCK  ADVISORY  WRITE 5151 08:01:777 0 EOF
+4: POSIX  ADVISORY  WRITE 4242 08:01:123456 128 255
+5: POSIX  ADVISORY  READ  4242 00:2a:123456 0 EOF
+6: POSIX  ADVISORY  READ  5353 00:2c:4040 1073741826 1073742335
+7: POSIX  ADVISORY  READ  5353 00:2c:4040 1073741826 1073742335
+";
+    assert_eq!(
+        parse_proc_locks(text, (8, 1), 123_456, Some(4242)),
+        [
+            HeldLock {
+                kind: LockKind::Read,
+                pid: 4242,
+                start: 1_073_741_826,
+                len: 510,
+                dev: Some("08:01".to_owned()),
+            },
+            HeldLock {
+                kind: LockKind::Write,
+                pid: 4242,
+                start: 128,
+                len: 128,
+                dev: Some("08:01".to_owned()),
+            },
+        ],
+        "a line carries the stat device 08:01, so the same inode on device 00:2a is excluded"
+    );
+    assert_eq!(
+        parse_proc_locks(text, (0xfd, 0), 999, None),
+        [HeldLock {
+            kind: LockKind::Write,
+            pid: 4242,
+            start: 0,
+            len: 0,
+            dev: Some("fd:00".to_owned()),
+        }],
+        "the device is read as hex"
+    );
+    assert_eq!(
+        parse_proc_locks(text, (0, 0x2a), 123_456, None),
+        [HeldLock {
+            kind: LockKind::Read,
+            pid: 4242,
+            start: 0,
+            len: 0,
+            dev: Some("00:2a".to_owned()),
+        }],
+        "a line carries the stat device 00:2a, so the lines on device 08:01 are excluded"
+    );
+    assert_eq!(
+        parse_proc_locks(text, (0, 0x3a), 4040, Some(5353)),
+        [HeldLock {
+            kind: LockKind::Read,
+            pid: 5353,
+            start: 1_073_741_826,
+            len: 510,
+            dev: Some("00:2c".to_owned()),
+        }],
+        "no line carries the subvolume device 00:3a (btrfs), so the inode alone matches"
+    );
+    assert_eq!(
+        parse_proc_locks(text, (8, 2), 123_456, None).len(),
+        3,
+        "no line carries device 08:02, so every line on the inode matches"
+    );
+    assert_eq!(
+        parse_proc_locks(text, (0, 0x3a), 4040, None).len(),
+        1,
+        "a torn read that repeats a line yields one record"
+    );
+    assert_eq!(
+        raw_lines_on_inode(text, 4040).len(),
+        2,
+        "the failure evidence keeps every raw line on the inode"
+    );
+    assert_eq!(
+        raw_lines_on_inode(text, 123_456).len(),
+        4,
+        "the failure evidence keeps waiters and every device"
+    );
+    assert!(parse_proc_locks(text, (8, 1), 123_456, Some(1)).is_empty());
+    assert!(parse_proc_locks(text, (8, 1), 31_337, None).is_empty());
+    assert_eq!(dev_major_minor(0x0801), (8, 1));
+    assert_eq!(dev_major_minor(0x1001_0305), (0x103, 0x1_0005));
+}
+
 /// (g, engine half) A lone `-shm` is renamed into `quarantine/` with its SHA-256 in the manifest,
 /// its capture is the `original/` copy listed apart in `originals`, and the final level is
 /// `Healthy`.

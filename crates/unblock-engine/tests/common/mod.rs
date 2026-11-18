@@ -13,6 +13,9 @@ use unblock_engine::{Session, SessionConfig};
 use unblock_model::{Dependency, DependencyType, Issue, Priority, Status};
 use unblock_storage::{LibsqlStorage, Storage};
 
+#[cfg(target_os = "linux")]
+pub mod proc_locks;
+
 /// Build a `Session` over a fresh in-memory libsql backend (migrated), wired into a synthetic
 /// `WorkspaceContext` — the same shape `unblock-config` builds in production, but with an in-memory
 /// DB so tests are fast and isolated. Real storage, no mock.
