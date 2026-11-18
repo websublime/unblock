@@ -29,8 +29,9 @@
 # WHAT NO ROW HERE CAN SEE, stated so no row is over-read. A line grep cannot prove that the exclusive
 # window takes its raw copies before any SQLite open, that `locking_mode=EXCLUSIVE` really refuses
 # while another connection is open (criterion (f) MEASURES that), that `repair` runs its actions in one
-# transaction, that a refusal never reports success, or that the classifier is pure. The cells D58
-# clause (12) names carry those.
+# transaction, that a refusal never reports success, or that the classifier is pure, nor that closing
+# a descriptor drops or keeps a POSIX lock. The cells D58 clause (12) names carry those, and the fd
+# cells of criterion (n) (`ub-2vp`) carry the last.
 #
 # THE CONTRACT KNOB DOES NOT MOVE. D58 is CLI-only (D3) and adds no wire byte, so this file pins the
 # LIVE id `unblock.mcp.v1.12` at the code constant and in every sibling's knob (criterion (p)).
@@ -152,6 +153,13 @@ N4@crates/unblock-health/src/*.rs@<{7}|>{7}@NEGATIVE: unblock-health spells no c
 #      journal and the original-facts plan; Q273..Q277 their code line and cells.
 # Q246..Q257 (the docs(d58) amendment for tracker comments 389, 388 and 390: Unsafe gate, capture before touch) the gate in PRD clause (6),
 #      criteria (a), (b) and (h), spine §4.1 recover() and §5b, and the clause (9) confinement hardening.
+# Q278..Q282 (ub-2vp spec commit, tracker comment 432) the criterion (n) descriptor-close amendment
+#      anchor, the spine §3.1 testkit setters with_after_exclusive_lock and with_after_evidence_check,
+#      and the fd7 citations in PRD clause (6)(c) and spine §3.3 step (c).
+# Q295..Q303 (ub-2vp measured-note commit) the dated measured note in PRD clause (6)(a2) with its
+#      exposure window and the ruling (b) disposition (v1.0.3 under ub-kpe), criterion (n)'s measured
+#      result and fd6's silent loss, the measured fd7 citations in PRD clause (6)(c) and spine §3.3
+#      step (c), the health plan's src/file_state.rs row, and T4.3's out-of-scope ub-2vp entry.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@scripts/checks/d44-create-deps-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D44 sibling's live-range knob carries the SAME range as this script — anchored on the knob line, so the file's own prose about the knob cannot satisfy the pin
@@ -431,6 +439,20 @@ Q274@crates/unblock-cli/tests/migrate_doctor.rs@fn repair_hot_journal_beside_pag
 Q275@crates/unblock-cli/tests/migrate_doctor.rs@fn repair_refuses_a_sidecar_it_cannot_capture_exit_2_and_writes_nothing\(@fn repair_refuses_a_sidecar_it_cannot_capture_exit_2_and_writes_nothing\(@clause (8) as amended: a capture refusal is DATABASE_ERROR, exit 2, with nothing written
 Q276@crates/unblock-engine/tests/health.rs@fn capture_sidecars_leaves_a_hot_journal_to_the_raw_copy\(@fn capture_sidecars_leaves_a_hot_journal_to_the_raw_copy\(@clause (8) as amended: the -journal is not captured in memory; raw/ holds it
 Q277@crates/unblock-engine/tests/health.rs@fn capture_sidecars_keeps_a_truncated_wal_as_its_original\(@fn capture_sidecars_keeps_a_truncated_wal_as_its_original\(@clause (8) as amended: a truncated -wal is captured as its original
+Q278@docs/PRD.md@^\| \*\*D58\*\* \|@\[D58 amendment, ub-2vp, tracker comment 432\]: the descriptor-close lock-loss cells@criterion (n) as amended (ub-2vp, tracker comment 432): the descriptor-close lock-loss cells and their predicted direction are specified
+Q279@docs/plans/01-design-spine.md@^    pub fn with_after_exclusive_lock\(@#\[cfg|with_after_exclusive_lock@spine §3.1 as amended (ub-2vp): the fd7 P1 hook setter exists only under testkit
+Q280@docs/plans/01-design-spine.md@^    pub fn with_after_evidence_check\(@#\[cfg|with_after_evidence_check@spine §3.1 as amended (ub-2vp): the fd7 P2 hook setter exists only under testkit
+Q281@docs/PRD.md@^\| \*\*D58\*\* \|@criterion \(n\)'s cell fd7 measures this claim inside the real window \[D58 amendment, ub-2vp\]@clause (6)(c) as amended (ub-2vp): fd7 measures the no-lock-on-the-sidecars claim
+Q282@docs/plans/01-design-spine.md@^- \*\*Pre-open health primitives and the read-only open \(D58@criterion \(n\)'s cell fd7 measures this claim inside the real window \[D58 amendment, ub-2vp\]@spine §3.3 step (c) as amended (ub-2vp): fd7 measures the no-lock-on-the-sidecars claim
+Q295@docs/PRD.md@^\| \*\*D58\*\* \|@tracked separately as .ub-2vp. and is not fixed here \*\*\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1 and on CI .macos-15-arm64. and .ubuntu-26\.04. \(run 44251096720\)@clause (6)(a2) as measured (ub-2vp, tracker comments 434 and 435): the dated measured note replaces the v1.0.x-candidate wording
+Q296@docs/PRD.md@^\| \*\*D58\*\* \|@1\.82 ms ± 0\.37 ms on an empty database and 0\.698 s ± 0\.27 ms at 250k issues.*v1\.0\.3 patch planned under ub-kpe \(ruling \(b\) = B1a, 2026-11-18\)@clause (6)(a2) as measured: the exposure window on the shipped build and the ruling (b) disposition
+Q297@docs/PRD.md@^\| \*\*D58\*\* \|@\[D58 amendment, ub-2vp, tracker comment 432\]: the descriptor-close lock-loss cells, MEASURED \[D58 amendment, measured 2026-11-18@criterion (n) as measured: the predicted direction became the measured result
+Q298@docs/PRD.md@^\| \*\*D58\*\* \|@is LOST while a second process holds the new files, with a clean .integrity_check. and no corruption signal \(fd6\)@criterion (n) as measured: fd6's silent loss is stated
+Q299@docs/PRD.md@^\| \*\*D58\*\* \|@fd7 measures this claim inside the real window \[D58 amendment, ub-2vp\] \(measured, ub-2vp, 2026-11-18\)@clause (6)(c) as measured (ub-2vp): fd7's citation is measured
+Q300@docs/plans/01-design-spine.md@^- \*\*Pre-open health primitives and the read-only open \(D58@fd7 measures this claim inside the real window \[D58 amendment, ub-2vp\] \(measured, ub-2vp, 2026-11-18\)@spine §3.3 step (c) as measured (ub-2vp): fd7's citation is measured
+Q301@docs/plans/crates/unblock-health.md@^\| .src/file_state\.rs. \|@the shipped v1 path is .ub-2vp. \*\*\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1.*v1\.0\.3 patch planned under ub-kpe \(ruling \(b\) = B1a, 2026-11-18\)@the health plan's file_state.rs row carries the measured ub-2vp note and its disposition
+Q302@docs/plans/implementation-plan.md@^  copy repeats it\) \*\*\[D58 amendment, measured@\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1 and on CI .macos-15-arm64. and\$@T4.3's out-of-scope ub-2vp entry carries the dated measured note
+Q303@docs/plans/implementation-plan.md@v1\.0\.3 patch planned under ub-kpe@  and G3\); v1\.0\.3 patch planned under ub-kpe \(ruling \(b\) = B1a, 2026-11-18\)\]\*\*, .ub-p1h.@T4.3's out-of-scope ub-2vp entry carries the ruling (b) disposition
 "
 
 blocked=0
@@ -515,7 +537,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 4 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 277 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 291 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."
