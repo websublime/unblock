@@ -10,25 +10,37 @@
 //! ADVISORY (reported, NO exit flip); else exit 0. The exit MUST NOT be derived by string-matching the
 //! flattened `Info` findings. `--repair` + the full Healthy/Drifted/Recoverable/Unsafe taxonomy land at
 //! **v1.1** over the `doctor()`/`recover()` seam.
+//!
+//! **D29 clause F6 (v1.0.3): the database header is read BEFORE storage opens.** The command opens
+//! through [`open_session_for_doctor`] — resolve once, capture `DoctorPreflight` while the process
+//! holds NO libsql connection, then open storage over that same resolution — so no descriptor on
+//! `unblock.db` is ever closed inside the live session (closing one drops every POSIX lock the
+//! process holds on the file). Rendering and `doctor_exit` are byte-identical.
 
-use unblock_config::{CliOverrides, open_with_storage_with_cli};
-use unblock_engine::{Session, SessionConfig};
+use unblock_config::{CliOverrides, open_resolved_with_storage, open_workspace_with_cli};
+use unblock_engine::{DoctorPreflight, Session, SessionConfig};
 use unblock_error::ErrorCode;
+use unblock_model::OutputFormat;
 
 use crate::cli::DoctorArgs;
 use crate::exit::CliError;
 use crate::output;
 
-/// Run `unblock doctor` (health-lite).
+/// Open the workspace for `unblock doctor` in the D29 clause F6 order: resolve once, read the database
+/// header while this process holds NO libsql connection, then open storage over that same resolution
+/// and the `Session`. Public only for the cli lock-retention cell; not a stable API.
 ///
 /// # Errors
-/// - [`CliError::Config`] if the workspace cannot be opened;
-/// - [`CliError::Engine`] if the session cannot be opened or the doctor / integrity read fails;
-/// - [`CliError::Render`]/[`CliError::Io`] if rendering / writing the report fails.
-pub async fn run(_args: &DoctorArgs, overrides: &CliOverrides) -> Result<Option<u8>, CliError> {
-    let ctx = open_with_storage_with_cli(overrides).await?;
+/// [`CliError::Config`] if resolution or the open fails; [`CliError::Engine`] if the session cannot
+/// open.
+#[doc(hidden)]
+pub async fn open_session_for_doctor(
+    overrides: &CliOverrides,
+) -> Result<(Session, DoctorPreflight, OutputFormat), CliError> {
+    let resolved = open_workspace_with_cli(overrides).await?;
+    let preflight = DoctorPreflight::capture(&resolved.paths.db_path);
+    let ctx = open_resolved_with_storage(resolved).await?;
     let fmt = ctx.config.output_format;
-
     let session = Session::open(
         ctx,
         SessionConfig {
@@ -37,10 +49,21 @@ pub async fn run(_args: &DoctorArgs, overrides: &CliOverrides) -> Result<Option<
         },
     )
     .await?;
+    Ok((session, preflight, fmt))
+}
+
+/// Run `unblock doctor` (health-lite). MUST open through [`open_session_for_doctor`] (D29 clause F6).
+///
+/// # Errors
+/// - [`CliError::Config`] if the workspace cannot be opened;
+/// - [`CliError::Engine`] if the session cannot be opened or the doctor / integrity read fails;
+/// - [`CliError::Render`]/[`CliError::Io`] if rendering / writing the report fails.
+pub async fn run(_args: &DoctorArgs, overrides: &CliOverrides) -> Result<Option<u8>, CliError> {
+    let (session, preflight, fmt) = open_session_for_doctor(overrides).await?;
 
     // OUTPUT: the wired `Session::doctor()` report (integrity + file-state anomalies), reusing
     // `DiagnosticKind::Info` (F2) — rendered directly, all five formats (F4).
-    let report = session.doctor().await?;
+    let report = session.doctor(preflight).await?;
     // EXIT: a SEPARATE `integrity_check()` read feeds the byte-identical `doctor_exit` (F4/MF1) — the
     // exit is NEVER derived by string-matching the rendered findings.
     let integrity_problems = session.integrity_check().await?;

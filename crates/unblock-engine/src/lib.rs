@@ -107,7 +107,7 @@ mod shutdown;
 pub use error::{EngineError, Result};
 pub use logging::{RELIABILITY_TARGET, TracingOptions, init_tracing};
 pub use session::write::{NewDep, NewIssue};
-pub use session::{MigrateOutcome, Session, SessionConfig};
+pub use session::{DoctorPreflight, MigrateOutcome, Session, SessionConfig};
 pub use shutdown::is_shutdown_requested;
 
 // --- the report module owns the engine-local `ImportOptions` and re-exports the model-owned

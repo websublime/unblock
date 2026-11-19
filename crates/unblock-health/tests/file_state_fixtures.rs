@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use proptest::prelude::*;
 use tempfile::TempDir;
 use unblock_health::{
-    FileAnomaly, HealthLevel, classify_file_state, is_orphaned_lock_file,
+    DbHeaderProbe, FileAnomaly, HealthLevel, classify_file_state, is_orphaned_lock_file,
     jsonl_has_conflict_markers, sidecar,
 };
 
@@ -47,7 +47,11 @@ impl Fixture {
     }
 
     fn classify(&self) -> Vec<FileAnomaly> {
-        classify_file_state(&self.db, Some(&self.jsonl))
+        classify_file_state(
+            &self.db,
+            DbHeaderProbe::read(&self.db).header(),
+            Some(&self.jsonl),
+        )
     }
 }
 
@@ -74,7 +78,7 @@ fn case_empty_workspace_is_empty() {
 fn case_jsonl_none_never_fires_jsonl_anomalies() {
     let fx = Fixture::new();
     // db missing + jsonl None → no DatabaseMissing (needs jsonl present) and no conflict scan.
-    assert!(classify_file_state(&fx.db, None).is_empty());
+    assert!(classify_file_state(&fx.db, DbHeaderProbe::read(&fx.db).header(), None).is_empty());
 }
 
 #[test]
@@ -346,7 +350,7 @@ proptest! {
         write_bytes(&jsonl, &jsonl_bytes);
         // The only assertion is that this returns (does not panic) — determinism/severity are covered
         // by the fixture cases above.
-        let _ = classify_file_state(&db, Some(&jsonl));
+        let _ = classify_file_state(&db, DbHeaderProbe::read(&db).header(), Some(&jsonl));
     }
 
     /// The conflict-marker scan terminates (single pass) and never panics on arbitrary content, and a

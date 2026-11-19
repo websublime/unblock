@@ -4,7 +4,11 @@
 //!
 //! **v1-lite (this build)** ships the storage-free doctor: an [`integrity_check`] passthrough (the
 //! engine runs the PRAGMA and passes the `Vec<String>` rows in), pure [`classify_file_state`]
-//! file-state diagnostics, and the [`run_doctor`] aggregation into a [`DoctorReport`]. It holds NO
+//! file-state diagnostics, and the [`run_doctor`] aggregation into a [`DoctorReport`]. From v1.0.3
+//! (D29 clause F6) the database header is read BEFORE any connection opens ([`DbHeaderProbe`]) and
+//! passed in as data, so `classify_file_state`/`run_doctor` never close a descriptor on the database
+//! or a sidecar inside a live session. `DbHeaderProbe::read` and `jsonl_has_conflict_markers` are not
+//! session-safe on their own (call them only pre-open / never on a session file). It holds NO
 //! `Storage` handle and never names a libsql type (F3/D29, NFR-15); no git (NFR-6), no network.
 //!
 //! **v1.1-full** adds the active four-state taxonomy (`AnomalyClass`), the composite
@@ -36,7 +40,8 @@ mod paths;
 pub use doctor::{DoctorReport, HealthSummary, run_doctor};
 pub use error::HealthError;
 pub use file_state::{
-    FileAnomaly, classify_file_state, is_orphaned_lock_file, jsonl_has_conflict_markers,
+    DbHeader, DbHeaderProbe, FileAnomaly, classify_file_state, is_orphaned_lock_file,
+    jsonl_has_conflict_markers,
 };
 pub use level::HealthLevel;
 pub use paths::{JOURNAL_SUFFIX, SHM_SUFFIX, WAL_SUFFIX, WorkspacePaths, sidecar};

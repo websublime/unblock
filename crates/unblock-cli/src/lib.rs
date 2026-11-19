@@ -28,6 +28,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 pub use cli::{Cli, Command};
+#[doc(hidden)]
+pub use commands::doctor::open_session_for_doctor;
 pub use exit::CliError;
 
 /// Parse `std::env::args_os()`, dispatch, and return the process exit code.

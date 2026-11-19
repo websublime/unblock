@@ -33,9 +33,20 @@ pub async fn session_with(cfg: SessionConfig) -> Session {
 /// Build a `Session` over an already-built `Arc<dyn Storage>` (so two sessions can share one DB for
 /// the dual-callsite identity test).
 pub async fn session_over(storage: Arc<dyn Storage>, cfg: SessionConfig) -> Session {
-    let workspace_dir = PathBuf::from("/tmp/unblock-test-ws");
+    let workspace_dir = PathBuf::from(DEFAULT_WORKSPACE_DIR);
     let unblock_dir = workspace_dir.join(".unblock");
     session_over_in_dir(storage, cfg, workspace_dir, unblock_dir).await
+}
+
+/// The synthetic workspace root [`session_over`] builds its paths under.
+const DEFAULT_WORKSPACE_DIR: &str = "/tmp/unblock-test-ws";
+
+/// The db path of a [`session`] / [`session_over`] session (D29 clause F6: the path a
+/// `DoctorPreflight` for such a session is captured on).
+pub fn default_db_path() -> PathBuf {
+    PathBuf::from(DEFAULT_WORKSPACE_DIR)
+        .join(".unblock")
+        .join(ResolvedConfig::default().db_filename)
 }
 
 /// Like [`session_over`], but with an explicit `workspace_dir` / `unblock_dir` (used by the
