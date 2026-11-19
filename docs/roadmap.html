@@ -290,11 +290,11 @@
           <div class="thm">Maintenance patch — honest <span class="mono">unblock update</span> refusals + CI hardening (released 2026-10-29)</div>
           <span class="tag">Patch · released</span>
         </div>
-        <div class="stn future">
+        <div class="stn done">
           <span class="node"></span>
           <div class="ver">v1.0.3</div>
-          <div class="thm">Maintenance patch — <span class="mono">unblock doctor</span> keeps its SQLite lock</div>
-          <span class="tag">Patch</span>
+          <div class="thm">Maintenance patch — <span class="mono">unblock doctor</span> keeps its SQLite lock (released 2026-11-19)</div>
+          <span class="tag">Patch · released</span>
         </div>
         <div class="stn locked">
           <span class="node"></span>
@@ -452,7 +452,7 @@
       </div>
 
       <div class="card">
-        <div class="ch"><span class="cv">v1.0.3</span><span class="status st-locked">Patch · planned</span></div>
+        <div class="ch"><span class="cv">v1.0.3</span><span class="status st-locked">Patch · released</span></div>
         <div class="thm">Maintenance patch</div>
         <p class="desc">A third patch on the 1.0 line, cut from the <span class="mono">release/v1.0.x</span> maintenance branch because main already carries v1.1 &mdash; the <span class="mono">doctor</span> lock loss found under <span class="mono">ub-2vp</span>, and release builds that compile only the shipped package.</p>
         <ul>
@@ -460,7 +460,7 @@
           <li>Fix: an MCP <span class="mono">sync</span> import or export whose target is the live database or a sidecar is refused (<span class="mono">ub-w1j</span>)</li>
           <li>Release builds compile only <span class="mono">unblock-cli</span> (<span class="mono">precise-builds</span>, the D17 amendment of <span class="mono">ub-2vp</span>, backported) &mdash; v1.0.0&ndash;v1.0.2 compiled the storage testkit into the shipped binary</li>
           <li>Lockfile: quinn-udp and rustix advisories fixed by patch bumps; the rmcp 1.7 client advisory (code not compiled) and the chrono notice are ignored on the 1.0 line only</li>
-          <li>Released from <span class="mono">release/v1.0.x</span>: <span class="mono">v1.0.3-rc.1</span>, then <span class="mono">v1.0.3</span>; the live <span class="mono">v1.0.2 → v1.0.3</span> <span class="mono">unblock update</span> smoke runs before any v1.1.0 is published; the branch is never merged back</li>
+          <li>Released from <span class="mono">release/v1.0.x</span> on 2026-11-19: <span class="mono">v1.0.3-rc.1</span> was cancelled on a retired macOS runner image (<span class="mono">ub-ode</span>), then <span class="mono">v1.0.3-rc.2</span> and <span class="mono">v1.0.3</span>; the live <span class="mono">v1.0.2 → v1.0.3</span> <span class="mono">unblock update</span> smoke passed on all five triples, 2026-11-19; the branch is never merged back</li>
         </ul>
         <div class="crates"><b>touches</b> health · config · engine · sync · cli · CI · dist</div>
       </div>

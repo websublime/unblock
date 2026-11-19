@@ -580,7 +580,11 @@
   ub-w1j's `w1j0`–`w1j5` pass on Linux and macOS, and `kpe1`, `kpe4`, `kpe5` and `w1j0`–`w1j4` FAIL against
   unpatched v1.0.2; the branch `windows-check` job is green; the v1.0.3
   release log reads `--package=unblock-cli`; `v1.0.3-rc.1` then `v1.0.3` are published from `release/v1.0.x`; the
-  live `v1.0.2 → v1.0.3` update smoke passes on all five triples before any v1.1.0 is published.)*
+  live `v1.0.2 → v1.0.3` update smoke passes on all five triples before any v1.1.0 is published. **Result
+  (2026-11-19):** met — `v1.0.3-rc.1` was cancelled on the retired `macos-14` image (`ub-ode`, PR #479 pins
+  `macos-15`), `v1.0.3-rc.2` (run 44531801963) and `v1.0.3` (run 44535938580) published green with
+  `--package=unblock-cli` in all five build logs, and the `v1.0.2 → v1.0.3` smoke (run 44537692027) passed on all
+  five triples.)*
 
 ## 5a. v1.1 — locked slices  *(tasks land just-in-time as v1.1 slices are decided — `docs/PROCESS.md` §2)*
 
@@ -746,7 +750,7 @@
   `ubuntu-26.04` (run 44251096720), `sqlite_version` 3.45.1, tracker comments 434 and 435: the lock loss is CONFIRMED
   in the shipped v1.0.0–v1.0.2 and in the real v1.0.2 `unblock doctor` binary, with an exposure window of 1.82 ms ±
   0.37 ms empty and 0.698 s ± 0.27 ms at 250k issues on the shipped build; main does not carry it (cells fd4, fd7
-  and G3); v1.0.3 patch planned under ub-kpe (ruling (b) = B1a, 2026-11-18)]**, `ub-p1h` (not a prerequisite —
+  and G3); fixed in v1.0.3 (released 2026-11-19; ub-kpe, ruling (b) = B1a, 2026-11-18; PRD §4 D29 clause F6)]**, `ub-p1h` (not a prerequisite —
   `Drifted` is database-internal), dangling-edge repair (D45 stands), `VACUUM`, salvage, MCP exposure, REMOTE-mode health (the v1.3
   lock). `unblock init`'s DATABASE-ONLY mode (D58 clause (7), Miguel's ruling 2026-11-13) is IN scope. ONE PR. **DAG:** depends on T3.3 (the lite seam), T3.4 (the NFR-5
   failure-replay fixtures), D46's ladder and T4.2 (the D57 fail-closed gate `recover()` stays behind, and the

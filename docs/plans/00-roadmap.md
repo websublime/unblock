@@ -1,6 +1,6 @@
 # unblock — Version Roadmap
 
-- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (released 2026-10-02; maintenance patch — the `v1.0.1` subsection of §1); v1.0.2 **PLANNED** (released 2026-10-29; maintenance patch — the `v1.0.2` subsection of §1); v1.0.3 **PLANNED** (maintenance patch cut from the `release/v1.0.x` branch — the `v1.0.3` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
+- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (released 2026-10-02; maintenance patch — the `v1.0.1` subsection of §1); v1.0.2 **PLANNED** (released 2026-10-29; maintenance patch — the `v1.0.2` subsection of §1); v1.0.3 **PLANNED** (released 2026-11-19; maintenance patch cut from the `release/v1.0.x` branch — the `v1.0.3` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
 - **Date:** 2026-06-19 · **v1.2–v1.5 resequence:** 2026-07-07 (session ratified by Miguel; audience decision minted as PRD §4 D28) · **post-GA v1.2+ resequence:** 2026-07-20 (Miguel-ratified; the PROPOSED v1.2–v1.5 order is reworked and a v1.0.1 maintenance-patch slot added — full mapping in roadmap §8, rationale + guardrail in PRD §4 D41)
 - **Owner:** Miguel Ramos
 - **Sources of truth:** `docs/PRD.md` (PRD APPROVED v1.1, §5 tiers / §11 scope / §13 phasing), `docs/plans/01-design-spine.md` (cross-crate interfaces — wins on any cross-crate type/signature disagreement), `docs/plans/implementation-plan.md` (v1 walking skeleton). Hierarchy: PRD > spine > crate plans. Grounding for deferred/later items: original `temp/beads_rust-main` feature inventory; UX grounding for the v1.4 TUI: the TUI-adopted subset of the 14 mockups under `temp/tentative-v2/docs/designs/` (**reference-only**, same status as `temp/beads_rust-main`; the graph / burnup screens there inform the v2+ PRO web instead — roadmap §7).
@@ -536,7 +536,7 @@ work the tracker labels `v1-0-2`:
   `include_closed` stay no-ops), storage orders it by the `cmp_ready` key and pages after the blocked-set filter,
   and `blocked` honours `offset`. No schema bytes change: no `CONTRACT_HASH` re-pin, `unblock.mcp.v1.10` stands.
 
-### v1.0.3 — maintenance patch  **[PLANNED]**
+### v1.0.3 — maintenance patch  **[PLANNED]** (released 2026-11-19)
 
 A third maintenance patch on the 1.0 line, opened on 2026-11-18 under `ub-kpe` by an addendum to PRD §4 D29
 (clause F6) and, on the 1.0 line only, an amendment to D5 (`ub-w1j`). It is the first patch cut from the
@@ -595,7 +595,12 @@ FR, re-tiers nothing, and leaves the v1.2+ resequence of PRD §4 D41 untouched. 
   to the branch, and the branch gains main's `exclusivity-macos` job, running the F6 cells there, and a
   `windows-check` compile job. The order is `v1.0.3-rc.1`, then `v1.0.3`, then the live `v1.0.2 → v1.0.3` `unblock update`
   smoke on all five triples. **That smoke passes before any v1.1.0 is published**, because `unblock update`
-  targets the latest stable release. The branch is never merged back into `main`.
+  targets the latest stable release. The branch is never merged back into `main`. `v1.0.3-rc.1` (release run
+  44522869682) was cancelled: its `aarch64-apple-darwin` job waited on the retired `macos-14` runner image
+  (`ub-ode`), fixed by pinning `macos-15` (PR #479). `v1.0.3-rc.2` (run 44531801963) and `v1.0.3` (run 44535938580)
+  published green from `release/v1.0.x` on 2026-11-19, each build log reading `--package=unblock-cli` on all five
+  triples, with attestations and SHA256 sums verified. **The `v1.0.2 → v1.0.3` live update smoke passed on every
+  leg on 2026-11-19** (run 44537692027, all five triples in CI, no `403` or `429`).
 
 ---
 
