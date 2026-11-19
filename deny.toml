@@ -20,6 +20,12 @@ all-features = false
 version = 2
 # Refuse a yanked crate in the lock (supply-chain hygiene); unmaintained/vulnerable use the defaults.
 yanked = "deny"
+# [ub-kpe, 2026-11-18] — dated ignores for the 1.0 maintenance line ONLY (Miguel, tracker comment 446).
+# main does not carry them (it upgraded rmcp in v1.1); the 1.0.x line ends when v1.1.0 ships.
+ignore = [
+  { id = "RUSTSEC-2026-0462", reason = "rmcp 1.7.0 streamable-HTTP client transport: not compiled (the workspace enables only server + transport-io; unblock-mcp's dev-dependency adds only client); patched only in rmcp >= 3.9, a major migration that ships with v1.1.0, not on the 1.0 line; ub-kpe, tracker comment 446" },
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained: informational, no CVE, no patched version; a direct dependency of unblock-model and other workspace crates and of rmcp 1.7.0; ub-kpe, tracker comment 446" },
+]
 
 # -------------------------------------------------------------------------------------------------
 # Licenses — allowlist DERIVED from the committed Cargo.lock. No GPL/LGPL/AGPL/MPL (copyleft).
