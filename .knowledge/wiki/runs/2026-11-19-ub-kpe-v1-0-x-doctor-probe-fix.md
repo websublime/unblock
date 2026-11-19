@@ -46,8 +46,30 @@ amendment and NFR-7 (`ub-w1j`), the D17 amendment (precise-builds); spine `run_d
 
 ## Outcome
 
-Implemented as twelve WIP commits `4c39217` … `5cde8f2` on the branch, plus this report and the
-tracker re-export (PB12); the Track step re-cuts them into atomic commits PB1–PB12. Content:
+Implemented as 17 WIP commits (`4c39217` … `af2b8f7`); the Track step re-cut them into the atomic
+Conventional commits below, whose final tree is identical to `af2b8f7` outside `.knowledge/` and
+`.unblock/`. Every code commit passes `cargo check --workspace --all-targets` on its own. Final list
+(PB1 … PB12 in plan v4 §6.2 order, then the two Track commits; this report is the last one, `docs(wiki)`):
+- `092241d` docs(d29): add clause F6 — doctor reads the database header before any connection opens (ub-kpe)
+- `0e47d19` docs(d5): a sync target is never the session database or a sidecar (ub-w1j)
+- `a53ac91` docs(ci-cd): specify branch CI, the macOS lock-retention and Windows compile jobs, the dated advisory ignores and releases from release/v1.0.x (ub-kpe, ub-w1j)
+- `f3e5a57` build(dist): build only the shipped package (precise-builds) — D17 amendment
+- `938102c` docs(d17): mark the precise-builds amendment as backported to the 1.0 line (ub-kpe)
+- `652c0b4` build(deps): bump quinn-udp to 0.5.16 and rustix to 1.1.6 (RUSTSEC-2026-0538, RUSTSEC-2026-0486) (ub-kpe)
+- `24d7314` build(deps): ignore RUSTSEC-2026-0462 and RUSTSEC-2026-0543 on the 1.0 line, dated (ub-kpe)
+- `2323171` feat(config): open storage over an already-resolved context (open_resolved_with_storage) (ub-kpe)
+- `31ab0d2` fix(sync,engine): refuse a sync target that is the session database or a sidecar (ub-w1j)
+- `ccfbedd` fix(health,engine,cli): read the database header before any connection opens (D29 F6, ub-kpe)
+- `84d7741` test(engine,cli): doctor keeps the SQLite SHARED lock on Linux and macOS (ub-kpe)
+- `c344577` test(engine,cli): a refused sync target keeps the session's locks (ub-w1j)
+- `e66fe94` ci: run CI on release/v1.0.x, the lock-retention cells on Linux and macOS and a Windows compile check (ub-kpe, ub-w1j)
+- `d1df98f` feat(xtask): release from the v1.0.x maintenance branch release/v1.0.x (ub-kpe)
+- `f88b979` docs(releasing): document maintenance releases from release/v1.0.x (ub-kpe)
+- `39a342c` chore(tracker): land the ub-kpe/ub-w1j run-report and re-export the record on the 1.0 line (ub-kpe, ub-w1j)
+- `487b9c3` chore(tracker): re-export the record for ub-kpe Track
+- `docs(wiki): run-report for the ub-kpe v1.0.x doctor-probe and sync-target fix` (this report)
+
+Content:
 - PB3: `git cherry-pick -x b595840` (`precise-builds = true`), so `dist` builds only `unblock-cli` and
   the storage `testkit` stays out of the shipped binary (comment 437).
 - PB5, PB5b: quinn-udp 0.5.16 and rustix 1.1.6 lock bumps; dated ignores for RUSTSEC-2026-0462 and
@@ -99,15 +121,32 @@ closes" claim to the session-safe entry points; `crates/unblock-health.md:57` is
 named lock steps in `ci.yml` run with `--show-output`; the macOS job also runs the sync `session_files`
 matrix and the health unit cells. Fixes: WIP `64aea90` and `b4523c6`.
 
-**Residuals.** `ub-k4j`: a `db_filename` or `--db` equal to the `.write.lock` name makes the write
-lock's open and close close a descriptor on the live database. The FIFO stat-then-open race in the
-header probe: a file replaced by a FIFO between the stat and the open would block the open; the NIT was
-declined because closing it needs `libc` (`O_NONBLOCK`). `ub-c15`: main carries the `ub-w1j` hazard,
-including the symlinked-database sidecar case (ub-c15 comment 454).
+**Verify iteration 2 (PR #477 at `374f6ea`, comment 457): PASS.** All three lenses passed and every
+iteration-1 must-fix is resolved. CI run 44487505250: all 20 jobs green, including `test (workspace)`,
+`exclusivity (macOS, D29 clause F6)`, `windows-check`, `audit`, `deny` and `bench-gate`; the release
+`plan` run 44487505254 succeeded. `SessionFiles::of_database` also covers the sidecars at the
+symlink-resolved database path, with the new cell w1j5 green on both OSes; each OS log prints 59
+`UB2VP-MEASURE` lines. Declined NITs: the FIFO stat-then-open window, `capture(&Path)` as locked, and the
+rc.1 build log as the `--package` proof.
 
-**Verify iteration 2:** pending (re-verifies the iteration-1 delta). **Track:** pending (atomic
-re-cut, tracker comments). Not run locally: the Windows target (CI `windows-check`) and `dist plan`
+**Leftovers closed before Track (comment 458).** The QA S1 mutation, on a throwaway copy that was then
+reverted (log `local://ub-kpe-w1j-mutation.log`): with the sync refusal and the keep-open path
+disabled and the refusal-code checks relaxed to log lines, each lock or database assertion fails on its
+own: w1j0 and w1j3 lose SHARED (observer `LOCKED`), w1j2 and w1j5 lose the `-shm` DMS lock, w1j1 and
+w1j4 report that the database was replaced. With only the symlink-resolution change removed, only w1j5
+fails. Code NIT N1: on a timeout the cli observer panic carries the observer's stdout and stderr
+(`af2b8f7`).
+
+**Track: done.** The atomic re-cut above, the tracker re-export and this report; the Linux red/green
+evidence is comment 456. Not run locally: the Windows target (CI `windows-check`) and `dist plan`
 (local dist 0.30.2 is older than the pinned 0.32.0; the rc.1 build log is the proof).
+
+**Residuals.** `ub-k4j` (a database named like the `.write.lock` file); the FIFO stat-then-open window
+in the header probe (recorded in the `open_verified` doc, needs `libc`); `ub-c15` (main carries the
+`ub-w1j` hazard, including the symlinked-database sidecar case).
+
+**Pending (outside this PR):** Miguel's merge of PR #477; PR-M1 on main; rc.1, the final v1.0.3 and
+the `v1.0.2 → v1.0.3` update smoke; PR-M2.
 
 ## Gotchas
 
@@ -138,8 +177,8 @@ re-cut, tracker comments). Not run locally: the Windows target (CI `windows-chec
   `plan` log cannot show the `--package` flag, so the rc.1 build log is the only proof that `dist`
   builds `unblock-cli` alone (comments 452, 455).
 - **A symlinked database moves its sidecars.** SQLite puts `-wal`/`-shm` next to the symlink's target,
-  so `SessionFiles` built from the path as given missed them; it now canonicalizes first (comment
-  455; ub-c15 comment 454).
+  so `SessionFiles` built from the path as given missed them; it now also covers the symlink-resolved
+  path (comments 455, 457; ub-c15 comment 454).
 
 ## Glossary
 
@@ -181,6 +220,9 @@ re-cut, tracker comments). Not run locally: the Windows target (CI `windows-chec
 | kpe6 / kpe6m | The sidecar cell (H2) and its `-shm` positive control | `crates/unblock-engine/tests/doctor_lock_retention.rs` |
 | kpe7 | A raced open of a session file keeps the descriptor open | same file |
 | kpe_p | Linux `/proc/locks` parser canned-lines cell | same file |
+| w1j5 | `ub-w1j` cell: a target that links to the sidecars at the symlink-resolved database path is refused and the `-shm` DMS lock is kept | `crates/unblock-engine/tests/sync_target_lock_retention.rs` |
+| S1 | Verify iteration 2 QA leftover: the local w1j mutation run | ub-kpe comments 457, 458 |
+| N1 | Verify iteration 2 code NIT: the cli observer timeout keeps its output | ub-kpe comments 457, 458 |
 | w1j0–w1j4 | `ub-w1j` lock cells: engine holder import, export and sidecar import (w1j0–w1j2), real MCP server import and default export (w1j3, w1j4) | `crates/unblock-engine/tests/sync_target_lock_retention.rs`; `crates/unblock-cli/tests/sync_target_lock_retention_cli.rs` |
 | PB1–PB12, PB1b, PB5b, PB7b, PB8b | PR-B's planned commits (PB12 = this report and the tracker re-export) | plan v4 §6.2 |
 | PR-B / PR-M1 / PR-M2 | The fix PR into `release/v1.0.x`; the main record PR before rc.1; the main release-record PR after the smoke | plan v4 §6.1 |
