@@ -9,7 +9,9 @@
 mod common;
 use common::session;
 
-use unblock_health::{FileAnomaly, HealthLevel, WAL_SUFFIX, classify_file_state, sidecar};
+use unblock_health::{
+    DbHeaderProbe, FileAnomaly, HealthLevel, WAL_SUFFIX, classify_file_state, sidecar,
+};
 
 /// Write the 16-byte `SQLite` magic header + padding — a valid-looking db file for the classifier.
 fn write_sqlite_db(path: &std::path::Path) {
@@ -28,7 +30,7 @@ fn conflict_marker_jsonl_replays_as_unsafe() {
     write_sqlite_db(&db);
     std::fs::write(&jsonl, "{\"id\":\"ub-1\"}\n<<<<<<< HEAD\n=======\n").unwrap();
 
-    let anomalies = classify_file_state(&db, Some(&jsonl));
+    let anomalies = classify_file_state(&db, DbHeaderProbe::read(&db).header(), Some(&jsonl));
     assert!(
         anomalies.contains(&FileAnomaly::JsonlConflictMarkers),
         "expected JsonlConflictMarkers, got {anomalies:?}"
@@ -45,7 +47,7 @@ fn non_sqlite_db_replays_as_recoverable() {
     let db = dir.path().join("unblock.db");
     std::fs::write(&db, b"this is not a sqlite database file at all\n").unwrap();
 
-    let anomalies = classify_file_state(&db, None);
+    let anomalies = classify_file_state(&db, DbHeaderProbe::read(&db).header(), None);
     assert!(
         anomalies.contains(&FileAnomaly::DatabaseNotSqlite),
         "expected DatabaseNotSqlite, got {anomalies:?}"
@@ -64,7 +66,7 @@ fn truncated_wal_replays_as_recoverable() {
     // A NON-EMPTY `-wal` smaller than its 32-byte header = a torn write (crash signature).
     std::fs::write(sidecar(&db, WAL_SUFFIX), [0_u8; 16]).unwrap();
 
-    let anomalies = classify_file_state(&db, None);
+    let anomalies = classify_file_state(&db, DbHeaderProbe::read(&db).header(), None);
     assert!(
         anomalies.contains(&FileAnomaly::TruncatedWal),
         "expected TruncatedWal, got {anomalies:?}"
@@ -82,7 +84,7 @@ fn database_missing_with_surviving_jsonl_replays_as_recoverable() {
     let jsonl = dir.path().join("issues.jsonl");
     std::fs::write(&jsonl, "{\"id\":\"ub-1\"}\n").unwrap();
 
-    let anomalies = classify_file_state(&db, Some(&jsonl));
+    let anomalies = classify_file_state(&db, DbHeaderProbe::read(&db).header(), Some(&jsonl));
     assert!(
         anomalies.contains(&FileAnomaly::DatabaseMissing),
         "expected DatabaseMissing, got {anomalies:?}"

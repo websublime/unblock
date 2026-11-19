@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
-use unblock_engine::{Session, SessionConfig};
+use unblock_engine::{DoctorPreflight, Session, SessionConfig};
 use unblock_model::{CountGroupBy, ListFilters};
 use unblock_storage::testkit::seed_corpus;
 use unblock_storage::{DEFAULT_WRITE_LOCK_TIMEOUT_MS, LibsqlStorage, Storage};
@@ -32,8 +32,9 @@ const READ_GUARD: Duration = Duration::from_secs(15);
 const PAGE: usize = 1_000;
 
 /// Build a `Session` over a fresh on-disk `.unblock/` with a file-backed store seeded with `n`
-/// issues (storage-direct — F-2), returning the session and its owning tempdir.
-async fn build_session(n: usize) -> (Session, tempfile::TempDir) {
+/// issues (storage-direct — F-2), returning the session, the D29 clause F6 doctor preflight (captured
+/// BEFORE the store opens) and its owning tempdir.
+async fn build_session(n: usize) -> (Session, DoctorPreflight, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let workspace_dir = tmp.path().to_path_buf();
     let unblock_dir = workspace_dir.join(".unblock");
@@ -43,6 +44,7 @@ async fn build_session(n: usize) -> (Session, tempfile::TempDir) {
     let db_path = unblock_dir.join(&config.db_filename);
     let jsonl_path = unblock_dir.join(&config.jsonl_filename);
 
+    let preflight = DoctorPreflight::capture(&db_path);
     let storage = LibsqlStorage::open_local(&db_path, DEFAULT_WRITE_LOCK_TIMEOUT_MS)
         .await
         .expect("open_local");
@@ -67,13 +69,15 @@ async fn build_session(n: usize) -> (Session, tempfile::TempDir) {
     let session = Session::open(ctx, SessionConfig::default())
         .await
         .expect("open session");
-    (session, tmp)
+    (session, preflight, tmp)
 }
 
 /// Seed `n` issues and assert the engine read paths stay bounded + integrity is clean at that scale.
 async fn run_scale(n: usize) {
     let t = Instant::now();
-    let (session, _tmp) = build_session(n).await;
+    let (session, preflight, _tmp) = build_session(n).await;
+    #[cfg(not(feature = "health"))]
+    let _preflight = preflight;
     eprintln!(
         "engine scale: built + seeded {n} issues in {:?}",
         t.elapsed()
@@ -161,7 +165,7 @@ async fn run_scale(n: usize) {
     );
 
     #[cfg(feature = "health")]
-    measure_d45_doctor_cost(&session, n).await;
+    measure_d45_doctor_cost(&session, preflight, n).await;
 
     drop(session);
 }
@@ -189,7 +193,7 @@ async fn run_scale(n: usize) {
 /// with a real edge graph pays more, but now in proportion to its EDGE count rather than its ROW
 /// count, which is exactly what the amendment bought.
 #[cfg(feature = "health")]
-async fn measure_d45_doctor_cost(session: &Session, n: usize) {
+async fn measure_d45_doctor_cost(session: &Session, preflight: DoctorPreflight, n: usize) {
     use unblock_model::DiagnosticKind;
 
     let t = Instant::now();
@@ -204,7 +208,7 @@ async fn measure_d45_doctor_cost(session: &Session, n: usize) {
     );
 
     let t = Instant::now();
-    let doctor = session.doctor().await.expect("doctor");
+    let doctor = session.doctor(preflight).await.expect("doctor");
     let doctor_elapsed = t.elapsed();
     eprintln!(
         "engine scale: D45 doctor() (integrity + file-state + the dangling fold) findings={} in \

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use proptest::prelude::*;
 use tempfile::TempDir;
-use unblock_health::{HealthLevel, WorkspacePaths, run_doctor};
+use unblock_health::{DbHeaderProbe, HealthLevel, WorkspacePaths, run_doctor};
 
 /// A healthy on-disk workspace + its [`WorkspacePaths`].
 fn healthy_paths() -> (TempDir, WorkspacePaths) {
@@ -31,7 +31,7 @@ fn healthy_paths() -> (TempDir, WorkspacePaths) {
 #[test]
 fn empty_rows_and_clean_files_is_healthy() {
     let (_dir, paths) = healthy_paths();
-    let report = run_doctor(&[], &paths).unwrap();
+    let report = run_doctor(&[], &paths, DbHeaderProbe::read(&paths.db)).unwrap();
     assert!(report.integrity_ok);
     assert!(report.file_state.is_empty());
     assert_eq!(report.summary.worst, HealthLevel::Healthy);
@@ -45,7 +45,7 @@ fn corrupt_rows_with_clean_files_is_recoverable() {
         "*** in database main ***".to_string(),
         "page 5 is never used".to_string(),
     ];
-    let report = run_doctor(&rows, &paths).unwrap();
+    let report = run_doctor(&rows, &paths, DbHeaderProbe::read(&paths.db)).unwrap();
     assert!(!report.integrity_ok);
     assert_eq!(report.integrity_rows, rows);
     assert_eq!(report.summary.worst, HealthLevel::Recoverable);
@@ -59,7 +59,7 @@ fn clean_rows_with_conflict_markers_is_unsafe() {
         "<<<<<<< HEAD\n{\"id\":\"a\"}\n=======\n{\"id\":\"b\"}\n>>>>>>> branch\n",
     )
     .unwrap();
-    let report = run_doctor(&[], &paths).unwrap();
+    let report = run_doctor(&[], &paths, DbHeaderProbe::read(&paths.db)).unwrap();
     assert!(report.integrity_ok);
     assert_eq!(report.summary.worst, HealthLevel::Unsafe);
 }
@@ -70,7 +70,7 @@ fn doctor_report_json_shape_is_a_subset_of_diagnostic_findings() {
     // summary — the fields the engine folds into DiagnosticFinding rows.
     let (_dir, paths) = healthy_paths();
     let rows = vec!["page 3 is never used".to_string()];
-    let report = run_doctor(&rows, &paths).unwrap();
+    let report = run_doctor(&rows, &paths, DbHeaderProbe::read(&paths.db)).unwrap();
     let value = serde_json::to_value(&report).unwrap();
     assert!(value.get("integrity_ok").is_some());
     assert!(value.get("integrity_rows").is_some());
@@ -95,11 +95,19 @@ fn integrity_ok_tracks_row_emptiness_exactly() {
     // healthy DB). With db missing + jsonl None, no file-state anomaly can fire, so integrity is the
     // sole signal.
     let paths = nonexistent_paths();
-    assert!(run_doctor(&[], &paths).unwrap().integrity_ok);
     assert!(
-        !run_doctor(&["boom".to_string()], &paths)
+        run_doctor(&[], &paths, DbHeaderProbe::read(&paths.db))
             .unwrap()
             .integrity_ok
+    );
+    assert!(
+        !run_doctor(
+            &["boom".to_string()],
+            &paths,
+            DbHeaderProbe::read(&paths.db)
+        )
+        .unwrap()
+        .integrity_ok
     );
 }
 

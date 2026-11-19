@@ -12,8 +12,9 @@ workspace = true
 [dependencies]
 # v1-lite is STORAGE-FREE (F3/D29): integrity rows arrive as `Vec<String>` (the engine calls
 # `Session::integrity_check()` and passes them in); health never holds a `Storage` handle nor names a
-# libsql type (NFR-15). `unblock-model` + `unblock-sync` are DECLARED-but-UNUSED v1.1 seams (the model
-# `DiagnosticReport` re-map + JSONL-drift-via-sync land in v1.1's `classify.rs`) kept now so the v1.1
+# libsql type (NFR-15). `unblock-sync` is USED from v1.0.3 for `SessionFiles` (D29 clause F6: the JSONL
+# conflict scan never closes a descriptor on a session file); `unblock-model` stays a DECLARED-but-UNUSED
+# v1.1 seam (the model `DiagnosticReport` re-map lands in v1.1's `classify.rs`) kept now so the v1.1
 # layout needs no rewrite — the layering matrix (`xtask/src/layering.rs`) whitelists both edges.
 unblock-model = { workspace = true }
 unblock-error = { workspace = true }

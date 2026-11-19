@@ -158,8 +158,12 @@ async fn doctor_cli_renders_session_doctor_verbatim() {
     let cli_report: Value = serde_json::from_slice(&out.stdout).expect("valid JSON doctor report");
 
     // Engine side: `Session::doctor()` over the SAME workspace (after the child exited — single-MCP-server).
-    let session = open_session(&ws).await;
-    let engine_report = session.doctor().await.expect("Session::doctor");
+    // D29 clause F6: the PRODUCTION open order (no local copy of it).
+    let (session, preflight, _fmt) =
+        unblock_cli::open_session_for_doctor(&CliOverrides::new().with_dir(ws.unblock_dir()))
+            .await
+            .expect("open_session_for_doctor");
+    let engine_report = session.doctor(preflight).await.expect("Session::doctor");
 
     // Kind parity + verbatim finding parity (label + detail, in order): the cli adds nothing.
     assert_eq!(

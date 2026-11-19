@@ -321,7 +321,12 @@ async fn doctor_folds_in_the_same_dangling_findings_after_the_file_state_rows() 
         .diagnostics(DiagnosticKind::Dangling, None)
         .await
         .expect("diagnostics");
-    let doctor = s.doctor().await.expect("doctor");
+    let doctor = s
+        .doctor(unblock_engine::DoctorPreflight::capture(
+            &common::default_db_path(),
+        ))
+        .await
+        .expect("doctor");
 
     assert_eq!(
         doctor.kind,
@@ -351,7 +356,12 @@ async fn doctor_folds_in_nothing_on_a_clean_workspace() {
     let (s, _store) = session_and_store().await;
     s.create(&issue("ub-1")).await.expect("create");
 
-    let doctor = s.doctor().await.expect("doctor");
+    let doctor = s
+        .doctor(unblock_engine::DoctorPreflight::capture(
+            &common::default_db_path(),
+        ))
+        .await
+        .expect("doctor");
     assert!(
         !doctor.findings.iter().any(|f| f.detail.contains(" -> ")),
         "no dangling row on a clean workspace: {:?}",

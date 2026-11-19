@@ -8,6 +8,7 @@
 //! own (never-set) shutdown flag (the cli installs the OS handler later via
 //! [`Session::with_shutdown_flag`], OQ-4).
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -18,6 +19,38 @@ use unblock_model::DiagnosticReport;
 use crate::error::{EngineError, Result};
 use crate::permit::{WRITE_PERMITS, acquire_write};
 use crate::session::{Session, SessionConfig};
+
+/// The facts [`Session::doctor`] must capture BEFORE any libsql connection to the workspace database
+/// opens in this process (PRD §4 D29 clause F6). Not `Clone`: one capture feeds one `doctor()`.
+///
+/// Opaque and engine-owned (an engine-local type like [`crate::ImportOptions`], no `JsonSchema`); its
+/// single field exists only with the `health` feature.
+#[derive(Debug)]
+pub struct DoctorPreflight {
+    #[cfg(feature = "health")]
+    db_header: unblock_health::DbHeaderProbe,
+}
+
+impl DoctorPreflight {
+    /// Read the pre-open facts of `db_path` (the resolved `ConfigPaths::db_path`): stat it and, for a
+    /// regular file only, read its 16-byte header. MUST run before ANY libsql connection to
+    /// `db_path` opens in this process: closing that read's descriptor would release every POSIX
+    /// lock the process holds on the file (D29 clause F6).
+    #[cfg(feature = "health")]
+    #[must_use]
+    pub fn capture(db_path: &Path) -> Self {
+        Self {
+            db_header: unblock_health::DbHeaderProbe::read(db_path),
+        }
+    }
+
+    /// Without the `health` feature `capture` touches no file.
+    #[cfg(not(feature = "health"))]
+    #[must_use]
+    pub fn capture(_db_path: &Path) -> Self {
+        Self {}
+    }
+}
 
 /// The outcome of an idempotent [`Session::migrate`] run (D27/AF-2, T3.1 — spine §4.1).
 ///
@@ -197,11 +230,19 @@ impl Session {
     /// `kind` stays `Info` — the fold moves no spine §1.10 byte; the `Dangling` KIND exists for the
     /// `diagnostics` tool arm, where the response must declare what it is.
     ///
-    /// **`unblock_health::run_doctor` is NOT given a third argument, its signature does NOT change,
-    /// and `unblock-health` gains NO `unblock-storage` dependency:** the list is DB-derived and D29
-    /// clause F3 makes `run_doctor` PURE, non-async and storage-free — that clause is PRESERVED, not
-    /// reversed. Composing in the engine fold is exactly how the engine already folds in the pure
-    /// file-state anomalies; passing DB rows into `run_doctor` would reverse a shipped clause.
+    /// **D45 adds no DB-derived argument to `unblock_health::run_doctor`, and `unblock-health` gains
+    /// NO `unblock-storage` dependency:** the list is DB-derived and D29 clause F3 makes `run_doctor`
+    /// PURE, non-async and storage-free — that clause is PRESERVED, not reversed. Composing in the
+    /// engine fold is exactly how the engine already folds in the pure file-state anomalies; passing
+    /// DB rows into `run_doctor` would reverse a shipped clause. `run_doctor` gains exactly one
+    /// argument, the pre-open header probe (D29 clause F6): a filesystem fact read before the session
+    /// opened, never DB rows; D45 still passes it no dangling rows, and F3 (pure, non-async,
+    /// storage-free) holds.
+    ///
+    /// **D29 clause F6 (v1.0.3).** `preflight` MUST have been captured
+    /// ([`DoctorPreflight::capture`]) before the session's first connection opened; `doctor()` hands
+    /// its header probe to `run_doctor`, so no health check ever closes a descriptor on the database
+    /// file or a sidecar inside this live session.
     ///
     /// **D45 — COST, MEASURED. AMENDED 2026-08-02: the fold is now ONE SQL query.** The fold is
     /// UNCONDITIONAL on every `doctor()` call, which is precisely why its cost mattered. As first
@@ -217,53 +258,58 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) until the T3.3 wiring lands; thereafter
-    ///   the transparent `Health { source: HealthError }` variant on a health failure, or the
-    ///   transparent storage source from the D45 dangling read.
-    #[cfg_attr(not(feature = "health"), allow(clippy::unused_async))] // no await without health
-    pub async fn doctor(&self) -> Result<DiagnosticReport> {
-        #[cfg(feature = "health")]
-        {
-            // Compose the ONE corruption signal reachable now (integrity_check rows) + the pure
-            // file-state classification into unblock-health's `DoctorReport`, then fold it onto a
-            // `DiagnosticReport` reusing `DiagnosticKind::Info` (F2 — no model change). `run_doctor`
-            // is storage-free and non-async (F3); `integrity_check()` (a read, no write permit) is the
-            // only await.
-            let integrity_rows = self.integrity_check().await?;
-            let report = unblock_health::run_doctor(&integrity_rows, &self.health_paths())?;
-            let mut diagnostic = doctor_report_to_diagnostic(&report);
-            // D46: the TWO ADVISORY schema-version rows — the stamp OBSERVED ON DISK and the version
-            // THIS BUILD EXPECTS — over the EXISTING pure `Storage::schema_version()` read (no new
-            // trait method, no write permit, no migration side-effect). Their PLACEMENT IS NORMATIVE
-            // (spine §4.1, ruled at the 2026-08-03 design gate): AFTER the file-state anomalies and
-            // BEFORE the D45 dangling block, which REMAINS the report's trailing suffix — the shipped
-            // cell `crates/unblock-engine/tests/dangling.rs` asserts that suffix and its docstring
-            // names the mutant it kills, so appending AFTER the block would redden a required CI step
-            // and relaxing the suffix to a subsequence would retire a live D45 proof for nothing.
-            // They COMPARE nothing (two integers), so the exit rule is byte-identical: `doctor` still
-            // exits non-zero only on detected corruption (FR-16). What they buy is that `doctor` can
-            // no longer print `healthy` without also printing the number that would contradict it.
-            let observed = self.storage.schema_version().await?;
-            diagnostic.findings.push(unblock_model::DiagnosticFinding {
-                label: "schema_version".to_string(),
-                detail: observed.to_string(),
-            });
-            diagnostic.findings.push(unblock_model::DiagnosticFinding {
-                label: "schema_expected".to_string(),
-                detail: unblock_storage::CURRENT_SCHEMA_VERSION.to_string(),
-            });
-            // D45: the dangling-dependency fold. The SAME engine-side fn the `dangling` diagnostics
-            // action calls — one home — appended AFTER the file-state anomalies, in the pinned order
-            // the read's own `ORDER BY` produces. No write permit: every half is a read (FR-10).
-            diagnostic
-                .findings
-                .extend(crate::diagnostics::dangling_findings(self.storage.as_ref()).await?);
-            Ok(diagnostic)
-        }
-        #[cfg(not(feature = "health"))]
-        {
-            Err(EngineError::FeatureNotWired { feature: "health" })
-        }
+    /// The transparent `Health { source: HealthError }` variant on a health failure (incl.
+    /// `DbHeaderProbePathMismatch` → `InternalError`), or the transparent storage source from the
+    /// integrity, schema-version or D45 dangling reads.
+    #[cfg(feature = "health")]
+    pub async fn doctor(&self, preflight: DoctorPreflight) -> Result<DiagnosticReport> {
+        // Compose the ONE corruption signal reachable now (integrity_check rows) + the pure
+        // file-state classification into unblock-health's `DoctorReport`, then fold it onto a
+        // `DiagnosticReport` reusing `DiagnosticKind::Info` (F2 — no model change). `run_doctor`
+        // is storage-free and non-async (F3); `integrity_check()` (a read, no write permit) is the
+        // only await.
+        let integrity_rows = self.integrity_check().await?;
+        let report =
+            unblock_health::run_doctor(&integrity_rows, &self.health_paths(), preflight.db_header)?;
+        let mut diagnostic = doctor_report_to_diagnostic(&report);
+        // D46: the TWO ADVISORY schema-version rows — the stamp OBSERVED ON DISK and the version
+        // THIS BUILD EXPECTS — over the EXISTING pure `Storage::schema_version()` read (no new
+        // trait method, no write permit, no migration side-effect). Their PLACEMENT IS NORMATIVE
+        // (spine §4.1, ruled at the 2026-08-03 design gate): AFTER the file-state anomalies and
+        // BEFORE the D45 dangling block, which REMAINS the report's trailing suffix — the shipped
+        // cell `crates/unblock-engine/tests/dangling.rs` asserts that suffix and its docstring
+        // names the mutant it kills, so appending AFTER the block would redden a required CI step
+        // and relaxing the suffix to a subsequence would retire a live D45 proof for nothing.
+        // They COMPARE nothing (two integers), so the exit rule is byte-identical: `doctor` still
+        // exits non-zero only on detected corruption (FR-16). What they buy is that `doctor` can
+        // no longer print `healthy` without also printing the number that would contradict it.
+        let observed = self.storage.schema_version().await?;
+        diagnostic.findings.push(unblock_model::DiagnosticFinding {
+            label: "schema_version".to_string(),
+            detail: observed.to_string(),
+        });
+        diagnostic.findings.push(unblock_model::DiagnosticFinding {
+            label: "schema_expected".to_string(),
+            detail: unblock_storage::CURRENT_SCHEMA_VERSION.to_string(),
+        });
+        // D45: the dangling-dependency fold. The SAME engine-side fn the `dangling` diagnostics
+        // action calls — one home — appended AFTER the file-state anomalies, in the pinned order
+        // the read's own `ORDER BY` produces. No write permit: every half is a read (FR-10).
+        diagnostic
+            .findings
+            .extend(crate::diagnostics::dangling_findings(self.storage.as_ref()).await?);
+        Ok(diagnostic)
+    }
+
+    /// Run health/integrity diagnostics (FR-15/FR-16) — not wired without the `health` feature.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::FeatureNotWired`] (`feature: "health"`) — reads nothing.
+    #[cfg(not(feature = "health"))]
+    #[allow(clippy::unused_async)] // async in the spine §4.1 signature
+    pub async fn doctor(&self, _preflight: DoctorPreflight) -> Result<DiagnosticReport> {
+        Err(EngineError::FeatureNotWired { feature: "health" })
     }
 
     /// Build the [`WorkspacePaths`](unblock_health::WorkspacePaths) bundle `doctor()` classifies over
@@ -363,7 +409,12 @@ mod tests {
             "*** in database main ***".to_string(),
             "page 5 is never used".to_string(),
         ];
-        let report = run_doctor(&rows, &paths).expect("run_doctor is infallible");
+        let report = run_doctor(
+            &rows,
+            &paths,
+            unblock_health::DbHeaderProbe::read(&paths.db),
+        )
+        .expect("a probe of the classified path is never refused");
         let diag = doctor_report_to_diagnostic(&report);
 
         assert_eq!(diag.kind, DiagnosticKind::Info);

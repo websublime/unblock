@@ -153,7 +153,9 @@ async fn doctor_wired_returns_healthy_info_report() {
 
     let session = session().await;
     let report = session
-        .doctor()
+        .doctor(unblock_engine::DoctorPreflight::capture(
+            &common::default_db_path(),
+        ))
         .await
         .expect("doctor is wired (health-lite)");
 
@@ -207,7 +209,10 @@ async fn doctor_folds_in_a_file_state_anomaly() {
     )
     .expect("write conflict jsonl");
 
-    let report = session.doctor().await.expect("doctor is wired");
+    // D29 clause F6: captured after the magic file is written; the in-memory storage holds no lock on
+    // that file.
+    let preflight = unblock_engine::DoctorPreflight::capture(&unblock_dir.join("unblock.db"));
+    let report = session.doctor(preflight).await.expect("doctor is wired");
     assert!(
         report
             .findings
@@ -284,6 +289,8 @@ async fn doctor_schema_findings_report_the_stamp_and_the_build_version_separatel
             .expect("re-stamp to the baseline");
     }
 
+    // D29 clause F6: the header is captured BEFORE the connection below opens.
+    let preflight = unblock_engine::DoctorPreflight::capture(&db_path);
     // 3. `Session::open` does NOT migrate (the config facade does, and this cell deliberately
     //    bypasses it), so the drifted stamp survives into `doctor()`.
     let storage = LibsqlStorage::open_local(&db_path, DEFAULT_WRITE_LOCK_TIMEOUT_MS)
@@ -298,7 +305,7 @@ async fn doctor_schema_findings_report_the_stamp_and_the_build_version_separatel
     )
     .await;
 
-    let report = session.doctor().await.expect("doctor is wired");
+    let report = session.doctor(preflight).await.expect("doctor is wired");
     let detail = |label: &str| {
         report
             .findings

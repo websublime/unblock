@@ -828,3 +828,27 @@ fn plant_dangling_edge(ws: &Workspace, source: &str, target: &str, dep_type: &st
         .expect("plant the dangling edge");
     });
 }
+
+/// D29 clause F6 (v1.0.3): `doctor` resolves the workspace ONCE (resolve → header capture → open over
+/// that same resolution), so an unknown `config.toml` key's warning prints exactly once on stderr. A
+/// second resolution (e.g. `open_with_storage_with_cli` after the capture) would print it twice.
+#[test]
+fn doctor_prints_each_config_warning_once() {
+    let ws = Workspace::init();
+    let config = std::fs::read_to_string(ws.config_path()).expect("read config.toml");
+    std::fs::write(ws.config_path(), format!("not_a_key = 1\n{config}"))
+        .expect("write config.toml");
+    let mut cmd = ws.cmd();
+    cmd.env_remove("RUST_LOG")
+        .arg("doctor")
+        .arg("--dir")
+        .arg(ws.unblock_dir());
+    let out = output_locked(&mut cmd, "run doctor");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(
+        stderr.matches("unknown config.toml key ignored").count(),
+        1,
+        "the config warning must print exactly once: {stderr}"
+    );
+}

@@ -3,13 +3,14 @@
 //! [`run_doctor`] is **storage-free**: the engine calls `Session::integrity_check()` and passes the
 //! resulting `Vec<String>` rows in; `run_doctor` runs [`classify_file_state`] over the workspace
 //! paths and folds both signals into a [`DoctorReport`]. It holds no `Storage` handle and never names
-//! a libsql type (NFR-15).
+//! a libsql type (NFR-15). From v1.0.3 (D29 clause F6) its third input is the PRE-OPEN database-header
+//! probe ([`DbHeaderProbe`]), a filesystem fact read before any connection exists — not DB rows.
 
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::error::HealthError;
-use crate::file_state::{FileAnomaly, classify_file_state};
+use crate::file_state::{DbHeaderProbe, FileAnomaly, classify_file_state_in};
 use crate::level::HealthLevel;
 use crate::paths::WorkspacePaths;
 
@@ -47,15 +48,22 @@ pub struct HealthSummary {
 /// problems. The composite `worst` is the `max` of the file-state severities and the
 /// integrity-derived severity (`Healthy` when clean, else `Recoverable`).
 ///
+/// `db_header` (v1.0.3, D29 clause F6) is the header probe taken BEFORE the session's first connection
+/// opened; it is consumed here, AFTER the open, together with the session's files (the db, its
+/// sidecars and the probed inode), so the JSONL conflict scan never closes a descriptor on one of
+/// them.
+///
 /// # Errors
-/// Infallible in v1-lite — always returns `Ok`. The `Result` matches the v1.1 contract (which does
-/// evidence-dir I/O and report serialization); keeping it now means the v1.1 body is a purely
-/// additive change with no signature churn at the engine boundary.
+/// The only error is a probe of another path: [`HealthError::DbHeaderProbePathMismatch`] when
+/// `db_header.path() != paths.db` (a misuse guard, unreachable from the cli). The `Result` also
+/// matches the v1.1 contract (evidence-dir I/O and report serialization).
 pub fn run_doctor(
     integrity_rows: &[String],
     paths: &WorkspacePaths,
+    db_header: DbHeaderProbe,
 ) -> Result<DoctorReport, HealthError> {
-    let file_state = classify_file_state(&paths.db, paths.jsonl.as_deref());
+    let (header, session) = db_header.header_and_session(&paths.db)?;
+    let file_state = classify_file_state_in(&paths.db, header, paths.jsonl.as_deref(), &session);
     let integrity_ok = integrity_rows.is_empty();
 
     let integrity_severity = if integrity_ok {
@@ -85,6 +93,8 @@ pub fn run_doctor(
 #[cfg(test)]
 mod tests {
     use super::{HealthSummary, run_doctor};
+    use crate::error::HealthError;
+    use crate::file_state::DbHeaderProbe;
     use crate::level::HealthLevel;
     use crate::paths::WorkspacePaths;
     use std::io::Write as _;
@@ -110,7 +120,7 @@ mod tests {
     #[test]
     fn clean_integrity_and_clean_files_is_healthy() {
         let (_dir, paths) = healthy_workspace();
-        let report = run_doctor(&[], &paths).unwrap();
+        let report = run_doctor(&[], &paths, DbHeaderProbe::read(&paths.db)).unwrap();
         assert!(report.integrity_ok);
         assert!(report.file_state.is_empty());
         assert_eq!(
@@ -127,7 +137,7 @@ mod tests {
     fn nonempty_integrity_rows_are_recoverable() {
         let (_dir, paths) = healthy_workspace();
         let rows = vec!["*** in database main *** page 3 is never used".to_string()];
-        let report = run_doctor(&rows, &paths).unwrap();
+        let report = run_doctor(&rows, &paths, DbHeaderProbe::read(&paths.db)).unwrap();
         assert!(!report.integrity_ok);
         assert_eq!(report.integrity_rows, rows);
         assert_eq!(report.summary.worst, HealthLevel::Recoverable);
@@ -142,7 +152,7 @@ mod tests {
             "<<<<<<< HEAD\n{\"id\":\"a\"}\n=======\n{\"id\":\"b\"}\n>>>>>>> branch\n",
         )
         .unwrap();
-        let report = run_doctor(&[], &paths).unwrap();
+        let report = run_doctor(&[], &paths, DbHeaderProbe::read(&paths.db)).unwrap();
         assert!(report.integrity_ok, "integrity is clean");
         assert_eq!(report.summary.worst, HealthLevel::Unsafe);
         assert_eq!(report.summary.anomaly_count, 1);
@@ -158,7 +168,7 @@ mod tests {
         )
         .unwrap();
         let rows = vec!["page 5 is never used".to_string()];
-        let report = run_doctor(&rows, &paths).unwrap();
+        let report = run_doctor(&rows, &paths, DbHeaderProbe::read(&paths.db)).unwrap();
         assert_eq!(report.summary.worst, HealthLevel::Unsafe);
     }
 
@@ -166,7 +176,7 @@ mod tests {
     fn missing_db_with_jsonl_is_recoverable() {
         let (_dir, paths) = healthy_workspace();
         std::fs::remove_file(&paths.db).unwrap();
-        let report = run_doctor(&[], &paths).unwrap();
+        let report = run_doctor(&[], &paths, DbHeaderProbe::read(&paths.db)).unwrap();
         assert_eq!(report.summary.worst, HealthLevel::Recoverable);
         assert!(
             report
@@ -180,7 +190,22 @@ mod tests {
     fn doctor_report_json_shape_is_pinned() {
         let (_dir, paths) = healthy_workspace();
         let rows = vec!["page 3 is never used".to_string()];
-        let report = run_doctor(&rows, &paths).unwrap();
+        let report = run_doctor(&rows, &paths, DbHeaderProbe::read(&paths.db)).unwrap();
         insta::assert_json_snapshot!("doctor_report_corrupt_integrity", report);
+    }
+
+    #[test]
+    fn a_probe_of_another_path_is_refused() {
+        let (dir, paths) = healthy_workspace();
+        let other = dir.path().join("other.db");
+        let err = run_doctor(&[], &paths, DbHeaderProbe::read(&other)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                HealthError::DbHeaderProbePathMismatch { probed, expected }
+                    if *probed == other && *expected == paths.db
+            ),
+            "{err:?}"
+        );
     }
 }
