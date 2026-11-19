@@ -304,3 +304,118 @@ async fn open_with_storage_with_cli_rejects_over_long_actor() {
         }
     }
 }
+
+/// D29 clause F6: `open_resolved_with_storage` over a `_with_cli` resolution is the same context as
+/// `open_with_storage_with_cli`. FRESH case: two identical fresh workspaces, one per facade (a second
+/// open of one workspace already sees CURRENT). RE-OPENED case: one migrated workspace, both facades
+/// in sequence. Explicit `with_dir` (never the `&Path` facade, which D39 tier 3 lets
+/// `CLAUDE_PROJECT_DIR` override).
+#[tokio::test]
+async fn open_resolved_with_storage_matches_open_with_storage() {
+    use unblock_config::open_resolved_with_storage;
+
+    async fn pair(
+        a: &std::path::Path,
+        b: &std::path::Path,
+    ) -> (
+        unblock_config::WorkspaceContext,
+        unblock_config::WorkspaceContext,
+    ) {
+        let one = open_with_storage_with_cli(&CliOverrides::new().with_dir(a))
+            .await
+            .expect("open_with_storage_with_cli");
+        let resolved = open_workspace_with_cli(&CliOverrides::new().with_dir(b))
+            .await
+            .expect("open_workspace_with_cli");
+        let two = open_resolved_with_storage(resolved)
+            .await
+            .expect("open_resolved_with_storage");
+        (one, two)
+    }
+
+    fn same_shape(
+        one: &unblock_config::WorkspaceContext,
+        two: &unblock_config::WorkspaceContext,
+        rebase: impl Fn(&std::path::Path) -> std::path::PathBuf,
+    ) {
+        assert_eq!(rebase(&one.paths.db_path), two.paths.db_path);
+        assert_eq!(rebase(&one.paths.unblock_dir), two.paths.unblock_dir);
+        assert_eq!(rebase(&one.paths.jsonl_path), two.paths.jsonl_path);
+        assert_eq!(rebase(&one.workspace_dir), two.workspace_dir);
+        assert_eq!(one.actor, two.actor);
+        assert_eq!(format!("{:?}", one.config), format!("{:?}", two.config));
+        assert_eq!(format!("{:?}", one.source), format!("{:?}", two.source));
+        assert_eq!(
+            one.schema_version_before_migrate,
+            two.schema_version_before_migrate
+        );
+    }
+
+    // FRESH: two identical fresh workspaces.
+    let wa = fresh_workspace();
+    let wb = fresh_workspace();
+    let ua = wa.path().join(".unblock");
+    let ub = wb.path().join(".unblock");
+    let (one, two) = pair(&ua, &ub).await;
+    let ra = dunce_root(wa.path());
+    let rb = dunce_root(wb.path());
+    same_shape(&one, &two, |p| {
+        rb.join(p.strip_prefix(&ra).expect("under workspace a"))
+    });
+    drop((one, two));
+
+    // RE-OPENED: one migrated workspace opened by both facades in sequence.
+    let w = fresh_workspace();
+    let u = w.path().join(".unblock");
+    drop(
+        open_with_storage_with_cli(&CliOverrides::new().with_dir(&u))
+            .await
+            .expect("migrate first"),
+    );
+    let one = open_with_storage_with_cli(&CliOverrides::new().with_dir(&u))
+        .await
+        .expect("reopen via _with_cli");
+    let schema_one = one.schema_version_before_migrate;
+    let db_one = one.paths.db_path.clone();
+    drop(one);
+    let two = open_resolved_with_storage(
+        open_workspace_with_cli(&CliOverrides::new().with_dir(&u))
+            .await
+            .expect("resolve"),
+    )
+    .await
+    .expect("reopen via resolved");
+    assert_eq!(schema_one, two.schema_version_before_migrate);
+    assert_eq!(db_one, two.paths.db_path);
+}
+
+/// Canonical form of a tempdir root (discovery canonicalizes the workspace dir; on macOS `/var` is a
+/// symlink to `/private/var`).
+fn dunce_root(p: &std::path::Path) -> std::path::PathBuf {
+    fs::canonicalize(p).expect("canonicalize tempdir")
+}
+
+/// D29 clause F6: the resolve-then-open facade surfaces an `open_local` failure exactly as
+/// `open_with_storage` does (`DbOpenFailed`, `DatabaseError`, exit 2).
+#[tokio::test]
+async fn open_resolved_with_storage_surfaces_db_open_failure_as_db_open_failed() {
+    use unblock_config::open_resolved_with_storage;
+
+    let workspace = fresh_workspace();
+    let unblock_dir = workspace.path().join(".unblock");
+    fs::create_dir(unblock_dir.join("unblock.db")).expect("place a directory at the db_path");
+    let resolved = open_workspace_with_cli(&CliOverrides::new().with_dir(&unblock_dir))
+        .await
+        .expect("resolve-only succeeds");
+    match open_resolved_with_storage(resolved).await {
+        Ok(_) => panic!("open_resolved_with_storage must fail when the db_path is a directory"),
+        Err(err) => {
+            assert!(
+                matches!(err, ConfigError::DbOpenFailed { .. }),
+                "expected DbOpenFailed, got: {err:?}"
+            );
+            assert_eq!(err.code(), ErrorCode::DatabaseError);
+            assert_eq!(err.code().exit_code(), 2);
+        }
+    }
+}
