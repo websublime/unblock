@@ -16,8 +16,9 @@ so you never have to hand-craft the version bump, commit, tag, and push.
 
 Before cutting a release:
 
-- You are on **`main`** with a **clean working tree** (`git status --porcelain` is empty).
-- Local `main` is **in sync with `origin/main`** (neither ahead nor behind).
+- You are on a **release branch** — **`main`**, or **`release/v1.0.x`** for a v1.0.x maintenance
+  release (§6) — with a **clean working tree** (`git status --porcelain` is empty).
+- The local release branch is **in sync with its `origin/` counterpart** (neither ahead nor behind).
 - The repo has a **`WS_GH_TOKEN`** secret with `contents: write` scope. The dist-generated
   `release.yml` uses `${{ secrets.WS_GH_TOKEN }}` for its publish steps because the org restricts the
   default `GITHUB_TOKEN`. A secret cannot be verified from the client, so `cargo xtask release` only
@@ -38,8 +39,9 @@ own.
 
 ### Flow
 
-1. **Pre-flight** (aborts before any mutation): HEAD is `main`; the working tree is clean;
-   `git fetch origin` then local `main` == `origin/main` (refuses if ahead or behind). It also prints
+1. **Pre-flight** (aborts before any mutation): HEAD is `main` or exactly `release/v1.0.x` (and on
+   `release/v1.0.x` the computed version must stay on the 1.0 line — step 4); the working tree is clean;
+   `git fetch origin` then the local release branch == its `origin/` counterpart (refuses if ahead or behind). It also prints
    the `WS_GH_TOKEN` reminder.
 2. **Prompt — release type:** pre-release (`rc`) or final.
 3. **Prompt — version bump:** none / patch / minor / major.
@@ -56,8 +58,9 @@ own.
    - commit, staging **only** the two release files (`git add -- Cargo.toml Cargo.lock`), so a stray
      path can never enter the public release commit;
    - create an annotated tag;
-   - a single `git push --atomic origin main <tag>` — both refs advance or **neither** does, so
-     `origin/main` can never be published without its tag, and a non-fast-forward race aborts both.
+   - a single `git push --atomic origin <branch> <tag>` (`<branch>` = the checked-out release
+     branch) — both refs advance or **neither** does, so the branch can never be published without its
+     tag, and a non-fast-forward race aborts both.
 
 ### Version compute
 
@@ -86,7 +89,7 @@ release never leaves you with a raw backend error and no way back:
 | At the annotated tag (the release commit exists, no tag) | commit exists | `git reset --hard HEAD~1` |
 | At the push gate, or during the atomic push (commit + tag exist, nothing pushed) | commit + tag exist | `git tag -d <tag>` then `git reset --hard HEAD~1` |
 
-Because the push is a single `--atomic` publish of both refs, there is no "main pushed but tag missing"
+Because the push is a single `--atomic` publish of both refs, there is no "branch pushed but tag missing"
 half-release to recover from.
 
 ### `--dry-run`
@@ -141,7 +144,8 @@ The self-update path (`unblock update`: axoupdater → dist installer → SHA256
 [`docs/plans/ci-cd-and-distribution.md`](docs/plans/ci-cd-and-distribution.md) §4.
 
 1. Make sure the new release `vN+1` is the repo's **latest stable** release. `unblock update` always
-   targets the latest stable release, so the smoke cannot target an older one.
+   targets the latest stable release, so the smoke cannot target an older one. On the 1.0.x line, run
+   v1.0.2 → v1.0.3 while v1.0.3 is the latest stable release, i.e. before any v1.1.0 is published (§6).
 2. Dispatch the smoke with `N` = the previous stable release:
 
    ```sh
@@ -190,10 +194,66 @@ binary reports `vN+1` and still runs `version`, `migrate` and `doctor` on a work
 not put attestation checks on the update path either: attestations remain publish-side provenance,
 checked out-of-band with `gh attestation verify` (NFR-17).
 
-## 6. Reference
+## 6. Maintenance releases from `release/v1.0.x`
+
+`main` carries unreleased v1.1 work, so a v1.0.x patch cannot be cut from it. Patch releases of the 1.0
+line are cut from the maintenance branch **`release/v1.0.x`**. The branch starts at tag `v1.0.2`
+(`842cdff`) and is never merged back into `main`. The first release cut from it is v1.0.3 (`ub-kpe`). Spec:
+[`docs/plans/ci-cd-and-distribution.md`](docs/plans/ci-cd-and-distribution.md) §3.3.
+
+**What differs from a release from `main`.** Only these three things:
+
+- The pre-flight accepts HEAD = `main` or exactly `release/v1.0.x` (any other name — including any other
+  `release/*` name — or a detached HEAD is refused). On `release/v1.0.x` it compares local
+  `release/v1.0.x` with `origin/release/v1.0.x`.
+- On `release/v1.0.x` the computed version must stay on the 1.0 line (1.0.z). Choose **patch** for a new
+  release, or **none** to finalise an rc. A **minor** or **major** bump is refused before the plan is shown.
+- The atomic push is `git push --atomic origin release/v1.0.x <tag>`.
+
+Everything else is the §2 flow: the typed double confirmation, the `release: <tag>` commit of
+`Cargo.toml` + `Cargo.lock`, the annotated tag, and `release.yml` building, attesting and publishing from
+the tag's own commit.
+
+**Procedure.**
+
+1. Every change reaches `release/v1.0.x` through a pull request whose base is that branch
+   (`gh pr create --base release/v1.0.x`; the pr-create run-report hook reads `--base`). CI runs on the
+   pull request and on every push to the branch. Its rules and required checks are the maintainer's to
+   configure on GitHub. The `release:` commit is pushed directly by the helper, as on `main`. 1.0.x work
+   branches off `release/v1.0.x` (not `main`); its run-report and `.unblock/issues.jsonl` re-export land in
+   that pull request and again in the record pull request on `main`.
+2. Work in a worktree on the branch itself, not detached and not the tracker checkout:
+   `git worktree add ../unblock-v1.0.x release/v1.0.x`, then `git -C ../unblock-v1.0.x pull --ff-only`.
+   The local branch must track `origin/release/v1.0.x` (`git branch --set-upstream-to=origin/release/v1.0.x
+   release/v1.0.x` once, if `git pull` reports "no tracking information").
+3. **Release candidate.** First confirm the push CI run on the branch head is green, including
+   `windows-check` (the only Windows compile before the release build) and `exclusivity-macos`. Then
+   `cargo xtask release --dry-run`, choose **pre-release** / **patch**, and confirm
+   the plan targets `v1.0.N-rc.1` and the push line names `release/v1.0.x`. Then run
+   `cargo xtask release` with the same answers and type the tag at both gates.
+4. **Check the candidate.** `release.yml` is green, and the GitHub Release is a pre-release with the §3
+   assets. Every `build-local-artifacts` job log reads `using cargo profile dist --package=unblock-cli`
+   and never `--workspace` (PRD D17 amendment, `precise-builds`). `gh attestation verify <archive>
+   --repo websublime/unblock` exits 0 for a downloaded archive, and the archive's SHA256 matches its
+   `.sha256`.
+5. **Final.** `cargo xtask release`, choose **final** / **none** (it finalises the rc core) and type
+   `v1.0.N` twice. Repeat step 4's checks, then confirm GitHub marks the release **latest**
+   (`gh release list --json tagName,isLatest --jq '.[] | select(.isLatest) | .tagName'`).
+6. Run §5's live update smoke with `from_tag` = the previous stable release of the 1.0 line and `to_tag`
+   = the new one.
+
+**The latest marker.** `release.yml` creates the GitHub Release without a `--latest` flag, and GitHub then
+marks a newly published stable release as latest. While no v1.1 or later stable release exists, that is
+what the 1.0 line needs: `unblock update` and the `releases/latest/download/` installers move to the new
+patch. Once a v1.1.0 is published, a later stable v1.0.x would take the latest marker from it. This
+section does not cover that case, and no v1.0.x release may be cut after a v1.1.0 until its handling is
+specified.
+
+## 7. Reference
 
 - Release / distribution pipeline (authoritative): [`docs/plans/ci-cd-and-distribution.md`](docs/plans/ci-cd-and-distribution.md) §3
 - Self-update via axoupdater: [`docs/plans/ci-cd-and-distribution.md`](docs/plans/ci-cd-and-distribution.md) §4
 - Live self-update smoke: [`.github/workflows/update-smoke.yml`](.github/workflows/update-smoke.yml), [`scripts/release/`](scripts/release/)
 - The helper source: [`xtask/src/release.rs`](xtask/src/release.rs)
 - dist config: [`dist-workspace.toml`](dist-workspace.toml)
+- Maintenance line: §6; spec ci-cd §3.3
