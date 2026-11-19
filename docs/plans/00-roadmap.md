@@ -1,6 +1,6 @@
 # unblock — Version Roadmap
 
-- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (released 2026-10-02; maintenance patch — the `v1.0.1` subsection of §1); v1.0.2 **PLANNED** (released 2026-10-29; maintenance patch — the `v1.0.2` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
+- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (released 2026-10-02; maintenance patch — the `v1.0.1` subsection of §1); v1.0.2 **PLANNED** (released 2026-10-29; maintenance patch — the `v1.0.2` subsection of §1); v1.0.3 **PLANNED** (maintenance patch cut from the `release/v1.0.x` branch — the `v1.0.3` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
 - **Date:** 2026-06-19 · **v1.2–v1.5 resequence:** 2026-07-07 (session ratified by Miguel; audience decision minted as PRD §4 D28) · **post-GA v1.2+ resequence:** 2026-07-20 (Miguel-ratified; the PROPOSED v1.2–v1.5 order is reworked and a v1.0.1 maintenance-patch slot added — full mapping in roadmap §8, rationale + guardrail in PRD §4 D41)
 - **Owner:** Miguel Ramos
 - **Sources of truth:** `docs/PRD.md` (PRD APPROVED v1.1, §5 tiers / §11 scope / §13 phasing), `docs/plans/01-design-spine.md` (cross-crate interfaces — wins on any cross-crate type/signature disagreement), `docs/plans/implementation-plan.md` (v1 walking skeleton). Hierarchy: PRD > spine > crate plans. Grounding for deferred/later items: original `temp/beads_rust-main` feature inventory; UX grounding for the v1.4 TUI: the TUI-adopted subset of the 14 mockups under `temp/tentative-v2/docs/designs/` (**reference-only**, same status as `temp/beads_rust-main`; the graph / burnup screens there inform the v2+ PRO web instead — roadmap §7).
@@ -535,6 +535,67 @@ work the tracker labels `v1-0-2`:
   same narrowing filters as `blocked` (a `status` filter intersects its `open` baseline; `include_deferred` and
   `include_closed` stay no-ops), storage orders it by the `cmp_ready` key and pages after the blocked-set filter,
   and `blocked` honours `offset`. No schema bytes change: no `CONTRACT_HASH` re-pin, `unblock.mcp.v1.10` stands.
+
+### v1.0.3 — maintenance patch  **[PLANNED]**
+
+A third maintenance patch on the 1.0 line, opened on 2026-11-18 under `ub-kpe` by an addendum to PRD §4 D29
+(clause F6) and, on the 1.0 line only, an amendment to D5 (`ub-w1j`). It is the first patch cut from the
+maintenance branch `release/v1.0.x`, created at tag `v1.0.2`, because `main` already carries v1.1 work. It adds no
+FR, re-tiers nothing, and leaves the v1.2+ resequence of PRD §4 D41 untouched. Its scope:
+- **`unblock doctor` dropped its own SQLite lock and let another process delete the live WAL** (`ub-kpe`, found
+  and measured under `ub-2vp`, PRD §4 **D29 clause F6**). From v1.0.0 to v1.0.2 the doctor's file-state check
+  opened `unblock.db` with `std::fs`, read 16 bytes and closed it while the same process held libsql connections
+  on the file. On Linux and macOS that close releases every POSIX lock the process holds on the file, so the
+  session lost its SHARED lock. Another process could then take the database EXCLUSIVE and, at its last close,
+  unlink the `-wal` and `-shm` the doctor still had open, and a commit made after that is lost with a clean
+  `integrity_check`. PRD §4 D58 clause (6)(a2) and criterion (n) carry the measurements: an exposure window of
+  1.82 ms ± 0.37 ms on an empty database and 0.698 s ± 0.27 ms at 250k issues on the shipped build. **F6 reads
+  the header before any connection opens.** The cli resolves the workspace without opening the database, reads
+  the header, then opens the database and passes the result to `Session::doctor`, `run_doctor` and
+  `classify_file_state`, which never close a descriptor on the database or a sidecar. A 0-byte database is not a
+  header mismatch. The JSONL conflict-marker scan never opens and closes the database, its `-wal`, `-shm` or
+  `-journal` sidecar or the probed inode; one opened in a race is kept open. A file swapped between the header
+  read and the open gets no header verdict. Every report `doctor` prints is byte-identical with exactly one
+  exception: a JSONL path that is the database or a sidecar is no longer scanned, so v1.0.2's false
+  `jsonl_conflict_markers` finding on the database's own bytes no longer appears. The exit rule is unchanged. **Crates:** `unblock-health` (L3: the
+  header-probe types, the new classifier and `run_doctor` input, and one internal-error variant),
+  `unblock-config` (L4: one resolve-then-open facade), `unblock-engine` (L5: `DoctorPreflight`, the new `doctor`
+  parameter and the regression cells) and `unblock-cli` (L7: the doctor command's order). `doctor` is not
+  MCP-exposed, so there is **no `contract_version` bump and no `CONTRACT_HASH` re-pin**: `unblock.mcp.v1.10`
+  stands. No `ErrorCode` is minted, and the 0–8 exit table is unchanged. The regression cells run on Linux and
+  macOS. A holder process runs the real `Session::doctor()` and blocks. The parent checks with `F_GETLK` (and
+  `/proc/locks` on Linux) that the holder still holds SHARED, and a fresh observer's `BEGIN EXCLUSIVE` gets BUSY.
+  A control cell without `doctor`, an in-tree positive control that runs the v1.0.2 probe and must see the lock
+  lost, and a run against unpatched v1.0.2, where the fix cell fails, make the proof non-vacuous. The cells are
+  `kpe0`–`kpe4`, `kpe1m`, `kpe5` (through the cli's own open function), `kpe6`, `kpe6m` (the `-shm` lock), `kpe7`
+  (the kept-open race branch) and the Linux parser cell `kpe_p`. `main` never carried this probe at v1.1 (D58 clause (4); cells fd4, fd7 and G3), so nothing merges
+  back.
+- **An MCP sync could open or overwrite the live database** (`ub-w1j`, found by the `ub-kpe` design review).
+  On v1.0.0–v1.0.2 a `sync import` / `import_bd` whose target was the session database or one of its sidecars
+  under an allowed JSONL name (the database itself named `issues.jsonl`, or a hard link) opened and closed a
+  descriptor on it inside the MCP session, dropping its SQLite locks the same way, and a `sync export` to such a
+  target — including the default export when the database is named `issues.jsonl` — renamed a JSONL over the live
+  database. v1.0.3 refuses such a target with `PATH_TRAVERSAL` before anything is written, including a target
+  that links to the sidecars at the symlink-resolved database path; it never closes a descriptor on it, and opens
+  none when the target already is such a file (an amendment on the 1.0 line's PRD §4 D5 row). The cells are
+  `w1j0`–`w1j5` (Linux and macOS). No tool schema or `contract_version` changes. The same hazard on `main` is
+  tracked for v1.1 (`ub-c15`); a database named like the write-lock file is a separate open residual (`ub-k4j`).
+- **Release builds compile only the shipped package** (the PRD §4 D17 amendment of `ub-2vp`, backported).
+  `precise-builds = true` under `[dist]` in `dist-workspace.toml`. v1.0.0–v1.0.2 built `--workspace` and so
+  compiled the storage testkit into the shipped `unblock`. The v1.0.3 release job's build log must read
+  `--package=unblock-cli` (tracker comment 437).
+- **Known advisories on the 1.0 lockfile** (`ub-kpe`, Miguel, tracker comment 446). quinn-udp 0.5.14 → 0.5.16
+  (RUSTSEC-2026-0538, reachable on the `unblock update` path) and rustix 1.1.4 → 1.1.6 (RUSTSEC-2026-0486) by
+  semver-compatible lock bumps. RUSTSEC-2026-0462 (rmcp 1.7's streamable-HTTP client, not compiled; fixed only by the
+  rmcp major in v1.1, PRD §4 D59) and RUSTSEC-2026-0543 (chrono, unmaintained, no fix) get dated ignores on
+  `release/v1.0.x` ONLY; main's `deny.toml` is unchanged.
+- **The release path** (ci-cd §3.3, RELEASING.md). Only on `release/v1.0.x`, `cargo xtask release` releases from
+  that branch (it accepts `main` or `release/v1.0.x`, and on the branch only a 1.0.z version), with the same
+  guards, `release: v1.0.3` commit, annotated tag and attestations; `main`'s helper is unchanged. CI runs on pushes
+  to the branch, and the branch gains main's `exclusivity-macos` job, running the F6 cells there, and a
+  `windows-check` compile job. The order is `v1.0.3-rc.1`, then `v1.0.3`, then the live `v1.0.2 → v1.0.3` `unblock update`
+  smoke on all five triples. **That smoke passes before any v1.1.0 is published**, because `unblock update`
+  targets the latest stable release. The branch is never merged back into `main`.
 
 ---
 
