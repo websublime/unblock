@@ -161,7 +161,7 @@ N4@crates/unblock-health/src/*.rs@<{7}|>{7}@NEGATIVE: unblock-health spells no c
 # Q292..Q293 (ub-2vp engine test commit) G3 and G3p in crates/unblock-engine/tests/health.rs.
 # Q294 (ub-2vp, after outcome M1, tracker comments 434 and 435) the pinned fd6 cell declaration.
 # Q295..Q303 (ub-2vp measured-note commit) the dated measured note in PRD clause (6)(a2) with its
-#      exposure window and the ruling (b) disposition (v1.0.3 under ub-kpe), criterion (n)'s measured
+#      exposure window and the ruling (b) disposition (fixed in v1.0.3, D29 clause F6), criterion (n)'s measured
 #      result and fd6's silent loss, the measured fd7 citations in PRD clause (6)(c) and spine §3.3
 #      step (c), the health plan's src/file_state.rs row, and T4.3's out-of-scope ub-2vp entry.
 # =================================================================================================
@@ -461,14 +461,14 @@ Q292@crates/unblock-engine/tests/health.rs@fn gather_preopen_refusal_opens_no_de
 Q293@crates/unblock-engine/tests/health.rs@fn proc_locks_parser_reads_canned_lines\(@fn proc_locks_parser_reads_canned_lines\(@criterion (n) (ub-2vp): G3p, the engine /proc/locks parser copy cell
 Q294@crates/unblock-storage/tests/exclusive_window.rs@fn fd6_commit_after_unlink_is_lost_while_another_process_holds_the_new_files\(@fn fd6_commit_after_unlink_is_lost_while_another_process_holds_the_new_files\(@criterion (n) as measured (ub-2vp, tracker comment 434): fd6, a commit after the unlink is lost while another process holds the new files — pinned after M1
 Q295@docs/PRD.md@^\| \*\*D58\*\* \|@tracked separately as .ub-2vp. and is not fixed here \*\*\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1 and on CI .macos-15-arm64. and .ubuntu-26\.04. \(run 44251096720\)@clause (6)(a2) as measured (ub-2vp, tracker comments 434 and 435): the dated measured note replaces the v1.0.x-candidate wording
-Q296@docs/PRD.md@^\| \*\*D58\*\* \|@1\.82 ms ± 0\.37 ms on an empty database and 0\.698 s ± 0\.27 ms at 250k issues.*v1\.0\.3 patch planned under ub-kpe \(ruling \(b\) = B1a, 2026-11-18\)@clause (6)(a2) as measured: the exposure window on the shipped build and the ruling (b) disposition
+Q296@docs/PRD.md@^\| \*\*D58\*\* \|@1\.82 ms ± 0\.37 ms on an empty database and 0\.698 s ± 0\.27 ms at 250k issues.*fixed in v1\.0\.3 \(released [0-9-]+; ub-kpe, ruling \(b\) = B1a, 2026-11-18; PRD §4 D29 clause F6\)@clause (6)(a2) as measured: the exposure window on the shipped build and the v1.0.3 fix
 Q297@docs/PRD.md@^\| \*\*D58\*\* \|@\[D58 amendment, ub-2vp, tracker comment 432\]: the descriptor-close lock-loss cells, MEASURED \[D58 amendment, measured 2026-11-18@criterion (n) as measured: the predicted direction became the measured result
 Q298@docs/PRD.md@^\| \*\*D58\*\* \|@is LOST while a second process holds the new files, with a clean .integrity_check. and no corruption signal \(fd6\)@criterion (n) as measured: fd6's silent loss is stated
 Q299@docs/PRD.md@^\| \*\*D58\*\* \|@fd7 measures this claim inside the real window \[D58 amendment, ub-2vp\] \(measured, ub-2vp, 2026-11-18\)@clause (6)(c) as measured (ub-2vp): fd7's citation is measured
 Q300@docs/plans/01-design-spine.md@^- \*\*Pre-open health primitives and the read-only open \(D58@fd7 measures this claim inside the real window \[D58 amendment, ub-2vp\] \(measured, ub-2vp, 2026-11-18\)@spine §3.3 step (c) as measured (ub-2vp): fd7's citation is measured
-Q301@docs/plans/crates/unblock-health.md@^\| .src/file_state\.rs. \|@the shipped v1 path is .ub-2vp. \*\*\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1.*v1\.0\.3 patch planned under ub-kpe \(ruling \(b\) = B1a, 2026-11-18\)@the health plan's file_state.rs row carries the measured ub-2vp note and its disposition
+Q301@docs/plans/crates/unblock-health.md@^\| .src/file_state\.rs. \|@the shipped v1 path is .ub-2vp. \*\*\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1.*fixed in v1\.0\.3 \(released [0-9-]+; ub-kpe, ruling \(b\) = B1a, 2026-11-18; PRD §4 D29 clause F6\)@the health plan's file_state.rs row carries the measured ub-2vp note and the v1.0.3 fix
 Q302@docs/plans/implementation-plan.md@^  copy repeats it\) \*\*\[D58 amendment, measured@\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1 and on CI .macos-15-arm64. and\$@T4.3's out-of-scope ub-2vp entry carries the dated measured note
-Q303@docs/plans/implementation-plan.md@v1\.0\.3 patch planned under ub-kpe@  and G3\); v1\.0\.3 patch planned under ub-kpe \(ruling \(b\) = B1a, 2026-11-18\)\]\*\*, .ub-p1h.@T4.3's out-of-scope ub-2vp entry carries the ruling (b) disposition
+Q303@docs/plans/implementation-plan.md@fixed in v1\.0\.3@  and G3\); fixed in v1\.0\.3 \(released [0-9-]+; ub-kpe, ruling \(b\) = B1a, 2026-11-18; PRD §4 D29 clause F6\)\]\*\*, .ub-p1h.@T4.3's out-of-scope ub-2vp entry carries the v1.0.3 fix
 "
 
 blocked=0
