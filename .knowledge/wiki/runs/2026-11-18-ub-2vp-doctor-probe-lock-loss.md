@@ -229,6 +229,10 @@ draft until then (comment 442).
 | Arch / Rust / Research #n | Gate-1 finding n of the architect, rust-engineer and research-analyst lenses | plan v2 header; comment 432 |
 | (a)–(d) | Miguel's Decide rulings: (a) reproduce on HEAD and on real v1.0.2; (b) v1.0.3 or not (deferred, then B1a); (c) permanent CI cell; (d) `nix` accepted | comments 430, 435 |
 | B1a / B1b | The ruling (b) options: ship v1.0.3 / let v1.1 carry it | plan v2 §8.2; comment 435 |
+| F3 | Existing D29 clause: `run_doctor` is pure, non-async and storage-free | PRD §4 D29 (`release/v1.0.x:docs/PRD.md:119`); ub-kpe |
+| F5 | Existing D29 clause: the v1 file-state severity map plus the `DatabaseNotSqlite` header check that the v1.0.x probe implements | PRD §4 D29 (`release/v1.0.x:docs/PRD.md:119`); ub-kpe |
+| F6 | New D29 clause (ub-kpe, v1.0.3): on the 1.0 line the database header is read before any connection opens | PRD §4 D29; ub-kpe comment 445 |
+| R1 | Ruling R1 (ub-kpe QA1): the branch pull request passes `run-report-gate` with a run-report copy on `release/v1.0.x` (own frontmatter, same body) plus a branch re-export of `.unblock/issues.jsonl`; main's copy is canonical | ub-kpe comments 446, 447 |
 | (a)–(d) of the M5 fix | One-buffer read, dedup, bounded re-read of both witnesses (N=10), extra evidence fields | comment 439 |
 | V1 / V1b / V2 | Verify rulings: V1 match the device in the parsers; V1b fall back to inode-only when no line carries the stat device (btrfs); V2 fix testkit reaching shipped binaries with `precise-builds` | comments 436, 438 |
 | H1–H4 | Hypotheses for the M5 flake: H1 merged range, H2 holder timing, H3 inode/device/pid selection defect (all refuted), H4 seq_file restart skips (root cause, confirmed by the stress run) | comment 439 |
