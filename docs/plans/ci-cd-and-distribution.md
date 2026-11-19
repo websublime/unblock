@@ -985,6 +985,15 @@ precise-builds = true
 > across the workspace, and `unblock-fuzz`'s normal-edge `unblock-storage/testkit` compiles the storage testkit
 > into the shipped `unblock`. The generated `release.yml` passes no `--workspace` of its own, because `dist
 > build` reads this config at run time, so the key needs no `release.yml` regeneration. The v1.0.3 release is verified by its build log reading `--package=unblock-cli`.
+> **[2026-11-19, `ub-ode`]** dist 0.32.0's default runner for `aarch64-apple-darwin` is `macos-14`, which GitHub
+> has retired: the v1.0.3-rc.1 `Release` run (44522869682) was cancelled with "The configuration
+> 'macos-14-arm64-us-default' is not supported", while the other four targets built. `[dist.github-custom-runners]`
+> in `dist-workspace.toml` pins `aarch64-apple-darwin = "macos-15"`, the image `exclusivity-macos` and
+> `update-smoke.yml` already pin. `x86_64-apple-darwin` keeps dist's default `macos-15-intel`. The runner image does
+> not set the shipped binary's minimum macOS; the Rust target's deployment target does (rustc 1.96 prints
+> `MACOSX_DEPLOYMENT_TARGET=11.0` for `aarch64-apple-darwin`). dist resolves runners in its `plan` job and feeds
+> them to the build matrix at run time, so the key needs no `release.yml` regeneration; the pull request's
+> `Release` `plan` job is the check.
 > `dist init` also adds a `[profile.dist]` (`inherits = "release"`, `lto = "thin"`) to the root `Cargo.toml`
 > — REQUIRED, since the generated `release.yml` builds with `--profile dist`. dist derives the release App
 > from the **package** name (`unblock-cli`), so archives/installers/the axoupdater install receipt are named
