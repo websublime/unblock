@@ -1101,7 +1101,8 @@ automates that step behind a strict, human-operated safety model.
   this read is unblock's (`ub-jh5`; until it landed, the variable did nothing). Without a token the query is
   unauthenticated and subject to GitHub's per-IP rate limit, which shared egress such as CI runners exhausts. The
   token is never rendered in the structured error or the diagnostics. It is NOT a release-workflow secret: the
-  dist-generated `release.yml` publishes with the standard `${{ secrets.GITHUB_TOKEN }}`.
+  dist-generated `release.yml` publishes with `${{ secrets.WS_GH_TOKEN }}` (§3.1's hand-applied edit (2), because
+  the org restricts the default `GITHUB_TOKEN`).
 - **When GitHub refuses the release query (D55, from v1.0.2).** A 403 or 429 is reported as `RATE_LIMITED`
   (exit 2, `retryable:true`) and a 401 as `CONFIG_ERROR` (exit 7, `retryable:false`). The HTTP status alone picks
   the code. Whether a token was sent only picks the message, which keeps the `self-update failed:` prefix, the
