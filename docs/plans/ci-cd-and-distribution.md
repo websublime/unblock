@@ -1072,6 +1072,15 @@ automates that step behind a strict, human-operated safety model.
   (`git fetch`, `cargo update`) show a TTY-gated spinner that degrades to a single static line off a TTY
   and reports the step OUTCOME (a FAILED step renders a failure line, never a success glyph); the spinner
   and all diagnostics go to **stderr**, structured output to **stdout** (NFR-14).
+- **Maintenance branch (v1.0.3, `ub-kpe`, PRD §4 D29 clause F6).** 1.0.x patches are cut from `release/v1.0.x`
+  (created at tag `v1.0.2`, never merged back). The helper ON THAT BRANCH accepts HEAD = `main` or exactly
+  `release/v1.0.x`, and on `release/v1.0.x` refuses any computed version off the 1.0 line (1.0.z only: no minor or
+  major bump); otherwise it keeps the same pre-flight, typed confirmation, `release: vX.Y.Z` commit, annotated tag and
+  atomic push (`git push --atomic origin release/v1.0.x <tag>`); the branch's ci-cd §3.3 and RELEASING.md are
+  authoritative for those cuts. 1.0.x work branches off `release/v1.0.x`; its run-report and `.unblock/issues.jsonl`
+  re-export land in that pull request and again on `main` (Miguel's ruling of 2026-11-18, tracker comment 445). **This
+  helper on `main` is unchanged and releases only from `main`.** Ordering rule: a 1.0.x final's live update smoke runs
+  before the next minor (v1.1.0) is published, because `unblock update` targets the latest stable release.
 
 ## 4. Self-update via `axoupdater` (FR-25, v1)
 

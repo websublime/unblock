@@ -561,6 +561,27 @@
   `scripts/checks/*.sh`, on EVERY commit of the branch. Both gates >=3 agents; Claude opens the PR, a human
   merges.)*
 
+- **T3.18 — `unblock doctor` reads the database header before any connection opens. Implements PRD §4 D29
+  clause F6 (v1.0.3, `ub-kpe`; code on the `release/v1.0.x` maintenance branch ONLY).** *(Next free top-level
+  M3 id after T3.17.)* The v1.0.0–v1.0.2 doctor's `std::fs` header read inside a live `Session` dropped the
+  process's SQLite SHARED lock (D58 clause (6)(a2), criterion (n); measured under `ub-2vp`). Scope:
+  `unblock-health` (`DbHeader`, `DbHeaderProbe`, `classify_file_state`/`run_doctor` take the header as data,
+  `HealthError::DbHeaderProbePathMismatch`), `unblock-config` (`open_resolved_with_storage`), `unblock-engine`
+  (`DoctorPreflight`, `Session::doctor(preflight)`), `unblock-cli` (resolve → capture → open → doctor); the
+  `precise-builds = true` backport (D17 amendment);
+  the quinn-udp 0.5.16 / rustix 1.1.6 lock bumps and the dated branch-only ignores of RUSTSEC-2026-0462/0543 (tracker
+  comment 446); the sync-target refusal of `ub-w1j` (`unblock-sync` `SessionFiles`, the D5 amendment on the 1.0 line);
+  the branch `ci.yml` push trigger and `exclusivity-macos` job; the branch-only `cargo xtask release` allowance
+  (ci-cd §3.3) and RELEASING.md. NOT in scope: any change to
+  main's code (main has no v1 probe, D58 clause (4)); merging the branch back. *(AC: every report `doctor`
+  produced at v1.0.2 is byte-identical except that a JSONL path that is the database or a `-wal`/`-shm`/`-journal`
+  sidecar is no longer scanned (v1.0.2's false `jsonl_conflict_markers`); a 0-byte database is not
+  `database_not_sqlite`; the cells `kpe0`–`kpe4`, `kpe1m`, `kpe5` (cli), `kpe6`, `kpe6m`, `kpe7`, `kpe_p` (Linux) and
+  ub-w1j's `w1j0`–`w1j5` pass on Linux and macOS, and `kpe1`, `kpe4`, `kpe5` and `w1j0`–`w1j4` FAIL against
+  unpatched v1.0.2; the branch `windows-check` job is green; the v1.0.3
+  release log reads `--package=unblock-cli`; `v1.0.3-rc.1` then `v1.0.3` are published from `release/v1.0.x`; the
+  live `v1.0.2 → v1.0.3` update smoke passes on all five triples before any v1.1.0 is published.)*
+
 ## 5a. v1.1 — locked slices  *(tasks land just-in-time as v1.1 slices are decided — `docs/PROCESS.md` §2)*
 
 - **T4.1 — FR-6 remainder: label rename and catalog, epic rollups, explicit close of eligible epics. Implements
