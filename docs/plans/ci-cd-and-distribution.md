@@ -23,18 +23,20 @@ unblock has two distinct GitHub Actions pipelines:
 
 ## 2. CI pipeline (quality gate) — from M0
 
-Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.96.0`, per D9):
+Runs on `pull_request` and on pushes to the default branch and to the `release/v1.0.x` maintenance branch (v1.0.3, D29 clause F6, `ub-kpe`; `RELEASING.md` §6). Jobs (all on stable `1.96.0`, per D9):
 
 | Job | Gate | NFR | Lands |
 |---|---|---|---|
 | `fmt` | `cargo fmt --check` | — | **M0 (T0.9)** |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` (pedantic; `forbid(unsafe_code)`) **plus** a targeted `cargo clippy -p unblock-storage --all-targets --features testkit -- -D warnings` step so the feature-gated testkit/contract/contention code is lint-clean | NFR-9, NFR-15 | **M0 (T0.9)** |
-| `test` | `cargo test --workspace` (the always-on unit + proptest + `behaviour.rs` set; the `testkit`-gated `contract.rs`/`contention_lab.rs` are `#![cfg(feature = "testkit")]` and compile to 0 tests here — they run in the dedicated `storage-testkit` job below) | NFR-16 | **M0 (T0.9)** |
+| `test` | `cargo test --workspace` (the always-on unit + proptest + `behaviour.rs` set; the `testkit`-gated `contract.rs`/`contention_lab.rs` are `#![cfg(feature = "testkit")]` and compile to 0 tests here — they run in the dedicated `storage-testkit` job below) v1.0.3 adds a named step `cargo test -p unblock-engine --locked --test doctor_lock_retention --test sync_target_lock_retention` + `cargo test -p unblock-cli --locked --test doctor_lock_retention_cli --test sync_target_lock_retention_cli`, each with `-- --show-output` so the `UB2VP-MEASURE` evidence lines of passing cells are printed (the D29 clause F6 and D5 sync-target lock-retention cells with the Linux `/proc/locks` witness). | NFR-16 | **M0 (T0.9)** |
 | `storage-testkit` | `cargo test -p unblock-storage --features testkit --test contract` (the NFR-16 **contract suite**) **and** `--test contention_lab` (the M0 **contention gate**, `contention_lab_no_hot_spin_and_correct`). **Requires ≥ 2 vCPU** — the contention test hard-fails on a single-vCPU runner (writers cannot genuinely contend). **Targeted features, not `--all-features`** (see §2.2). | NFR-3, NFR-16 | **M0 (T0.9)** |
+| `exclusivity-macos` | **[D29 clause F6 and the D5 sync-target amendment, v1.0.3, `ub-kpe`/`ub-w1j`]** — a REQUIRED status check on `release/v1.0.x` once Miguel adds it to that branch's ruleset immediately AFTER the v1.0.3 fix pull request merges, never before (an earlier flip leaves every other open pull request waiting on an "Expected" check, ci-cd §2.3.3). The same two `cargo test` lines as the `test` step (both crates, all four lock-retention targets), plus the unit halves `cargo test -p unblock-sync --locked --test session_files` and `cargo test -p unblock-health --locked --lib`, on the PINNED `runs-on: macos-15` image (the `update-smoke.yml` precedent) with `timeout-minutes: 30`, with the same SHA-pinned `actions/checkout`, `dtolnay/rust-toolchain` and `Swatinem/rust-cache` as every other cargo job (a cold libsql-ffi build on macOS bills at ten times the Linux rate). It proves on the second shipped OS family that `unblock doctor` keeps its SQLite SHARED lock (`F_GETLK`; a fresh `locking_mode=EXCLUSIVE` observer gets BUSY). On Linux the same cells run in `test` as a named step, which adds the `/proc/locks` witness. Ported from main's job of the same id. | NFR-5 | **v1.0.3** |
+| `windows-check` | **[v1.0.3, `ub-kpe`/`ub-w1j`]** `cargo check -p unblock-cli --locked --target x86_64-pc-windows-msvc` on `windows-latest` with the same SHA-pinned `actions/checkout`, `dtolnay/rust-toolchain` and `Swatinem/rust-cache` as every other cargo job. A compile check of the shipped package for the Windows dist target, which no other job builds: the non-unix arms of the D29 clause F6 probe and of the D5 sync-target check compile only there. Its green run on the tree being tagged is a precondition of a release cut from `release/v1.0.x` (`RELEASING.md` §6). | NFR-12 | **v1.0.3** |
 | `snapshots` | `cargo insta test --check` (stable output shapes) | NFR-14, NFR-16 | **M0 (T0.9)** |
 | `layering` | `cargo xtask check-layering` — acyclic-crate-graph assertion (no back-edges; storage = model+error only), reading the committed `Cargo.lock` so `cargo metadata --offline` resolves | NFR-15 | **M0 (T0.9)** |
-| `audit` | `cargo audit` (advisories; catches e.g. an archived retry crate) | NFR-3, NFR-9 | **M0 (T0.9)** |
-| `deny` | `cargo deny check` (licenses, bans, sources, advisories; **no-git ban**: no git crate in tree; transitive budget) | NFR-6, NFR-9, NFR-10 | **M0 (T0.9)** |
+| `audit` | `cargo audit` (advisories; catches e.g. an archived retry crate) **v1.0.3 (`ub-kpe`, tracker comment 446):** two dated 1.0-line-only ignores, RUSTSEC-2026-0462 (rmcp 1.7 streamable-HTTP client, not compiled; fixed only in the rmcp major that ships with v1.1.0) and RUSTSEC-2026-0543 (chrono, unmaintained, no fix) — `deny.toml` `[advisories] ignore` and the `audit` job's `ignore` input; quinn-udp and rustix are fixed by lock bumps, not ignored. | NFR-3, NFR-9 | **M0 (T0.9)** |
+| `deny` | `cargo deny check` (licenses, bans, sources, advisories; **no-git ban**: no git crate in tree; transitive budget) **v1.0.3 (`ub-kpe`, tracker comment 446):** two dated 1.0-line-only ignores, RUSTSEC-2026-0462 (rmcp 1.7 streamable-HTTP client, not compiled; fixed only in the rmcp major that ships with v1.1.0) and RUSTSEC-2026-0543 (chrono, unmaintained, no fix) — `deny.toml` `[advisories] ignore` and the `audit` job's `ignore` input; quinn-udp and rustix are fixed by lock bumps, not ignored. | NFR-6, NFR-9, NFR-10 | **M0 (T0.9)** |
 | `toolchain` | pin `rust-toolchain.toml` to **stable `1.96.0`** and build the workspace with `--locked`; a green stable build (no nightly-only features) is the gate. Fails if any crate requires nightly. | NFR-12 | **M0 (T0.9)** |
 | `doc-lint` | `cargo xtask doc-lint` — **doc-corpus consistency lint** (see §2.1) over the fixed 19-file corpus; catches the D-id / FR-tier / command-token / stamp / cross-ref / doc-count drift classes. Plus the knowledge-layer steps (§2.3): `cargo xtask knowledge-lint` (k1..k6, separate corpus; §2.3.2) + `scripts/knowledge/tests/run-report-gate-selftest.sh` (the gate predicate's executable proof; §2.3.3) + `scripts/knowledge/knowledge-layer-invariants.sh` (the layer's standing invariants; §2.3.6) + `scripts/knowledge/tests/knowledge-layer-invariants-selftest.sh` (that check's fixture proof; §2.3.6). | — | **M0 (T0.9)** |
 | `fuzz-smoke` | short `cargo fuzz` run on the 9 ingestion targets, on a **scheduled** (nightly) workflow (`fuzz-smoke.yml`): nightly-`2026-04-01` (= rustc 1.96.0-nightly) + libFuzzer for the targets, plus a separate stable-1.96 step that runs the two `#[ignore]`d contention-lab controls (forced-spin, WAL-negative) to keep the M0 gate proven non-vacuous. Both controls are **core-independent** so they are non-flaky on the 4-vCPU runner: the forced-spin control asserts a busy-retry + CPU-burn (`cpu/wall`) hot-spin signature (not just `R > ceiling`), and the WAL-negative control drives a fixed write total — see `unblock-storage.md` and `STATUS.md` T0.8. Failure routing at M0 = just go red; `workflow_dispatch` allows a manual re-run; no issue-opening. **Repair note (post-T1.3):** this leg was effectively **DOA since T0.7/T0.9** — the former `nightly-2024-10-31` pin (cargo 1.84) predated edition 2024 (>= 1.85) + let-chains (>= 1.88) so the `unblock-*` tree could not parse, and the nested `fuzz/Cargo.toml` lacked an empty `[workspace]` table so `cargo fuzz` could not build it directly. Re-pinned to `nightly-2026-04-01` (>= the stable 1.96 target) + the `[workspace]` table added; the unwatched cron is now repaired. | NFR-16 | **M0 (T0.9)** — nightly schedule |
@@ -1009,15 +1011,19 @@ automates that step behind a strict, human-operated safety model.
   minor / major) → compute the new version → show the plan → (real run) edit the version key + refresh
   `Cargo.lock` (`cargo update --workspace`) → commit (staging ONLY `Cargo.toml` + `Cargo.lock`, via
   `git add -- Cargo.toml Cargo.lock`, so a stray path can never enter the public commit) → annotated
-  tag → a single atomic `git push --atomic origin main <tag>` (both refs advance or NEITHER does, so
-  `origin/main` can never be published without its tag, and a non-fast-forward race aborts both). The
+  tag → a single atomic `git push --atomic origin <branch> <tag>`, where `<branch>` is the checked-out
+  release branch (both refs advance or NEITHER does, so `origin/<branch>` can never be published without its
+  tag, and a non-fast-forward race aborts both). The
   version is bumped in exactly ONE place — the `[workspace.package]` `version` key — never the
   `cargo-dist-version` pin or any dependency pin. New version = strip any existing pre-release, apply
   the core bump (none keeps the core), and for a pre-release attach `rc.N` where `N` is one past the
   highest existing `v<core>-rc.<N>` tag (else `1`).
-- **Pre-flight (aborts before any mutation).** HEAD is `main`; the working tree is clean; `git fetch
-  origin` then local `main` == `origin/main` (refuse if ahead/behind); the computed tag must not exist
-  locally NOR on the remote. It also prints a reminder that the publish step needs a `WS_GH_TOKEN`
+- **Pre-flight (aborts before any mutation).** HEAD is a release branch: `main`, or on the v1.0.x
+  maintenance line exactly `release/v1.0.x` (no other name, no pattern); the working tree is clean;
+  `git fetch origin` then the local release branch == its `origin/` counterpart (refuse if
+  ahead/behind); the computed tag must not exist locally NOR on the remote; and on `release/v1.0.x` the
+  computed version must stay on the 1.0 line (major 1, minor 0), so a minor or major bump is refused
+  before the plan is shown. It also prints a reminder that the publish step needs a `WS_GH_TOKEN`
   secret with `contents: write` (a secret cannot be verified from the client, so this is a warning).
 - **Typed confirmation.** A real run demands the operator TYPE THE TAG exactly — once before any change
   (mismatch = abort, nothing touched) and once more before the push (mismatch = stop with the local
@@ -1029,7 +1035,7 @@ automates that step behind a strict, human-operated safety model.
   `git checkout -- Cargo.toml Cargo.lock`; a failure at the tag (the commit already exists) →
   `git reset --hard HEAD~1`; a stop at the push gate OR a failure during the atomic push (commit + tag
   exist, nothing pushed) → `git tag -d <tag>` then `git reset --hard HEAD~1`. Because the push is a
-  single `--atomic` publish of both refs, there is no "main pushed but tag missing" half-release to
+  single `--atomic` publish of both refs, there is no "branch pushed but tag missing" half-release to
   recover from.
 - **`--dry-run`.** Runs every read-only step (pre-flight, prompts, compute, guard, plan) and stops
   before any edit/commit/tag/push, printing the `[dry-run] would: …` plan; the working tree is left
@@ -1039,6 +1045,13 @@ automates that step behind a strict, human-operated safety model.
   regenerates into `release.yml`. NFR-9 (committed `Cargo.lock`) is preserved: the bump commit includes
   the refreshed lock. Semver stability from GA is D35's rule — the helper is the mechanical way to cut
   the tags that honour it.
+- **The v1.0.x maintenance line (`ub-kpe`, Miguel's ruling of 2026-11-18, tracker comment 445).** `main`
+  carries unreleased v1.1 work, so v1.0.x patch releases are cut from the branch `release/v1.0.x`. The branch
+  starts at tag v1.0.2 (`842cdff`) and is never merged back into `main`. Only this branch's copy of the helper
+  accepts that name, which it pairs with the 1.0 line, so the branch cannot publish a 1.1.0 or 2.0.0 tag.
+  `main`'s copy still refuses every branch but `main`. The release commit, the annotated tag, the typed double
+  confirmation, the recovery hints and the dist attestations are unchanged, and `release.yml` builds and
+  publishes from the tag's own commit. The operator procedure is `RELEASING.md` §6.
 - **Presentation (T3.8).** The helper's terminal output is styled with `anstyle` (already in the lock
   via clap → no new dependency): a header banner, colored pass/fail pre-flight checks, a boxed release
   plan (with the version diff + tag emphasized), a loud red IRREVERSIBLE banner before the typed gate,
@@ -1072,7 +1085,7 @@ automates that step behind a strict, human-operated safety model.
   this read is unblock's (`ub-jh5`; until it landed, the variable did nothing). Without a token the query is
   unauthenticated and subject to GitHub's per-IP rate limit, which shared egress such as CI runners exhausts. The
   token is never rendered in the structured error or the diagnostics. It is NOT a release-workflow secret: the
-  dist-generated `release.yml` publishes with the standard `${{ secrets.GITHUB_TOKEN }}`.
+  dist-generated `release.yml` publishes with `${{ secrets.WS_GH_TOKEN }}` (§3.1's hand-applied edit (2), because the org restricts the default `GITHUB_TOKEN`).
 - **When GitHub refuses the release query (D55, from v1.0.2).** A 403 or 429 is reported as `RATE_LIMITED`
   (exit 2, `retryable:true`) and a 401 as `CONFIG_ERROR` (exit 7, `retryable:false`). The HTTP status alone picks
   the code. Whether a token was sent only picks the message, which keeps the `self-update failed:` prefix, the
