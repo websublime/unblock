@@ -38,6 +38,8 @@ impl Session {
                 // NFR-5/D30 forward seam: v1 never sets `allow_external`, so no reason is threaded.
                 external_reason: None,
             },
+            // D5 amendment (v1.0.3, `ub-w1j`): never the session database or a sidecar.
+            &unblock_sync::SessionFiles::of_database(&self.db_path),
         )
         .await?;
         Ok(report)
@@ -85,6 +87,8 @@ impl Session {
             &self.unblock_dir,
             self.actor(),
             &sync_opts,
+            // D5 amendment (v1.0.3, `ub-w1j`): never the session database or a sidecar.
+            &unblock_sync::SessionFiles::of_database(&self.db_path),
         )
         .await?;
         Ok(report)
@@ -119,8 +123,15 @@ impl Session {
         // D31: also hold the cross-process `.write.lock` across the whole bd import (declared after
         // the permit so it drops first — release-inner-first, spine §4.2).
         let _lock = self.storage.acquire_write_lock().await?;
-        let report =
-            unblock_sync::import_bd(&*self.storage, path, &self.unblock_dir, self.actor()).await?;
+        // D5 amendment (v1.0.3, `ub-w1j`): never the session database or a sidecar.
+        let report = unblock_sync::import_bd(
+            &*self.storage,
+            path,
+            &self.unblock_dir,
+            self.actor(),
+            &unblock_sync::SessionFiles::of_database(&self.db_path),
+        )
+        .await?;
         Ok(report)
     }
 

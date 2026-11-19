@@ -61,9 +61,15 @@ async fn bd_import_applies_every_repair_and_reports_counts() {
     let (_tmp, dir, staged) = stage_fixture();
     let storage = fresh_storage().await;
 
-    let report = import_bd(&storage, &staged, &dir, "importer")
-        .await
-        .expect("bd import");
+    let report = import_bd(
+        &storage,
+        &staged,
+        &dir,
+        "importer",
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("bd import");
 
     // ---- counts ----
     assert_eq!(report.imported, 5, "5 issues migrated");
@@ -153,15 +159,27 @@ async fn bd_import_rerun_is_idempotent() {
     let (_tmp, dir, staged) = stage_fixture();
     let storage = fresh_storage().await;
 
-    let first = import_bd(&storage, &staged, &dir, "importer")
-        .await
-        .expect("first import");
+    let first = import_bd(
+        &storage,
+        &staged,
+        &dir,
+        "importer",
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("first import");
     assert_eq!(first.imported, 5);
 
     // 2nd import into the SAME DB → every record already present → imported == 0 (all skipped).
-    let second = import_bd(&storage, &staged, &dir, "importer")
-        .await
-        .expect("re-import");
+    let second = import_bd(
+        &storage,
+        &staged,
+        &dir,
+        "importer",
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("re-import");
     assert_eq!(second.imported, 0, "rerun is idempotent");
     assert_eq!(second.skipped, 5, "all 5 records skipped on rerun");
     assert_eq!(count_rows(&storage).await, 5, "no duplicate rows");
@@ -188,9 +206,15 @@ async fn bd_import_mixed_counts_only_the_newly_applied_subset() {
     let (tmp, dir, staged) = stage_fixture();
     let storage = fresh_storage().await;
 
-    let first = import_bd(&storage, &staged, &dir, "importer")
-        .await
-        .expect("first import");
+    let first = import_bd(
+        &storage,
+        &staged,
+        &dir,
+        "importer",
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("first import");
     assert_eq!(first.imported, 5);
     assert_eq!(first.dependencies, 3, "bd-1 POST-dedup deps");
     assert_eq!(first.comments, 2, "bd-1 comments");
@@ -213,9 +237,15 @@ async fn bd_import_mixed_counts_only_the_newly_applied_subset() {
     let staged2 = dir.join("issues.jsonl");
     std::fs::write(&staged2, &second_file).expect("write second file");
 
-    let second = import_bd(&storage, &staged2, &dir, "importer")
-        .await
-        .expect("second import");
+    let second = import_bd(
+        &storage,
+        &staged2,
+        &dir,
+        "importer",
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("second import");
 
     assert_eq!(second.imported, 1, "only bd-6 is new");
     assert_eq!(second.skipped, 5, "the 5 fixture records already exist");
@@ -248,9 +278,15 @@ async fn bd_import_rejects_conflict_markers_zero_writes() {
 
     let storage = fresh_storage().await;
     let before = count_rows(&storage).await;
-    let err = import_bd(&storage, &path, &dir, "importer")
-        .await
-        .expect_err("conflict markers");
+    let err = import_bd(
+        &storage,
+        &path,
+        &dir,
+        "importer",
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect_err("conflict markers");
     assert!(
         matches!(err, unblock_sync::SyncError::ConflictMarkers { .. }),
         "{err:?}"
@@ -263,9 +299,15 @@ async fn bd_import_mapping_report_snapshot() {
     // insta (NFR-14): pin the mapping report (counts + dropped-field list) over the fixture.
     let (_tmp, dir, staged) = stage_fixture();
     let storage = fresh_storage().await;
-    let report = import_bd(&storage, &staged, &dir, "importer")
-        .await
-        .expect("bd import");
+    let report = import_bd(
+        &storage,
+        &staged,
+        &dir,
+        "importer",
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("bd import");
     insta::assert_json_snapshot!(report);
 }
 
@@ -276,9 +318,15 @@ async fn bd_import_refuses_parent_traversal_path() {
     let (_tmp, dir, _staged) = stage_fixture();
     let storage = fresh_storage().await;
     let escaping = Path::new("../../etc/issues.jsonl");
-    let err = import_bd(&storage, escaping, &dir, "importer")
-        .await
-        .expect_err("parent traversal refused");
+    let err = import_bd(
+        &storage,
+        escaping,
+        &dir,
+        "importer",
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect_err("parent traversal refused");
     assert!(
         matches!(err, unblock_sync::SyncError::PathTraversal { .. }),
         "{err:?}"
@@ -392,10 +440,16 @@ async fn bd_import_rejects_every_duplicate_key_line_with_zero_writes() {
     for (name, line) in cases.iter().take(cases.len() - 1) {
         let (_tmp, dir, path) = stage_lines(&[&control, line]);
         let storage = fresh_storage().await;
-        let err = import_bd(&storage, &path, &dir, "importer")
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("{name}: a duplicate-key line MUST be rejected"));
+        let err = import_bd(
+            &storage,
+            &path,
+            &dir,
+            "importer",
+            &unblock_sync::SessionFiles::none(),
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{name}: a duplicate-key line MUST be rejected"));
         match err {
             unblock_sync::SyncError::DuplicateKey {
                 line: line_no,
@@ -434,9 +488,15 @@ async fn bd_import_refuses_an_unscannable_line_fail_closed() {
     let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
     let (_tmp, dir, path) = stage_lines(&[&control, &deep]);
     let storage = fresh_storage().await;
-    let err = import_bd(&storage, &path, &dir, "importer")
-        .await
-        .expect_err("an unscannable line must be refused");
+    let err = import_bd(
+        &storage,
+        &path,
+        &dir,
+        "importer",
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect_err("an unscannable line must be refused");
     assert!(
         matches!(err, unblock_sync::SyncError::IndeterminateLine { line: 2 }),
         "{err:?}"
@@ -454,9 +514,15 @@ async fn bd_import_still_accepts_the_clean_control_line() {
     let (_, control) = cases.last().cloned().expect("clean control");
     let (_tmp, dir, path) = stage_lines(&[&control]);
     let storage = fresh_storage().await;
-    let report = import_bd(&storage, &path, &dir, "importer")
-        .await
-        .expect("the clean control must import");
+    let report = import_bd(
+        &storage,
+        &path,
+        &dir,
+        "importer",
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("the clean control must import");
     assert_eq!(report.imported, 1, "{report:?}");
     assert_eq!(
         report.dropped_fields,
@@ -502,6 +568,7 @@ async fn the_generic_jsonl_path_is_immune_to_duplicate_keys() {
         &dir,
         "importer",
         &unblock_sync::ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
     )
     .await
     .expect_err("import_jsonl must reject the duplicate-key line");

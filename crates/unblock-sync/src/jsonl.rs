@@ -10,7 +10,6 @@
 //! failures are collected; the orchestrator aborts with ZERO DB writes if any survive. Uses the same
 //! bounded per-line read + fd-metadata size guard as [`crate::conflict`] (MF-3).
 
-use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
@@ -110,7 +109,13 @@ pub fn normalize(issue: &mut Issue) {
 ///
 /// Ingestion-guard errors ([`SyncError::Io`]/[`SyncError::FileTooLarge`]/[`SyncError::LineTooLong`]).
 /// Per-record parse/validation failures are COLLECTED into the summary, not returned as `Err`.
-pub fn validate_records(path: &Path) -> Result<JsonlValidationSummary, SyncError> {
+///
+/// The open goes through `session` (D5 amendment, v1.0.3): the second import reader refuses a session
+/// file ([`crate::PathReject::SessionDatabase`]) and never closes a descriptor on it.
+pub(crate) fn validate_records(
+    path: &Path,
+    session: &crate::path::SessionFiles,
+) -> Result<JsonlValidationSummary, SyncError> {
     let meta = std::fs::metadata(path).map_err(|source| SyncError::Io {
         path: path.to_path_buf(),
         action: "reading metadata for",
@@ -129,11 +134,7 @@ pub fn validate_records(path: &Path) -> Result<JsonlValidationSummary, SyncError
             cap: MAX_IMPORT_FILE_BYTES,
         });
     }
-    let file = File::open(path).map_err(|source| SyncError::Io {
-        path: path.to_path_buf(),
-        action: "opening",
-        source,
-    })?;
+    let file = session.open_import_source(path)?;
     let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
 
     let mut summary = JsonlValidationSummary::default();
@@ -277,7 +278,7 @@ mod tests {
         let good = serialize_issue_line(&issue("ub-1")).unwrap();
         let dup = serialize_issue_line(&issue("ub-1")).unwrap();
         let path = write_lines(&dir, &[&good, "not json", "", &dup]);
-        let summary = validate_records(&path).unwrap();
+        let summary = validate_records(&path, &crate::path::SessionFiles::none()).unwrap();
         // 3 non-empty records (the blank line is skipped, not counted).
         assert_eq!(summary.record_count, 3);
         // One parse failure + one duplicate-id failure.
@@ -292,7 +293,7 @@ mod tests {
         let a = serialize_issue_line(&issue("ub-1")).unwrap();
         let b = serialize_issue_line(&issue("ub-2")).unwrap();
         let path = write_lines(&dir, &[&a, &b]);
-        let summary = validate_records(&path).unwrap();
+        let summary = validate_records(&path, &crate::path::SessionFiles::none()).unwrap();
         assert!(summary.failures.is_empty());
         assert_eq!(summary.records.len(), 2);
     }
