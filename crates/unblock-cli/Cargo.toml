@@ -84,6 +84,12 @@ unblock-mcp = { workspace = true, features = ["test-util"] }
 # private backend dep (bundled SQLite, no TLS/network — RK-4). Never linked into the shipped binary.
 libsql = { workspace = true }
 
+# Safe `fcntl(F_GETLK)` for the PRD §4 D29 clause F6 lock-retention cells (`ub-kpe`), which include the
+# engine's `tests/common/posix_locks.rs` by `#[path]`. Test-only and Unix-only; already locked through
+# `homedir`, so it adds no crate.
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true, features = ["fs"] }
+
 [features]
 default = ["self-update"]
 self-update = ["dep:axoupdater"]
