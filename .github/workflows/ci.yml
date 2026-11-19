@@ -1,6 +1,7 @@
 # unblock — CI quality gate (from M0). See docs/plans/ci-cd-and-distribution.md §2.
 #
-# Runs on every PR and on pushes to the default branch. All jobs build on stable 1.96.0 (D9/NFR-12).
+# Runs on every PR and on pushes to the default branch and to the v1.0.x maintenance branch release/v1.0.x
+# (ub-kpe). All jobs build on stable 1.96.0 (D9/NFR-12).
 # Every `uses:` is pinned to a 40-char commit SHA with a trailing `# vX.Y.Z` (NFR-9).
 #
 # This file defines the 10 always-on M0 jobs (ci-cd §2): fmt, clippy, test, storage-testkit,
@@ -29,6 +30,12 @@
 #     --no-default-features` (the AUTHORITATIVE confinement proof — axoupdater/reqwest/hyper unreachable
 #     when `self-update` is off) + the default-on leg + cargo-tree (dis)appearance controls.
 #
+# v1.0.3 (ub-kpe, ub-w1j) adds TWO jobs on the 1.0 line (ci-cd §2):
+#   - exclusivity-macos → D29 clause F6 + the D5 sync-target amendment: the lock-retention cells on
+#     macOS (F_GETLK); on Linux the same cells run as a named step of `test` (adds `/proc/locks`).
+#   - windows-check → a compile check of the shipped package for the Windows dist target, where the
+#     non-unix arms of the header probe and the session-file check compile.
+#
 # Feature policy (D15/NFR-10, ci-cd §2.2): the testkit clippy/test steps use TARGETED features
 # (`-p unblock-storage --features testkit`), never `--all-features` — at v1.3 `--all-features` selects
 # the storage `remote` feature and its HTTP client, which must stay off the M0 gate (D15/D51).
@@ -38,7 +45,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, release/v1.0.x]
 
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
@@ -94,6 +101,13 @@ jobs:
       # contention_lab.rs are `#![cfg(feature = "testkit")]` and compile to 0 tests here — they run
       # in the dedicated `storage-testkit` job.
       - run: cargo test --workspace --locked
+      # D29 clause F6 (ub-kpe) + the D5 sync-target amendment (ub-w1j): the lock-retention cells, run as
+      # a named step with `--show-output` so the Linux leg's evidence lines (F_GETLK + /proc/locks,
+      # `UB2VP-MEASURE leg=linux/test`) of PASSING cells are printed in the log.
+      - name: D29 clause F6 doctor lock retention, measured on Linux (F_GETLK + /proc/locks)
+        run: |
+          cargo test -p unblock-engine --locked --test doctor_lock_retention --test sync_target_lock_retention -- --show-output
+          cargo test -p unblock-cli --locked --test doctor_lock_retention_cli --test sync_target_lock_retention_cli -- --show-output
 
   storage-testkit:
     name: storage testkit (NFR-16 contract + NFR-3 contention)
@@ -125,6 +139,48 @@ jobs:
       # Specified in ci-cd-and-distribution.md §2.1 (the D45 sub-check), which is normative here.
       - name: D45 dangling diagnostics + doctor fold (engine testkit)
         run: cargo test -p unblock-engine --features testkit --locked --test dangling
+
+  exclusivity-macos:
+    name: exclusivity (macOS, D29 clause F6)
+    # D29 clause F6 (ub-kpe) runs the lock-retention cells on the second shipped OS family, where
+    # F_GETLK is the only lock witness (`--show-output` prints the `UB2VP-MEASURE` lines). Pinned
+    # image (the update-smoke.yml precedent). The cache matters because a cold libsql-ffi C build on a
+    # macOS runner bills at ten times the Linux rate.
+    runs-on: macos-15
+    # A wedged holder must not bill a macOS runner for the 6 h default (the bench-gate precedent).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: D29 clause F6 doctor lock retention, measured on macOS
+        run: |
+          cargo test -p unblock-engine --locked --test doctor_lock_retention --test sync_target_lock_retention -- --show-output
+          cargo test -p unblock-cli --locked --test doctor_lock_retention_cli --test sync_target_lock_retention_cli -- --show-output
+      # The same cells' unit halves on macOS: the D5 refusal matrix (hard links, inodes) and the health
+      # probe cells (FIFO, swap, probed inode, link sub-cases); on Linux they run in `test` above.
+      - name: D29 clause F6 + D5 unit cells on macOS (sync session-file matrix, health probe)
+        run: |
+          cargo test -p unblock-sync --locked --test session_files
+          cargo test -p unblock-health --locked --lib
+
+  windows-check:
+    name: windows-check (x86_64-pc-windows-msvc compile check)
+    # v1.0.3 (ub-kpe, ub-w1j): the non-unix cfg arms of DbHeaderProbe and SessionFiles compile only on the
+    # Windows dist target, which no other job builds; without this job the first Windows compile would be
+    # rc.1's release.yml. A compile check of the shipped package, not a test run.
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cargo check the shipped package for the Windows dist target
+        run: cargo check -p unblock-cli --locked --target x86_64-pc-windows-msvc
 
   stress-integrity:
     name: stress-integrity (NFR-5 long-lived/interleaved + NFR-4 fault-injection)
