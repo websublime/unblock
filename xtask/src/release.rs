@@ -15,8 +15,9 @@
 //!   once before the push); any mismatch aborts with no push.
 //! - `--dry-run` runs every read-only step (pre-flight, prompts, compute, guard, plan) and stops
 //!   before any mutation, leaving the working tree untouched.
-//! - Pre-flight refuses to proceed unless HEAD is `main`, the working tree is clean, and local `main`
-//!   equals `origin/main` (after `git fetch`).
+//! - Pre-flight refuses to proceed unless HEAD is `main` or the v1.0.x maintenance branch
+//!   `release/v1.0.x` (computed version on the 1.0 line), the working tree is clean, and the local
+//!   release branch equals its `origin/` counterpart (after `git fetch`).
 //! - The publish step needs a `WS_GH_TOKEN` repo secret with `contents: write` (the org restricts the
 //!   default token, see ci-cd §3.1). A secret cannot be verified from here, so the tool only warns.
 //!
@@ -56,6 +57,56 @@ enum Bump {
     Minor,
     /// `x.y.z` → `(x+1).0.0`.
     Major,
+}
+
+/// The maintenance branch this tree may also release from (`ub-kpe`, Miguel's ruling of 2026-11-18,
+/// tracker comment 445). Exact name.
+const MAINTENANCE_BRANCH: &str = "release/v1.0.x";
+/// The `(major, minor)` line every release cut from [`MAINTENANCE_BRANCH`] must stay on.
+const MAINTENANCE_LINE: (u64, u64) = (1, 0);
+
+/// A branch the release helper may cut a release from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReleaseBranch {
+    /// `main`.
+    Main,
+    /// [`MAINTENANCE_BRANCH`].
+    Maintenance,
+}
+
+impl ReleaseBranch {
+    /// The git branch name (`main` / `release/v1.0.x`).
+    fn name(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Maintenance => MAINTENANCE_BRANCH,
+        }
+    }
+}
+
+/// Map `git rev-parse --abbrev-ref HEAD` to a release branch; `None` for any other name (exact
+/// match: no pattern, no prefix, no case folding).
+fn release_branch_of(head: &str) -> Option<ReleaseBranch> {
+    match head {
+        "main" => Some(ReleaseBranch::Main),
+        MAINTENANCE_BRANCH => Some(ReleaseBranch::Maintenance),
+        _ => None,
+    }
+}
+
+/// On the maintenance branch, refuse a computed version off the 1.0 line (a minor/major bump).
+///
+/// # Errors
+/// Returns `Err` naming the branch, the line and the computed version; `main` always passes.
+fn guard_line(branch: ReleaseBranch, new: &Version) -> Result<(), String> {
+    if branch == ReleaseBranch::Maintenance && (new.major, new.minor) != MAINTENANCE_LINE {
+        let (major, minor) = MAINTENANCE_LINE;
+        return Err(format!(
+            "computed version {new} is not on the `{MAINTENANCE_BRANCH}` line ({major}.{minor}.z) — \
+             cut a patch or rc from this branch; aborting"
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -251,8 +302,8 @@ trait ReleaseEnv {
     fn working_tree_clean(&self) -> Result<bool, String>;
     /// `git fetch origin` (so the divergence check compares against the freshest remote).
     fn fetch_origin(&self) -> Result<(), String>;
-    /// Whether local `main` equals `origin/main` (neither ahead nor behind).
-    fn main_matches_origin(&self) -> Result<bool, String>;
+    /// Whether local `<branch>` equals `origin/<branch>` (neither ahead nor behind).
+    fn branch_matches_origin(&self, branch: &str) -> Result<bool, String>;
     /// Local tags (`git tag -l`).
     fn local_tags(&self) -> Result<Vec<String>, String>;
     /// Remote tags (`git ls-remote --tags origin`, deref lines dropped).
@@ -272,8 +323,8 @@ trait ReleaseEnv {
     fn git_annotated_tag(&self, tag: &str, message: &str) -> Result<(), String>;
     /// `git push --atomic origin <branch> <tag>` — both refs advance or NEITHER does. A
     /// non-fast-forward on `<branch>` (e.g. a race with another pusher since the pre-flight fetch)
-    /// aborts the WHOLE push, so `origin/main` can never advance without its tag. No `--force`, so the
-    /// branch is still rejected if it diverged.
+    /// aborts the WHOLE push, so `origin/<branch>` can never advance without its tag. No `--force`, so
+    /// the branch is still rejected if it diverged.
     fn git_push_atomic(&self, branch: &str, tag: &str) -> Result<(), String>;
 }
 
@@ -336,9 +387,15 @@ impl ReleaseEnv for GitEnv {
         )
     }
 
-    fn main_matches_origin(&self) -> Result<bool, String> {
-        let local = self.git_ok(&["rev-parse", "refs/heads/main"])?;
-        let remote = self.git_ok(&["rev-parse", "refs/remotes/origin/main"])?;
+    fn branch_matches_origin(&self, branch: &str) -> Result<bool, String> {
+        let local_ref = format!("refs/heads/{branch}");
+        let remote_ref = format!("refs/remotes/origin/{branch}");
+        let local = self
+            .git_ok(&["rev-parse", "--verify", &local_ref])
+            .map_err(|e| format!("{local_ref} not found: {e}"))?;
+        let remote = self
+            .git_ok(&["rev-parse", "--verify", &remote_ref])
+            .map_err(|e| format!("{remote_ref} not found (was the branch pushed?): {e}"))?;
         Ok(local == remote)
     }
 
@@ -416,7 +473,7 @@ impl ReleaseEnv for GitEnv {
 
     fn git_push_atomic(&self, branch: &str, tag: &str) -> Result<(), String> {
         // No `--force`: a non-fast-forward on `branch` is rejected, and `--atomic` then aborts the
-        // tag too — both-or-neither, so `origin/main` can never be published without its tag.
+        // tag too — both-or-neither, so `origin/<branch>` can never be published without its tag.
         self.git_ok(&["push", "--atomic", "origin", branch, tag])
             .map(|_| ())
     }
@@ -823,25 +880,37 @@ fn ask_line(input: &mut dyn BufRead, out: &mut dyn Write, prompt: &str) -> Resul
     Ok(line.trim().to_owned())
 }
 
-/// Pre-flight guard: HEAD is `main`, the working tree is clean, and local `main` == `origin/main`
-/// (after `git fetch`). Also prints the `WS_GH_TOKEN` reminder (a secret cannot be verified here).
+/// Pre-flight guard: HEAD is `main` or exactly [`MAINTENANCE_BRANCH`], the working tree is clean,
+/// and the local release branch == its `origin/` counterpart (after `git fetch`). Also prints the
+/// `WS_GH_TOKEN` reminder (a secret cannot be verified here). Returns the accepted branch.
 ///
 /// # Errors
 /// Returns `Err` on the FIRST failed check (branch / cleanliness / divergence), before any mutation.
-fn preflight(env: &dyn ReleaseEnv, out: &mut dyn Write, palette: Palette) -> Result<(), String> {
-    let branch = env.current_branch()?;
-    let on_main = branch == "main";
+fn preflight(
+    env: &dyn ReleaseEnv,
+    out: &mut dyn Write,
+    palette: Palette,
+) -> Result<ReleaseBranch, String> {
+    let head = env.current_branch()?;
+    let Some(branch) = release_branch_of(&head) else {
+        check_line(
+            out,
+            palette,
+            false,
+            &format!("on branch `main` or `{MAINTENANCE_BRANCH}` (HEAD is `{head}`)"),
+        )?;
+        return Err(format!(
+            "must be on `main` or `{MAINTENANCE_BRANCH}` to cut a release, but HEAD is `{head}` — \
+             checkout one of them first"
+        ));
+    };
+    let name = branch.name();
     check_line(
         out,
         palette,
-        on_main,
-        &format!("on branch `main` (HEAD is `{branch}`)"),
+        true,
+        &format!("on branch `{name}` (HEAD is `{head}`)"),
     )?;
-    if !on_main {
-        return Err(format!(
-            "must be on `main` to cut a release, but HEAD is `{branch}` — checkout main first"
-        ));
-    }
     let clean = env.working_tree_clean()?;
     check_line(out, palette, clean, "working tree is clean")?;
     if !clean {
@@ -851,18 +920,17 @@ fn preflight(env: &dyn ReleaseEnv, out: &mut dyn Write, palette: Palette) -> Res
         );
     }
     env.fetch_origin()?;
-    let synced = env.main_matches_origin()?;
+    let synced = env.branch_matches_origin(name)?;
     check_line(
         out,
         palette,
         synced,
-        "local `main` is in sync with `origin/main`",
+        &format!("local `{name}` is in sync with `origin/{name}`"),
     )?;
     if !synced {
-        return Err(
-            "local `main` has diverged from `origin/main` (behind or ahead) — sync before releasing"
-                .to_owned(),
-        );
+        return Err(format!(
+            "local `{name}` has diverged from `origin/{name}` (behind or ahead) — sync before releasing"
+        ));
     }
     writeln!(
         out,
@@ -871,7 +939,7 @@ fn preflight(env: &dyn ReleaseEnv, out: &mut dyn Write, palette: Palette) -> Res
         palette.paint(STYLE_WARN, "⚠")
     )
     .map_err(|e| io_err(&e))?;
-    Ok(())
+    Ok(branch)
 }
 
 /// Render the release plan (current → new, tag, pre-release?, files) as a boxed, aligned block with
@@ -938,8 +1006,9 @@ fn with_recovery<T>(step: Result<T, String>, recovery: &str) -> Result<T, String
 /// - stop at the push gate, or fail during the push (commit + tag exist, nothing pushed):
 ///   `git tag -d <tag>` then `git reset --hard HEAD~1`.
 ///
-/// The push is a single `git push --atomic origin main <tag>` (both refs advance or neither does), so
-/// `origin/main` can never be published without its tag, and a non-fast-forward race aborts both.
+/// The push is a single `git push --atomic origin <branch> <tag>`, where `<branch>` is the accepted
+/// release branch (both refs advance or neither does), so `origin/<branch>` can never be published
+/// without its tag, and a non-fast-forward race aborts both.
 ///
 /// # Errors
 /// Returns `Err` if either typed confirmation does not match `tag` (mismatch = abort), or if any
@@ -951,6 +1020,7 @@ fn execute(
     out: &mut dyn Write,
     new: &Version,
     tag: &str,
+    branch: ReleaseBranch,
     palette: Palette,
 ) -> Result<(), String> {
     irreversible_banner(out, palette, tag)?;
@@ -988,7 +1058,7 @@ fn execute(
         ));
     }
     with_recovery(
-        env.git_push_atomic("main", tag),
+        env.git_push_atomic(branch.name(), tag),
         &format!("undo with `git tag -d {tag}` then `git reset --hard HEAD~1`"),
     )?;
     writeln!(
@@ -1019,7 +1089,7 @@ fn orchestrate(
     palette: Palette,
 ) -> Result<(), String> {
     show_header(out, palette)?;
-    preflight(env, out, palette)?;
+    let branch = preflight(env, out, palette)?;
 
     let kind = ask(input, out, KIND_PROMPT, parse_kind)?;
     let bump = ask(input, out, BUMP_PROMPT, parse_bump)?;
@@ -1030,6 +1100,7 @@ fn orchestrate(
 
     let new = compute_target(&current, kind, bump, &tags)?;
     let tag = tag_of(&new);
+    guard_line(branch, &new)?;
 
     if tags.iter().any(|t| t == &tag) {
         return Err(format!(
@@ -1056,14 +1127,18 @@ fn orchestrate(
             "[dry-run] would: git tag -a {tag} -m \"release {tag}\""
         )
         .map_err(|e| io_err(&e))?;
-        writeln!(out, "[dry-run] would: git push --atomic origin main {tag}")
-            .map_err(|e| io_err(&e))?;
+        writeln!(
+            out,
+            "[dry-run] would: git push --atomic origin {} {tag}",
+            branch.name()
+        )
+        .map_err(|e| io_err(&e))?;
         writeln!(out, "[dry-run] no changes made; working tree untouched")
             .map_err(|e| io_err(&e))?;
         return Ok(());
     }
 
-    execute(env, input, out, &new, &tag, palette)
+    execute(env, input, out, &new, &tag, branch, palette)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1304,6 +1379,10 @@ libsql = { version = \"0.9.30\" }
         local: Vec<String>,
         remote: Vec<String>,
         fail_on: Option<String>,
+        /// `Some(err)` makes `branch_matches_origin` fail (a missing `origin/` ref).
+        matches_err: Option<String>,
+        /// Every branch passed to `branch_matches_origin`.
+        synced_with: RefCell<Vec<String>>,
         calls: RefCell<Vec<String>>,
     }
 
@@ -1317,8 +1396,25 @@ libsql = { version = \"0.9.30\" }
                 local: Vec::new(),
                 remote: Vec::new(),
                 fail_on: None,
+                matches_err: None,
+                synced_with: RefCell::new(Vec::new()),
                 calls: RefCell::new(Vec::new()),
             }
+        }
+        /// The v1.0.x maintenance branch at 1.0.2 (`ub-kpe`).
+        fn maintenance() -> Self {
+            FakeEnv {
+                branch: MAINTENANCE_BRANCH.to_owned(),
+                version: v("1.0.2"),
+                remote: ["v1.0.0", "v1.0.1", "v1.0.2", "v1.0.2-rc.1"]
+                    .iter()
+                    .map(|t| (*t).to_owned())
+                    .collect(),
+                ..FakeEnv::ok()
+            }
+        }
+        fn synced_with(&self) -> Vec<String> {
+            self.synced_with.borrow().clone()
         }
         fn record(&self, s: &str) {
             self.calls.borrow_mut().push(s.to_owned());
@@ -1347,7 +1443,11 @@ libsql = { version = \"0.9.30\" }
         fn fetch_origin(&self) -> Result<(), String> {
             Ok(())
         }
-        fn main_matches_origin(&self) -> Result<bool, String> {
+        fn branch_matches_origin(&self, branch: &str) -> Result<bool, String> {
+            self.synced_with.borrow_mut().push(branch.to_owned());
+            if let Some(err) = &self.matches_err {
+                return Err(err.clone());
+            }
             Ok(self.matches)
         }
         fn local_tags(&self) -> Result<Vec<String>, String> {
@@ -1439,12 +1539,179 @@ libsql = { version = \"0.9.30\" }
     }
 
     #[test]
-    fn preflight_rejects_non_main() {
+    fn preflight_rejects_a_non_release_branch() {
         let mut env = FakeEnv::ok();
         env.branch = "feature".to_owned();
         let (res, _out, calls) = drive(&env, "2\n3\n", true);
-        assert!(res.unwrap_err().contains("main"));
+        let err = res.unwrap_err();
+        assert!(err.contains("`main`"), "{err}");
+        assert!(err.contains("`release/v1.0.x`"), "{err}");
         assert!(calls.is_empty());
+    }
+
+    // ---- ub-kpe: the v1.0.x maintenance branch `release/v1.0.x` (branch-only allowance). ----
+
+    #[test]
+    fn release_branch_of_accepts_exactly_main_and_the_maintenance_branch() {
+        assert_eq!(release_branch_of("main"), Some(ReleaseBranch::Main));
+        assert_eq!(
+            release_branch_of("release/v1.0.x"),
+            Some(ReleaseBranch::Maintenance)
+        );
+        for refused in [
+            "release/v1.1.x",
+            "release/v1.0.X",
+            "release/v1.0.x-foo",
+            "release/v1.0.x/",
+            "releases/v1.0.x",
+            "v1.0.x",
+            "HEAD",
+            "",
+            " main",
+        ] {
+            assert_eq!(release_branch_of(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn guard_line_pins_the_maintenance_branch_to_1_0() {
+        for ok in ["1.0.3", "1.0.3-rc.1"] {
+            assert!(
+                guard_line(ReleaseBranch::Maintenance, &v(ok)).is_ok(),
+                "{ok}"
+            );
+        }
+        for refused in ["1.1.0", "1.1.0-rc.1", "2.0.0", "0.9.9"] {
+            let err = guard_line(ReleaseBranch::Maintenance, &v(refused)).unwrap_err();
+            assert!(err.contains("release/v1.0.x"), "{err}");
+            assert!(err.contains(refused), "{err}");
+        }
+        for any in [
+            "1.0.3",
+            "1.0.3-rc.1",
+            "1.1.0",
+            "1.1.0-rc.1",
+            "2.0.0",
+            "0.9.9",
+        ] {
+            assert!(guard_line(ReleaseBranch::Main, &v(any)).is_ok(), "{any}");
+        }
+    }
+
+    #[test]
+    fn maintenance_dry_run_pre_patch_targets_rc1_and_pushes_the_branch() {
+        let env = FakeEnv::maintenance();
+        let (res, out, calls) = drive(&env, "1\n2\n", true);
+        assert!(res.is_ok(), "{res:?}");
+        assert!(
+            out.contains("git push --atomic origin release/v1.0.x v1.0.3-rc.1"),
+            "{out}"
+        );
+        assert!(!out.contains("origin main"), "{out}");
+        assert!(calls.is_empty());
+        assert_eq!(env.synced_with(), ["release/v1.0.x"]);
+        insta::assert_snapshot!("plan_dry_run_maintenance_pre_patch", out);
+    }
+
+    #[test]
+    fn maintenance_real_run_pushes_the_current_branch() {
+        let env = FakeEnv::maintenance();
+        let (res, _out, calls) = drive(&env, "1\n2\nv1.0.3-rc.1\nv1.0.3-rc.1\n", false);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(
+            calls,
+            [
+                "set_version 1.0.3-rc.1",
+                "cargo_update",
+                "commit release: v1.0.3-rc.1",
+                "tag v1.0.3-rc.1",
+                "push_atomic release/v1.0.x v1.0.3-rc.1",
+            ]
+        );
+    }
+
+    #[test]
+    fn maintenance_final_none_finalises_the_rc() {
+        let mut env = FakeEnv::maintenance();
+        env.version = v("1.0.3-rc.1");
+        env.remote.push("v1.0.3-rc.1".to_owned());
+        let (res, out, calls) = drive(&env, "2\n1\n", true);
+        assert!(res.is_ok(), "{res:?}");
+        assert!(
+            out.contains("git push --atomic origin release/v1.0.x v1.0.3\n"),
+            "{out}"
+        );
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn maintenance_refuses_a_minor_bump_before_the_plan_or_any_mutation() {
+        let env = FakeEnv::maintenance();
+        let (res, out, calls) = drive(&env, "2\n3\nv1.1.0\nv1.1.0\n", false);
+        let err = res.unwrap_err();
+        assert!(err.contains("release/v1.0.x"), "{err}");
+        assert!(err.contains("1.1.0"), "{err}");
+        assert!(calls.is_empty());
+        assert!(!out.contains("Type the tag"), "{out}");
+        assert!(!out.contains("Release plan"), "{out}");
+    }
+
+    #[test]
+    fn maintenance_refuses_a_major_bump() {
+        let env = FakeEnv::maintenance();
+        let (res, out, calls) = drive(&env, "2\n4\nv2.0.0\nv2.0.0\n", false);
+        let err = res.unwrap_err();
+        assert!(err.contains("release/v1.0.x"), "{err}");
+        assert!(err.contains("2.0.0"), "{err}");
+        assert!(calls.is_empty());
+        assert!(!out.contains("Type the tag"), "{out}");
+    }
+
+    #[test]
+    fn maintenance_refuses_divergence_from_its_own_origin_branch() {
+        let mut env = FakeEnv::maintenance();
+        env.matches = false;
+        let (res, _out, calls) = drive(&env, "1\n2\n", true);
+        let err = res.unwrap_err();
+        assert!(err.contains("diverged"), "{err}");
+        assert!(err.contains("`origin/release/v1.0.x`"), "{err}");
+        assert!(calls.is_empty());
+        assert_eq!(env.synced_with(), ["release/v1.0.x"]);
+    }
+
+    #[test]
+    fn maintenance_fails_closed_without_an_origin_branch() {
+        let mut env = FakeEnv::maintenance();
+        env.matches_err = Some(
+            "refs/remotes/origin/release/v1.0.x not found (was the branch pushed?)".to_owned(),
+        );
+        let (res, _out, calls) = drive(&env, "1\n2\n", true);
+        let err = res.unwrap_err();
+        assert!(err.contains("refs/remotes/origin/release/v1.0.x"), "{err}");
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn main_path_compares_and_pushes_main() {
+        let env = FakeEnv::ok();
+        let (res, _out, calls) = drive(&env, "2\n3\nv1.1.0\nv1.1.0\n", false);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(env.synced_with(), ["main"]);
+        assert_eq!(
+            calls.last().map(String::as_str),
+            Some("push_atomic main v1.1.0")
+        );
+    }
+
+    #[test]
+    fn maintenance_refuses_another_release_branch() {
+        let mut env = FakeEnv::maintenance();
+        env.branch = "release/v1.1.x".to_owned();
+        env.version = v("1.1.0");
+        let (res, _out, calls) = drive(&env, "1\n2\n", true);
+        assert!(res.is_err());
+        assert!(calls.is_empty());
+        assert!(env.synced_with().is_empty());
     }
 
     #[test]
