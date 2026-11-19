@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use crate::error::SyncError;
+use crate::path::SessionFiles;
 
 /// The `<<<<<<<` conflict-start marker prefix (7 chars).
 pub const CONFLICT_START: &str = "<<<<<<<";
@@ -70,8 +71,10 @@ pub fn detect_conflict_marker(line: &str) -> Option<(ConflictMarkerType, Option<
 
 /// Open + size-guard the import file, returning a bounded `BufReader`.
 ///
-/// Rejects a non-regular file / a file over [`MAX_IMPORT_FILE_BYTES`] BEFORE any read.
-fn open_guarded(path: &Path) -> Result<BufReader<File>, SyncError> {
+/// Rejects a non-regular file / a file over [`MAX_IMPORT_FILE_BYTES`] BEFORE any read. The open goes
+/// through [`SessionFiles::open_import_source`] (D5 amendment): a session file is refused and its
+/// descriptor never closed.
+fn open_guarded(path: &Path, session: &SessionFiles) -> Result<BufReader<File>, SyncError> {
     let meta = std::fs::metadata(path).map_err(|source| SyncError::Io {
         path: path.to_path_buf(),
         action: "reading metadata for",
@@ -90,11 +93,7 @@ fn open_guarded(path: &Path) -> Result<BufReader<File>, SyncError> {
             cap: MAX_IMPORT_FILE_BYTES,
         });
     }
-    let file = File::open(path).map_err(|source| SyncError::Io {
-        path: path.to_path_buf(),
-        action: "opening",
-        source,
-    })?;
+    let file = session.open_import_source(path)?;
     Ok(BufReader::with_capacity(2 * 1024 * 1024, file))
 }
 
@@ -134,11 +133,24 @@ pub(crate) fn read_line_bounded<R: BufRead>(
 
 /// Scan `path` for conflict markers (streaming, bounded), returning them in line order.
 ///
+/// NOT session-safe on its own (no session set): never call it on a path that may be the live
+/// database or a sidecar inside a session; the orchestrators use the session-aware form (D5
+/// amendment, v1.0.3).
+///
 /// # Errors
 ///
 /// [`SyncError::Io`]/[`SyncError::FileTooLarge`]/[`SyncError::LineTooLong`] on the ingestion guards.
 pub fn scan_conflict_markers(path: &Path) -> Result<Vec<ConflictMarker>, SyncError> {
-    let mut reader = open_guarded(path)?;
+    scan_conflict_markers_in(path, &SessionFiles::none())
+}
+
+/// [`scan_conflict_markers`] opening through `session` (D5 amendment): a target that is one of the
+/// session's files is refused with [`crate::PathReject::SessionDatabase`].
+pub(crate) fn scan_conflict_markers_in(
+    path: &Path,
+    session: &SessionFiles,
+) -> Result<Vec<ConflictMarker>, SyncError> {
+    let mut reader = open_guarded(path, session)?;
     let mut markers = Vec::new();
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut line_no = 0usize;
@@ -164,11 +176,23 @@ pub fn scan_conflict_markers(path: &Path) -> Result<Vec<ConflictMarker>, SyncErr
 
 /// Ensure `path` has NO conflict markers; on any marker, error with a ≤5-marker preview.
 ///
+/// NOT session-safe on its own (no session set): never call it on a path that may be the live
+/// database or a sidecar inside a session; the orchestrators use the session-aware form (D5
+/// amendment, v1.0.3).
+///
 /// # Errors
 ///
 /// [`SyncError::ConflictMarkers`] (exit-6) with a short preview, or an ingestion-guard error.
 pub fn ensure_no_conflict_markers(path: &Path) -> Result<(), SyncError> {
-    let markers = scan_conflict_markers(path)?;
+    ensure_no_conflict_markers_in(path, &SessionFiles::none())
+}
+
+/// [`ensure_no_conflict_markers`] opening through `session` (D5 amendment).
+pub(crate) fn ensure_no_conflict_markers_in(
+    path: &Path,
+    session: &SessionFiles,
+) -> Result<(), SyncError> {
+    let markers = scan_conflict_markers_in(path, session)?;
     if markers.is_empty() {
         return Ok(());
     }

@@ -378,4 +378,16 @@ mod tests {
             ErrorCode::IssueNotFound
         );
     }
+
+    #[test]
+    fn session_database_maps_to_path_traversal_exit_6() {
+        // v1.0.3 (`ub-w1j`, D5 amendment): the new reject reason reuses the existing code.
+        let err = SyncError::PathTraversal {
+            path: PathBuf::from("/x/.unblock/issues.jsonl"),
+            reason: crate::path::PathReject::SessionDatabase,
+        };
+        assert_eq!(err.code(), ErrorCode::PathTraversal);
+        assert_eq!(err.code().exit_code(), 6);
+        assert!(err.to_string().contains("SessionDatabase"));
+    }
 }

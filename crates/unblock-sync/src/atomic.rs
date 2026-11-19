@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::error::SyncError;
-use crate::path::{validate_sync_path, validate_temp_path};
+use crate::path::{SessionFiles, validate_sync_path, validate_temp_path};
 
 /// The max number of temp-name collision-retry attempts before giving up.
 const MAX_TEMP_ATTEMPTS: u32 = 64;
@@ -210,13 +210,15 @@ pub async fn write_atomic(
     final_path: &Path,
     confine_root: &Path,
     lines: impl Iterator<Item = String> + Send + 'static,
+    session: SessionFiles,
 ) -> Result<usize, SyncError> {
-    // MF-11(b): own the paths BEFORE the 'static spawn_blocking closure (&Path is not 'static).
+    // MF-11(b): own the paths BEFORE the 'static spawn_blocking closure (&Path is not 'static); the
+    // owned `session` moves in beside them (D5 amendment).
     let final_path = final_path.to_path_buf();
     let confine_root = confine_root.to_path_buf();
 
     let handle = tokio::task::spawn_blocking(move || {
-        write_atomic_blocking(&final_path, &confine_root, lines)
+        write_atomic_blocking(&final_path, &confine_root, lines, &session)
     });
     handle.await.map_err(|join_err| SyncError::Io {
         path: PathBuf::new(),
@@ -265,6 +267,7 @@ fn write_atomic_blocking(
     final_path: &Path,
     confine_root: &Path,
     lines: impl Iterator<Item = String>,
+    session: &SessionFiles,
 ) -> Result<usize, SyncError> {
     let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| SyncError::Io {
@@ -329,6 +332,9 @@ fn write_atomic_blocking(
     // (8) re-validate both paths just before the rename.
     validate_temp_path(&temp_path, final_path, confine_root)?;
     validate_sync_path(final_path, confine_root, false)?;
+    // D5 amendment (v1.0.3, `ub-w1j`): a link to the session database or a sidecar created during the
+    // write is caught here; the target stays untouched and `TempFileGuard` removes the temp.
+    session.reject(final_path)?;
 
     // (9) atomic rename over the target.
     #[cfg(feature = "fault-injection")]
@@ -367,6 +373,7 @@ fn write_atomic_blocking(
 mod tests {
     use super::{temp_path_for, write_atomic};
     use crate::error::SyncError;
+    use crate::path::SessionFiles;
 
     /// Count the `*.tmp` files directly under `dir` (orphan-temp detector).
     fn tmp_count(dir: &std::path::Path) -> usize {
@@ -397,9 +404,14 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("occupant"), b"x").unwrap();
 
-        let err = write_atomic(&target, dir.path(), std::iter::once("line".to_string()))
-            .await
-            .expect_err("a directory target must fail the write");
+        let err = write_atomic(
+            &target,
+            dir.path(),
+            std::iter::once("line".to_string()),
+            SessionFiles::none(),
+        )
+        .await
+        .expect_err("a directory target must fail the write");
         assert!(
             matches!(err, SyncError::PathTraversal { .. }),
             "expected a post-temp PathTraversal(NonRegularFile), got {err:?}"
@@ -421,7 +433,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("issues.jsonl");
         let lines = vec!["a".to_string(), "b".to_string()];
-        let n = write_atomic(&target, dir.path(), lines.into_iter())
+        let n = write_atomic(&target, dir.path(), lines.into_iter(), SessionFiles::none())
             .await
             .expect("write");
         assert_eq!(n, 2);
@@ -453,7 +465,7 @@ mod tests {
     async fn rejects_disallowed_target_extension() {
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("issues.txt");
-        let err = write_atomic(&bad, dir.path(), std::iter::empty())
+        let err = write_atomic(&bad, dir.path(), std::iter::empty(), SessionFiles::none())
             .await
             .expect_err("bad ext");
         assert!(matches!(err, SyncError::PathTraversal { .. }));
@@ -465,9 +477,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("issues.jsonl");
         std::fs::write(&target, "old\n").unwrap();
-        write_atomic(&target, dir.path(), std::iter::once("new".to_string()))
-            .await
-            .expect("overwrite");
+        write_atomic(
+            &target,
+            dir.path(),
+            std::iter::once("new".to_string()),
+            SessionFiles::none(),
+        )
+        .await
+        .expect("overwrite");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new\n");
     }
 }

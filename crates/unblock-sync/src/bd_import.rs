@@ -169,6 +169,7 @@ pub async fn import_bd(
     path: &Path,
     confine_root: &Path,
     actor: &str,
+    session: &crate::path::SessionFiles,
 ) -> Result<ImportReport, SyncError> {
     // NFR-5/D30 (forward seam): the reason-gate reject lives in every orchestrator. `import_bd` is
     // Skip-only with `allow_external` structurally `false`, so this is a defensive no-op (the reject
@@ -178,7 +179,7 @@ pub async fn import_bd(
     //         Skip-only production semantics → allow_external is always false). `preflight_source`
     //         STAYS pure; NFR-13's conflict-marker guard is emitted HERE (operation "import_bd") at
     //         the true guard site right before propagating (D30).
-    let canonical = match preflight_source(path, confine_root, false) {
+    let canonical = match preflight_source(path, confine_root, false, session) {
         Ok(canonical) => canonical,
         Err(err) => {
             if let SyncError::ConflictMarkers {
@@ -198,7 +199,7 @@ pub async fn import_bd(
     };
 
     // (3) per-line map + repair + validate + in-file dup-id — ALL failures abort with ZERO writes.
-    let mapped = read_bd_records(&canonical)?;
+    let mapped = read_bd_records(&canonical, session)?;
 
     // (4)/(5) funnel into the shared atomic classify+create tail (Skip-only, always applies). The
     //         tail returns the relation/comment sums over the APPLIED subset (the records it actually
@@ -249,7 +250,10 @@ struct MappedBd {
 /// after preflight, `jsonl.rs`). Both readers open their OWN guarded fd rather than threading a reader
 /// out of `preflight_source`, keeping the FR-8 preflight a pure boolean gate (no fd handed across the
 /// classify boundary). Deduping would break that symmetry for a micro-opt, so it is left as-is.
-fn read_bd_records(path: &Path) -> Result<MappedBd, SyncError> {
+fn read_bd_records(
+    path: &Path,
+    session: &crate::path::SessionFiles,
+) -> Result<MappedBd, SyncError> {
     use std::io::BufReader;
 
     let meta = std::fs::metadata(path).map_err(|source| SyncError::Io {
@@ -270,11 +274,7 @@ fn read_bd_records(path: &Path) -> Result<MappedBd, SyncError> {
             cap: crate::conflict::MAX_IMPORT_FILE_BYTES,
         });
     }
-    let file = std::fs::File::open(path).map_err(|source| SyncError::Io {
-        path: path.to_path_buf(),
-        action: "opening",
-        source,
-    })?;
+    let file = session.open_import_source(path)?;
     let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
 
     let mut records: Vec<Issue> = Vec::new();
