@@ -2523,11 +2523,12 @@ impl Session {
         -> Result<CloseOutcome, EngineError>; // returns newly-unblocked issues (FR-11)
 
     // --- interchange (FR-7/FR-8/FR-26), delegates to unblock-sync ---
-    // T2.4: the export/import BODIES delegate to `unblock_sync::{export_jsonl,import_jsonl}` (cfg-gated behind the
+    // T2.4: the export/import BODIES delegate to `unblock_sync::{export_jsonl,import_jsonl}` (each also given
+    // `&unblock_sync::SessionFiles::of_database(&self.db_path)` — D5 amendment, v1.0.3) (cfg-gated behind the
     // default-on `sync` feature); the engine maps its public `ImportOptions{dry_run}` into sync's internal
     // `ImportOptions{dry_run, allow_external, on_collision}` at the call site (§4.1 `ImportOptions` note above).
     // T2.5 wires `import_bd`: a `#[cfg(feature="sync")]` body acquires the D14 write permit (MF-4) then calls
-    // `unblock_sync::import_bd(&*self.storage, path, &self.unblock_dir, self.actor())`;
+    // `unblock_sync::import_bd(&*self.storage, path, &self.unblock_dir, self.actor(), &unblock_sync::SessionFiles::of_database(&self.db_path))`;
     // `#[cfg(not(feature="sync"))]` keeps `FeatureNotWired{"sync"}`. NO `opts` — Skip-only production semantics;
     // funnels through sync's `import_bd` → the shared `apply_records` (D24/F5).
     pub async fn export_jsonl(&self, path: &Path) -> Result<ExportReport, EngineError>; // atomic temp+fsync+rename
@@ -2918,9 +2919,9 @@ fn default_true() -> bool { true }   // serde default for DepToolInput::Cycles.b
 #[serde(tag = "action", rename_all = "snake_case")]
 #[schemars(extend("type" = "object"))]   // §5.2a — inputSchema root MUST be `type: object` (CD-1)
 pub enum SyncInput {
-    Export   { #[serde(default)] path: Option<String> },     // default .unblock/issues.jsonl; path-confined
-    Import   { path: String, #[serde(default)] dry_run: bool },
-    ImportBd { path: String },                                // D16
+    Export   { #[serde(default)] path: Option<String> },     // default .unblock/issues.jsonl; path-confined; never the session database or a sidecar (D5 amendment, v1.0.3 → PATH_TRAVERSAL)
+    Import   { path: String, #[serde(default)] dry_run: bool }, // never the session database or a sidecar (D5 amendment, v1.0.3 → PATH_TRAVERSAL)
+    ImportBd { path: String },                                // D16; never the session database or a sidecar (D5 amendment, v1.0.3 → PATH_TRAVERSAL)
 }
 
 #[derive(Deserialize, JsonSchema)]
