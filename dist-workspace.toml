@@ -41,3 +41,9 @@ allow-dirty = ["ci"]
 # `unblock-storage/testkit` on a normal edge, so the shipped `unblock` would compile the storage
 # testkit.
 precise-builds = true
+
+# dist 0.32.0 defaults `aarch64-apple-darwin` to `macos-14`, which GitHub retired (ci-cd §3.1, `ub-ode`).
+# Pin the image `exclusivity-macos` and `update-smoke.yml` already use; `x86_64-apple-darwin` keeps
+# dist's default `macos-15-intel`.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
