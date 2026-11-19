@@ -4,7 +4,8 @@
 //!   that must not open the DB); returned by [`open_workspace`] / [`open_workspace_with_cli`].
 //! - [`WorkspaceContext`] — **storage-bearing** (`storage: Arc<dyn Storage>`, NON-OPTIONAL);
 //!   returned by [`open_with_storage`] / [`open_with_storage_with_cli`], consumed by the engine's
-//!   `Session::open`.
+//!   `Session::open`. A third entry, [`open_resolved_with_storage`], opens storage over an
+//!   already-resolved [`ResolvedContext`] without resolving again (D29 clause F6).
 //!
 //! Both bundle `config: ResolvedConfig` (config-owned VALUES) + `paths: ConfigPaths` (config-owned
 //! PATHS) + `workspace_dir` (project root) + `actor` (authoritative, spine §4.1). **Config builds
@@ -197,23 +198,37 @@ fn open_workspace_from(
     })
 }
 
-/// Shared open-with-storage body for both the `&Path` facade and the `_with_cli` overload.
+/// Shared open-with-storage body for both the `&Path` facade and the `_with_cli` overload: resolve,
+/// then delegate to [`open_resolved_with_storage`] (the one shared open body).
 async fn open_with_storage_from(
     start: Option<&Path>,
     cli: &CliOverrides,
 ) -> Result<WorkspaceContext, ConfigError> {
-    let Resolution {
+    open_resolved_with_storage(open_workspace_from(start, cli)?).await
+}
+
+/// Open storage for an ALREADY-resolved workspace, without resolving again (D29 clause F6): lets a
+/// caller do pre-open work on `resolved.paths` and then open exactly that database, with each
+/// resolution side effect (config warnings) emitted once.
+///
+/// # Errors
+///
+/// As [`open_with_storage`], minus the resolution errors.
+pub async fn open_resolved_with_storage(
+    resolved: ResolvedContext,
+) -> Result<WorkspaceContext, ConfigError> {
+    let ResolvedContext {
         workspace_dir,
+        actor,
         config,
         paths,
         source,
-    } = resolve_workspace(start, cli)?;
-    let actor = config.actor().to_string();
+    } = resolved;
 
     // open_local creates the db FILE inside the existing `.unblock/` but does NOT migrate. The
     // resolved `write_lock_timeout_ms` (D31) is threaded DOWN here (L4→L2); the `.write.lock` PATH is
     // derived inside storage from the db-file parent, so there is no L2→L4 back-edge.
-    let storage = LibsqlStorage::open_local(&paths.db_path, config.write_lock_timeout_ms())
+    let storage = LibsqlStorage::open_local(&paths.db_path, config.write_lock_timeout_ms)
         .await
         .context(DbOpenFailedSnafu)?;
     // D46 clause (10) — RECORD THE PRE-REPAIR STAMP. This is the ONE place it is still observable:
@@ -238,7 +253,7 @@ async fn open_with_storage_from(
         storage,
         workspace_dir,
         actor,
-        config: config.into_resolved(),
+        config,
         paths,
         source,
         schema_version_before_migrate,

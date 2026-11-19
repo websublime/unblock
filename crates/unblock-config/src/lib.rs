@@ -21,7 +21,9 @@
 //! (resolve-only, no DB) / [`open_with_storage`] (open + migrate libsql, build the
 //! `Arc<dyn Storage>`) — pass `start` as the walk-up start; their additive `_with_cli` overloads —
 //! [`open_workspace_with_cli`] / [`open_with_storage_with_cli`] — thread a full [`CliOverrides`]
-//! (`--dir`/`--db`/`--actor`/`--output-format`) through resolution (FORK-1 OVERLOAD model).
+//! (`--dir`/`--db`/`--actor`/`--output-format`) through resolution (FORK-1 OVERLOAD model). A third
+//! entry, [`open_resolved_with_storage`], opens storage over an already-resolved context without
+//! resolving again (D29 clause F6).
 //!
 //! **Config owns workspace-open** (CF-D): it discovers `.unblock/`, resolves paths, opens/migrates
 //! libsql, and constructs the `Arc<dyn Storage>` carried by [`WorkspaceContext`]; the engine
@@ -68,8 +70,8 @@ mod schema;
 pub use cli::CliOverrides;
 pub use config::{ResolvedConfig, WorkspaceConfig};
 pub use context::{
-    ResolvedContext, WorkspaceContext, open_with_storage, open_with_storage_with_cli,
-    open_workspace, open_workspace_with_cli,
+    ResolvedContext, WorkspaceContext, open_resolved_with_storage, open_with_storage,
+    open_with_storage_with_cli, open_workspace, open_workspace_with_cli,
 };
 pub use discovery::{
     UNBLOCK_DIR_NAMES, WorkspaceSource, discover_optional_unblock_dir, discover_unblock_dir,
