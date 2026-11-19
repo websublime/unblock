@@ -18,6 +18,15 @@ workspace = true
 name = "engine_write_lock_race"
 path = "tests/bin/engine_write_lock_race.rs"
 
+# D29 clause F6 (ub-kpe) test-only helper: ONE process holding a real `Session` (and so SQLite's SHARED
+# lock) across the production doctor flow, located from `tests/doctor_lock_retention.rs` via
+# `env!("CARGO_BIN_EXE_doctor_lock_holder")`. Source under `tests/bin/` (never `src/`); uses the crate's own
+# lib + existing `[dependencies]` (config + tokio, and the optional `unblock-sync` behind the `sync` feature for
+# one cfg-gated command), NO new dep. No `required-features`: it would drop the bin from builds without `sync`.
+[[bin]]
+name = "doctor_lock_holder"
+path = "tests/bin/doctor_lock_holder.rs"
+
 [dependencies]
 unblock-config = { workspace = true }
 unblock-storage = { workspace = true }
@@ -93,6 +102,12 @@ libsql = { workspace = true }
 # NFR-1 HYBRID engine-overhead perf gate (T3.5/D34): `benches/engine.rs`. Already declared
 # workspace-wide (root Cargo.toml, `features=[async_tokio]`); adds no NEW transitive surface.
 criterion = { workspace = true }
+
+# Safe `fcntl(F_GETLK)` for `tests/common/posix_locks.rs`, the PRD §4 D29 clause F6 observer of who
+# holds SQLite's SHARED byte range (ub-kpe). Test-only and Unix-only; already locked through
+# `homedir`, so it adds no crate. `libc` is reached as `nix::libc`, never as a direct dependency.
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true, features = ["fs"] }
 
 # NFR-1 engine perf gate (T3.5/D34): export/import (10k) + create/ready/list/claim engine overhead
 # vs the storage budgets. `harness = false` → criterion owns `main`. The bench BODY is

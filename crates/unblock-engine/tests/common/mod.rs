@@ -4,6 +4,13 @@
 
 #![allow(dead_code)] // each test binary uses a subset of the harness.
 
+#[cfg(unix)]
+pub mod lock_harness;
+#[cfg(unix)]
+pub mod lock_observer;
+#[cfg(unix)]
+pub mod posix_locks;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

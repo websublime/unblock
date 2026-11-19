@@ -1202,3 +1202,56 @@ pub fn bulk_markdown(n: usize) -> String {
     }
     doc
 }
+
+// ----------------------------------------------------------------------------------------------
+// D29 clause F6 (`ub-kpe`) / D5 amendment (`ub-w1j`): the fresh lock observer process.
+// ----------------------------------------------------------------------------------------------
+
+/// Run a fresh lock OBSERVER on `db`: this test binary re-executed at its `entry` test (libtest
+/// `--exact --include-ignored --nocapture --test-threads=1 -q`) with `UBKPE_OBSERVE_DB=<db>`. Returns
+/// `(stdout, stderr)`; the caller parses them with the engine's `lock_observer::Observed` (included by
+/// `#[path]`, which must not spawn). Panics when the observer exits non-zero.
+#[must_use]
+pub fn observe(entry: &str, db: &Path) -> (String, String) {
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut cmd = Command::new(exe);
+    cmd.args([
+        entry,
+        "--exact",
+        "--include-ignored",
+        "--nocapture",
+        "--test-threads=1",
+        "-q",
+    ])
+    .env("UBKPE_OBSERVE_DB", db)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = spawn_locked(&mut cmd, "run the lock observer");
+    // Bounded: a wedged observer fails the cell instead of billing the job's whole timeout.
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while child.try_wait().expect("try_wait the observer").is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let out = child
+                .wait_with_output()
+                .expect("collect the timed-out observer's output");
+            panic!(
+                "the lock observer did not exit within 60 s (stdout {:?}, stderr {:?})",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let out = child
+        .wait_with_output()
+        .expect("collect the observer's output");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "the observer exits 0 (stdout {stdout:?}, stderr {stderr})"
+    );
+    (stdout, stderr)
+}
