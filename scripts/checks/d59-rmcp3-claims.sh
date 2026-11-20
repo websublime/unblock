@@ -170,6 +170,8 @@ N10@.cargo@$DEPRECATED_FLAG_RE@NEGATIVE: no cargo configuration under .cargo/ pa
 #      keying, the ping/InitializeResult exit flip and its D35 classification with the D40/D50 notes, the
 #      from_parts unit cells, the no-sibling-row-red commit order, the EOF-drain no-reply proof, the
 #      ledger, the required-check correction and the mcp plan's error.rs row.
+#      Q239 was reworded by the ub-c15 spec commit (tracker comment 478, the required-check drift
+#      ruling): main's required checks are run-report-gate and the macOS exclusivity job (D58 (14)).
 # Q293..Q294 (Verify round 1, tracker comment 422) the sixth narrowing (a reused in-flight id) and the _meta
 #      read ahead of the rate limit and quota, beside ub-o8s.
 # Q291..Q292 and N19..N20 ([D59 amendment, 2026-11-17], tracker comment 420) the one dated deny ignore of
@@ -424,7 +426,7 @@ Q235@docs/PRD.md@^\| \*\*D40\*\* \|@\*\*Miguel.s ruling \(tracker comment 411\):
 Q236@docs/PRD.md@^\| \*\*D50\*\* \|@which exit 1 on v1\.12, a flip ruled NOT a D35 break because the client has disconnected@D50 carries the reciprocal note for ruling 411
 Q237@docs/plans/implementation-plan.md@which therefore ride THIS commit, not the test commit@which therefore ride THIS commit, not the test commit@R2-M3: T4.4 puts criterion (t)'s cells in the implementation commit, so d50 Q19 is never red
 Q238@docs/plans/01-design-spine.md@^cancelled request, the fifth documented narrowing@present and neither .null. nor@spine ledger lists the fifth narrowing, the read-error resume and the D40 extension
-Q239@docs/plans/ci-cd-and-distribution.md@so the feature-ON leg is invisible to both supply-chain jobs@neither is a required status check on .main., where the only required check is .run-report-gate.@ci-cd records that audit and deny are not required checks
+Q239@docs/plans/ci-cd-and-distribution.md@so the feature-ON leg is invisible to both supply-chain jobs@neither is a required status check on .main., as PRD §4 D59 criterion \(b\) records; the required checks on .main. are .run-report-gate. and the macOS exclusivity job@ci-cd records that audit and deny are not required checks, and names main's required checks (reworded by the ub-c15 spec commit per PRD §4 D58 clause (14))
 Q240@docs/plans/crates/unblock-mcp.md@^\| .src/error\.rs. \|@keyed on that kind and NEVER on rmcp.s .context. string@the mcp plan's error.rs row keys the predicate on io::ErrorKind
 Q241@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, measured 2026-11-17\] A THIRD DIVERGENCE TIER, .Recoded.\..*exactly .Silenced. ∪ .Recoded. ∪ .IdInserted.@clause (12) records the measured Recoded tier (a not-strict-JSON line rmcp 3.10 answers with its id-less -32600 because its typed decode fails on shape first) and the three-tier set-equality guard
 Q293@docs/PRD.md@^\| \*\*D59\*\* \|@\[D59 amendment, 2026-11-17\] \(f\) A SIXTH narrowing.*rmcp-3\.10\.0/src/service\.rs:1528-1531.*1 and 1\.0 are the same id@criterion (s) and clause (15): the duplicated in-flight id narrowing is disclosed with its verbatim AGENTS.md line (tracker comment 422)

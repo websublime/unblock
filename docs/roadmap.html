@@ -474,6 +474,7 @@
           <li>Full config (FR-13): six layers, user + DB layers runtime-only, a <span class="mono">config</span> action on the issue tool, live reload (D57)</li>
           <li>Full health taxonomy (FR-16): levels defined by repair path, <span class="mono">doctor --repair</span> with evidence under <span class="mono">.unblock/.recovery/</span>, exclusive repairs refused unless proven safe (D58)</li>
           <li>MCP SDK rmcp 1.7 &rarr; 3.10 (RUSTSEC-2026-0462) with the <span class="mono">quinn-udp</span> and <span class="mono">rustix</span> advisory bumps: both MCP lifecycles, <span class="mono">initialize</span> and the stateless 2026-07-28 one with <span class="mono">server/discover</span>; the wire converges on rmcp 3 except the parse-error reply on a readable id, which is kept; contract <span class="mono">unblock.mcp.v1.13</span> (D59)</li>
+          <li>Fix: a JSONL operation never touches the live database &mdash; an MCP <span class="mono">sync</span> import, import_bd or export, and <span class="mono">doctor</span>&rsquo;s export scan, copy and regeneration, whose target is the database or a sidecar is refused, or skipped and reported (D5 amendment, <span class="mono">ub-c15</span>)</li>
           <li>Scheduler &amp; coordination diagnostics (FR-18) · workflow gates (FR-19)</li>
           <li>Saved queries · audit/flight-recorder · shell completions · TOON · <span class="mono">init --agents</span> onboarding</li>
         </ul>

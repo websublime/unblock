@@ -573,7 +573,7 @@
   comment 446); the sync-target refusal of `ub-w1j` (`unblock-sync` `SessionFiles`, the D5 amendment on the 1.0 line);
   the branch `ci.yml` push trigger and `exclusivity-macos` job; the branch-only `cargo xtask release` allowance
   (ci-cd §3.3) and RELEASING.md. NOT in scope: any change to
-  main's code (main has no v1 probe, D58 clause (4)); merging the branch back. *(AC: every report `doctor`
+  main's code (main has no v1 probe, D58 clause (4); main's counterpart of `ub-w1j` is T4.5, `ub-c15`); merging the branch back. *(AC: every report `doctor`
   produced at v1.0.2 is byte-identical except that a JSONL path that is the database or a `-wal`/`-shm`/`-journal`
   sidecar is no longer scanned (v1.0.2's false `jsonl_conflict_markers`); a 0-byte database is not
   `database_not_sqlite`; the cells `kpe0`–`kpe4`, `kpe1m`, `kpe5` (cli), `kpe6`, `kpe6m`, `kpe7`, `kpe_p` (Linux) and
@@ -906,6 +906,41 @@
   rule-(α) or rule-(β) line itself, or criterion (g)'s differential finds the gate's predicate and rmcp's loop
   disagreeing on any frame, implementation STOPS and the decision returns to Miguel. Both gates >=3 agents; Claude
   opens the PR, a human merges.)*
+
+- **T4.5 — a JSONL operation never touches the session's own database. Implements the PRD §4 D5 amendment (v1.1,
+  `ub-c15`; an inline amendment, no D-id and no D-range bump; no `ErrorCode`, no `CONTRACT_HASH` move,
+  `unblock.mcp.v1.13` stands).** The design is normative in the **D5 row's amendment**, NFR-7's v1.1 sentence, the
+  `[D58 amendment, ub-c15]` notes in D58 clauses (1), (4), (6)(a2) and (9) and criterion (j), D29 clause F6's pointer,
+  spine §4.1's interchange, `doctor` and `recover` notes and §5's `SyncInput` comments, the sync plan's API block and
+  its `path.rs`, `conflict.rs`, `jsonl.rs`, `atomic.rs`, `export.rs`, `import.rs`, `bd_import.rs` and
+  `tests/session_files.rs` rows, the health plan's API bullets and its `paths.rs`, `export.rs`, `classify.rs`,
+  `recovery.rs` and `tests/export_scan.rs` rows, the engine plan's `Cargo.toml`, `lib.rs`, `interchange.rs` and
+  `preopen.rs`/`lifecycle.rs` rows and its lock-harness rows, the cli plan's `init.rs` and `Cargo.toml` notes and
+  `tests/sync_target_lock_retention_cli.rs` row, the mcp plan's `sync.rs` row, and ci-cd §2's `test`,
+  `exclusivity-macos` and `windows-check` rows, D58's module-list note on `recovery.rs`, FR-8's pointer, PRD §8.1's
+  sync row, spine §4.1's engine-root re-export notes, `RELEASING.md` §1, and ci-cd's `:60` required-check sentence
+  and ci-cd §3.3 release-cut bullet (the spec commit also carries two process corrections outside the D5 design: PROCESS §6's
+  branch-name rule and ci-cd §2.3.3's ruleset verification) — **read those before implementing; this bullet is a
+  checklist of touched sites and never the spec.** Tracked as `ub-c15` (found during `ub-kpe`, tracker comment 448;
+  Understand map comment 477; Miguel's rulings comment 478). It is main's port of `ub-w1j` (T3.18, `release/v1.0.x` PR
+  #477), never a merge. OUT of scope (rulings 8 and 9): a config-time `db_path == jsonl_path` refusal and a database
+  named like `.write.lock` (`ub-k4j`); the MCP default export path that ignores the resolved JSONL path stays
+  `ub-s82`. **DAG:** depends on T4.3 (the D58 scan, copy and regeneration it guards) and T4.4 (the `unblock.mcp.v1.13`
+  baseline it keeps); blocks the v1.1.0 cut. **COMMIT PLAN** (re-cut by Track after Verify, PROCESS §6): (i)
+  `docs(spec)` — PRD, spine, crate plans, ci-cd (§2, §2.1, §2.3.3, §3.3 and the `:60` required-check sentence),
+  `RELEASING.md`, `docs/PROCESS.md` §6, roadmap (md and html) and this task, with d58 rows `Q304`–`Q318` and
+  `Q370`–`Q372`, `P2`, and d59 `Q239` corrected; no code; (ii) `refactor` — the sidecar suffixes and their four unit
+  cells move to sync (`Q319`); (iii) `fix` — `SessionFiles`, every signature and caller, health's skip and copy, the
+  engine wiring, the `classify_props` re-bless, the descriptor witness and the in-crate cells, `Q198` moved and
+  `Q320`–`Q328`; (iv) `test` — the holder/observer harness; (v) `test` — the cells and their `ci.yml` steps
+  (`Q329`–`Q367`); (vi) `ci(windows-check)` (`Q368`–`Q369`); (vii) Track's run-report and tracker re-export. At every
+  re-cut commit Track runs every `scripts/checks/*.sh` and `cargo check -j 4 -p <the crates that commit touches>
+  --all-targets --locked`, one cargo process at a time; CI runs the workspace suite on the pull request's head
+  (`docs/PROCESS.md` §4 and §6). *(AC: `ub-c15`'s acceptance criteria (1)–(3), which are normative here: no
+  session-file target is ever closed or written by MCP `sync` (`import` with and without `dry_run`, `import_bd`,
+  `export`) or by `doctor`/`recover`'s scan, copy and regeneration; the matrix and the lock cells pass on Linux and
+  macOS; `windows-check` is green and is a v1.1.0 release-cut precondition (RELEASING.md §1); the contract id is
+  unchanged.)*
 
 ## 6. MCP surface — concrete v1 taxonomy (closes PRD §12.2)
 
