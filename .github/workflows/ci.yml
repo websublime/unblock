@@ -31,7 +31,9 @@
 # D58 (T4.3, v1.1) adds `exclusivity-macos`: the criterion (f) exclusive-window cells on the pinned
 # `macos-15` image, the same file the `storage-testkit` job runs on Linux.
 # ub-c15 (v1.1; PRD §4 D5 amendment and D58 amendment) runs the session-file lock-retention cells in
-# `exclusivity-macos` (F_GETLK) and as a named step of `test` (F_GETLK + /proc/locks).
+# `exclusivity-macos` (F_GETLK) and as a named step of `test` (F_GETLK + /proc/locks), and adds ONE job:
+#   - windows-check → a compile check of the shipped package for the Windows dist target, where the
+#     non-unix arm of the session-file check (`unblock_sync::SessionFiles`) compiles.
 #
 # Feature policy (D15/NFR-10, ci-cd §2.2): the testkit clippy/test steps use TARGETED features
 # (`-p unblock-storage --features testkit`), never `--all-features` — at v1.3 `--all-features` selects
@@ -177,6 +179,22 @@ jobs:
         run: |
           cargo test -p unblock-sync --locked --lib --test session_files
           cargo test -p unblock-health --locked --lib --test export_scan --test recovery_layout
+
+  windows-check:
+    name: windows-check (x86_64-pc-windows-msvc compile check)
+    # ub-c15 (PRD §4 D5 amendment): the non-unix cfg arm of SessionFiles (canonical-path identity)
+    # compiles only on the Windows dist target, which no other job builds; without this job the first
+    # Windows compile would be the tag's release.yml. A compile check of the shipped package, not a test run.
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cargo check the shipped package for the Windows dist target
+        run: cargo check -p unblock-cli --locked --target x86_64-pc-windows-msvc
 
   stress-integrity:
     name: stress-integrity (NFR-5 long-lived/interleaved + NFR-4 fault-injection)
