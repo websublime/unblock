@@ -177,6 +177,7 @@ N4@crates/unblock-health/src/*.rs@<{7}|>{7}@NEGATIVE: unblock-health spells no c
 #      SessionFiles::of_database arguments, and the in-crate cells of open_import_source,
 #      open_guarded, validate_records, read_bd_records, write_atomic and copy_checked. Q198 moved.
 # Q329..Q367 (ub-c15 test commit) one row per new cell declaration, and the ci.yml lock and unit steps.
+# Q368..Q369 (ub-c15 ci commit) the windows-check job and its compile step.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@scripts/checks/d44-create-deps-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D44 sibling's live-range knob carries the SAME range as this script — anchored on the knob line, so the file's own prose about the knob cannot satisfy the pin
@@ -546,6 +547,8 @@ Q364@.github/workflows/ci.yml@--test export_scan_lock_retention@:[0-9]+: +cargo 
 Q365@.github/workflows/ci.yml@--test sync_target_lock_retention_cli@:[0-9]+: +cargo test -p unblock-cli --locked --test sync_target_lock_retention_cli -- --show-output\$@ci-cd §2 as amended (PRD §4 D5 amendment, ub-c15): the test and exclusivity-macos jobs run the real unblock mcp lock cells with --show-output
 Q366@.github/workflows/ci.yml@--test session_files@:[0-9]+: +cargo test -p unblock-sync --locked --lib --test session_files\$@ci-cd §2 as amended (PRD §4 D5 amendment, ub-c15): exclusivity-macos runs sync's in-crate cells and the session_files matrix on macOS
 Q367@.github/workflows/ci.yml@--test recovery_layout@:[0-9]+: +cargo test -p unblock-health --locked --lib --test export_scan --test recovery_layout\$@ci-cd §2 as amended (PRD §4 D5 amendment, ub-c15): exclusivity-macos runs health's in-crate H6 cell, export_scan and recovery_layout on macOS
+Q368@.github/workflows/ci.yml@^  windows-check:@:[0-9]+:  windows-check:\$@ci-cd §2's windows-check row (ub-c15 ci commit): the Windows compile-check job exists
+Q369@.github/workflows/ci.yml@--target x86_64-pc-windows-msvc@:[0-9]+: +run: cargo check -p unblock-cli --locked --target x86_64-pc-windows-msvc\$@ci-cd §2's windows-check row (ub-c15 ci commit): every line naming the Windows target runs the shipped package's compile check
 Q370@docs/PROCESS.md@^- \*\*Branch off .main.\*\*@Branch name: .ub-<id>-<slug>. for work@PROCESS §6 (ub-c15 spec commit, addendum ruling on the branch-name drift): tracker-issue work branches as ub-<id>-<slug>, the form every T4.x branch uses
 Q371@docs/plans/ci-cd-and-distribution.md@^repos/\{owner\}/\{repo\}/rules/branches/main --jq@select\(\.type == .required_status_checks.\) \|\$@ci-cd §2.3.3 (ub-c15 spec commit): the required-check verification reads main's effective ruleset rules, not the branch-protection endpoint
 Q372@docs/plans/ci-cd-and-distribution.md@^repos/\{owner\}/\{repo\}/rulesets/19670603 --jq@'\.enforcement, \(\.bypass_actors \| length\)'. must print\$@ci-cd §2.3.3 (ub-c15 spec commit): administrator enforcement is verified as an active ruleset with no bypass actors
@@ -633,7 +636,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 2 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 4 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 370 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 372 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."
