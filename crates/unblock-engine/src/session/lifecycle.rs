@@ -218,7 +218,8 @@ impl Session {
     pub async fn doctor(&self, preopen: &PreOpenFacts) -> Result<HealthReport> {
         self.gated_runtime()?;
         let db = db_facts(self.storage.health_facts().await?);
-        let export = preopen::scan_export(Some(self.jsonl_path.clone())).await?;
+        let export =
+            preopen::scan_export(Some(self.jsonl_path.clone()), self.db_path.clone()).await?;
         let classification =
             unblock_health::classify(preopen, Some(&db), &export, &preopen::advisory_now());
         let mut tail = vec![
@@ -276,7 +277,7 @@ impl Session {
 
         let paths = self.health_paths();
         let db = db_facts(self.storage.health_facts().await?);
-        let export = preopen::scan_export(paths.jsonl.clone()).await?;
+        let export = preopen::scan_export(paths.jsonl.clone(), paths.db.clone()).await?;
         let classification = unblock_health::classify(
             &online_preopen(),
             Some(&db),
@@ -322,7 +323,9 @@ impl Session {
         let regenerate = online.position(&PlannedAction::RegenerateExport);
         let export_copy = match (&export.path, regenerate) {
             (Some(path), Some(_)) => {
-                match preopen::copy_export(&online.run, path, &self.unblock_dir).await {
+                match preopen::copy_export(&online.run, path, &self.unblock_dir, &self.db_path)
+                    .await
+                {
                     Ok(copy) => Some(copy),
                     Err(err) => return Err(online.fail(err).await),
                 }

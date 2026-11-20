@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use crate::error::SyncError;
+use crate::path::SessionFiles;
 
 /// The `<<<<<<<` conflict-start marker prefix (7 chars).
 pub const CONFLICT_START: &str = "<<<<<<<";
@@ -70,8 +71,10 @@ pub fn detect_conflict_marker(line: &str) -> Option<(ConflictMarkerType, Option<
 
 /// Open + size-guard the import file, returning a bounded `BufReader`.
 ///
-/// Rejects a non-regular file / a file over [`MAX_IMPORT_FILE_BYTES`] BEFORE any read.
-fn open_guarded(path: &Path) -> Result<BufReader<File>, SyncError> {
+/// Rejects a non-regular file / a file over [`MAX_IMPORT_FILE_BYTES`] BEFORE any read. The open goes
+/// through [`SessionFiles::open_import_source`] (PRD §4 D5 amendment, `ub-c15`): a target that
+/// became a session file after the caller's stat is refused and its descriptor never closed.
+fn open_guarded(path: &Path, session: &SessionFiles) -> Result<BufReader<File>, SyncError> {
     let meta = std::fs::metadata(path).map_err(|source| SyncError::Io {
         path: path.to_path_buf(),
         action: "reading metadata for",
@@ -90,11 +93,7 @@ fn open_guarded(path: &Path) -> Result<BufReader<File>, SyncError> {
             cap: MAX_IMPORT_FILE_BYTES,
         });
     }
-    let file = File::open(path).map_err(|source| SyncError::Io {
-        path: path.to_path_buf(),
-        action: "opening",
-        source,
-    })?;
+    let file = session.open_import_source(path)?;
     Ok(BufReader::with_capacity(2 * 1024 * 1024, file))
 }
 
@@ -134,11 +133,21 @@ pub(crate) fn read_line_bounded<R: BufRead>(
 
 /// Scan `path` for conflict markers (streaming, bounded), returning them in line order.
 ///
+/// PRD §4 D5 amendment (`ub-c15`): the scan runs inside a live session, so it takes the session's
+/// files and refuses a path that stats as one FIRST — before the size guard and before any open —
+/// then opens through [`SessionFiles::open_import_source`]. No session-free form exists; a caller
+/// outside a session passes [`SessionFiles::none`].
+///
 /// # Errors
 ///
+/// [`SyncError::PathTraversal`] ([`crate::PathReject::SessionDatabase`]) on a session file;
 /// [`SyncError::Io`]/[`SyncError::FileTooLarge`]/[`SyncError::LineTooLong`] on the ingestion guards.
-pub fn scan_conflict_markers(path: &Path) -> Result<Vec<ConflictMarker>, SyncError> {
-    let mut reader = open_guarded(path)?;
+pub fn scan_conflict_markers(
+    path: &Path,
+    session: &SessionFiles,
+) -> Result<Vec<ConflictMarker>, SyncError> {
+    session.reject(path)?;
+    let mut reader = open_guarded(path, session)?;
     let mut markers = Vec::new();
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut line_no = 0usize;
@@ -162,13 +171,15 @@ pub fn scan_conflict_markers(path: &Path) -> Result<Vec<ConflictMarker>, SyncErr
     Ok(markers)
 }
 
-/// Ensure `path` has NO conflict markers; on any marker, error with a ≤5-marker preview.
+/// Ensure `path` has NO conflict markers; on any marker, error with a ≤5-marker preview. The scan
+/// is [`scan_conflict_markers`], so a session file is refused first (PRD §4 D5 amendment).
 ///
 /// # Errors
 ///
-/// [`SyncError::ConflictMarkers`] (exit-6) with a short preview, or an ingestion-guard error.
-pub fn ensure_no_conflict_markers(path: &Path) -> Result<(), SyncError> {
-    let markers = scan_conflict_markers(path)?;
+/// [`SyncError::ConflictMarkers`] (exit-6) with a short preview, [`SyncError::PathTraversal`] on a
+/// session file, or an ingestion-guard error.
+pub fn ensure_no_conflict_markers(path: &Path, session: &SessionFiles) -> Result<(), SyncError> {
+    let markers = scan_conflict_markers(path, session)?;
     if markers.is_empty() {
         return Ok(());
     }
@@ -195,9 +206,10 @@ pub fn ensure_no_conflict_markers(path: &Path) -> Result<(), SyncError> {
 mod tests {
     use super::{
         ConflictMarkerType, MAX_LINE_BYTES, detect_conflict_marker, ensure_no_conflict_markers,
-        scan_conflict_markers,
+        open_guarded, scan_conflict_markers,
     };
     use crate::error::SyncError;
+    use crate::path::SessionFiles;
     use std::io::Write;
 
     fn write_file(dir: &tempfile::TempDir, name: &str, content: &[u8]) -> std::path::PathBuf {
@@ -211,15 +223,23 @@ mod tests {
     fn clean_file_has_no_markers() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(&dir, "issues.jsonl", b"{\"a\":1}\n{\"b\":2}\n");
-        assert!(scan_conflict_markers(&path).unwrap().is_empty());
-        ensure_no_conflict_markers(&path).expect("clean");
+        assert!(
+            scan_conflict_markers(&path, &SessionFiles::none())
+                .unwrap()
+                .is_empty()
+        );
+        ensure_no_conflict_markers(&path, &SessionFiles::none()).expect("clean");
     }
 
     #[test]
     fn empty_file_is_clean() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(&dir, "issues.jsonl", b"");
-        assert!(scan_conflict_markers(&path).unwrap().is_empty());
+        assert!(
+            scan_conflict_markers(&path, &SessionFiles::none())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -244,7 +264,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let content = b"a\n<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> theirs\n";
         let path = write_file(&dir, "issues.jsonl", content);
-        let markers = scan_conflict_markers(&path).unwrap();
+        let markers = scan_conflict_markers(&path, &SessionFiles::none()).unwrap();
         assert_eq!(markers.len(), 3);
         assert_eq!(markers[0].line, 2);
         assert_eq!(markers[0].marker_type, ConflictMarkerType::Start);
@@ -256,7 +276,7 @@ mod tests {
     fn ensure_errors_with_preview() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(&dir, "issues.jsonl", b"<<<<<<< HEAD\n=======\n");
-        let err = ensure_no_conflict_markers(&path).expect_err("markers");
+        let err = ensure_no_conflict_markers(&path, &SessionFiles::none()).expect_err("markers");
         match err {
             SyncError::ConflictMarkers { preview, .. } => {
                 assert!(preview.contains("line 1"), "preview: {preview}");
@@ -269,7 +289,7 @@ mod tests {
     fn crlf_lines_detected() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(&dir, "issues.jsonl", b"<<<<<<< HEAD\r\n=======\r\n");
-        let markers = scan_conflict_markers(&path).unwrap();
+        let markers = scan_conflict_markers(&path, &SessionFiles::none()).unwrap();
         assert_eq!(markers.len(), 2);
         assert_eq!(markers[0].branch.as_deref(), Some("HEAD"));
     }
@@ -280,7 +300,7 @@ mod tests {
         // A single line of (cap + 1) bytes with no newline → LineTooLong, bounded peak alloc.
         let big = vec![b'x'; MAX_LINE_BYTES + 1];
         let path = write_file(&dir, "issues.jsonl", &big);
-        let err = scan_conflict_markers(&path).expect_err("too long");
+        let err = scan_conflict_markers(&path, &SessionFiles::none()).expect_err("too long");
         match err {
             SyncError::LineTooLong { line, cap, .. } => {
                 assert_eq!(line, 1);
@@ -288,5 +308,42 @@ mod tests {
             }
             other => panic!("expected LineTooLong, got {other:?}"),
         }
+    }
+
+    /// S10 (PRD §4 D5 amendment, `ub-c15`): the reader's own open refuses a target that is a session
+    /// file even when no preflight stat ran first (a target that raced into the database), and keeps
+    /// that descriptor open: the fd witness counts one more descriptor on the database.
+    #[cfg(unix)]
+    #[test]
+    fn open_guarded_refuses_a_session_file_without_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = write_file(&dir, "unblock.db", b"{\"a\":1}\n");
+        let alias = dir.path().join("alias.jsonl");
+        std::fs::hard_link(&db, &alias).expect("hard link");
+        let session = SessionFiles::of_database(&db);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let before = {
+            crate::fd_witness::assert_witness_sees(&db);
+            crate::fd_witness::descriptors_on(&db)
+        };
+
+        let err = open_guarded(&alias, &session).expect_err("a session file is refused");
+        assert!(
+            matches!(
+                err,
+                SyncError::PathTraversal {
+                    reason: crate::path::PathReject::SessionDatabase,
+                    ..
+                }
+            ),
+            "expected SessionDatabase, got {err:?}"
+        );
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(
+            crate::fd_witness::descriptors_on(&db),
+            before + 1,
+            "the raced session file's descriptor is kept open, never closed"
+        );
     }
 }

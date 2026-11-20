@@ -14,6 +14,11 @@
 //! taken after the permit and the `.write.lock`, whose actor they then import with (spine §4.1
 //! actor discipline) — including the `--no-default-features` bodies, so the gate does not depend on
 //! the feature set.
+//!
+//! PRD §4 D5 amendment (`ub-c15`): every call carries the session's own files (an
+//! `unblock_sync::SessionFiles` set built from `self.db_path`, stat-ed fresh per call), so a target
+//! that is the session database or one of its sidecars is refused as [`EngineError::Sync`]
+//! (`PATH_TRAVERSAL`, exit 6) and no descriptor on it is ever closed.
 
 use std::path::Path;
 
@@ -30,7 +35,8 @@ impl Session {
     /// writes it atomically. Takes NO write permit (export never mutates).
     ///
     /// # Errors
-    /// - The transparent [`EngineError::Sync`] source on a path/serialization/I/O failure (sync-on).
+    /// - The transparent [`EngineError::Sync`] source on a path/serialization/I/O failure (sync-on),
+    ///   including a target that is the session database or a sidecar (`PATH_TRAVERSAL`, exit 6).
     /// - [`EngineError::FeatureNotWired`] (`feature: "sync"`) under `--no-default-features`.
     #[cfg(feature = "sync")]
     pub async fn export_jsonl(&self, path: &Path) -> Result<ExportReport> {
@@ -51,6 +57,8 @@ impl Session {
                 // NFR-5/D30 forward seam: v1 never sets `allow_external`, so no reason is threaded.
                 external_reason: None,
             },
+            // D5 amendment (ub-c15): never the session database or a sidecar.
+            unblock_sync::SessionFiles::of_database(&self.db_path),
         )
         .await?;
         Ok(report)
@@ -75,7 +83,9 @@ impl Session {
     /// [`ImportOptions`] into sync's internal options at the call site (spine §4.1).
     ///
     /// # Errors
-    /// - The transparent [`EngineError::Sync`] source on a preflight/apply failure (sync-on).
+    /// - The transparent [`EngineError::Sync`] source on a preflight/apply failure (sync-on),
+    ///   including a target that is the session database or a sidecar (`PATH_TRAVERSAL`, exit 6;
+    ///   `dry_run` included).
     /// - [`EngineError::ShutdownInProgress`] if a shutdown is in progress.
     /// - [`EngineError::FeatureNotWired`] (`feature: "sync"`) under `--no-default-features`.
     #[cfg(feature = "sync")]
@@ -101,6 +111,7 @@ impl Session {
             &self.unblock_dir,
             &runtime.actor,
             &sync_opts,
+            &unblock_sync::SessionFiles::of_database(&self.db_path),
         )
         .await?;
         Ok(report)
@@ -126,7 +137,8 @@ impl Session {
     /// `dependencies`/`comments` counts are the POST-repair/POST-dedup relation tallies).
     ///
     /// # Errors
-    /// - The transparent [`EngineError::Sync`] source on a preflight/map/apply failure (sync-on).
+    /// - The transparent [`EngineError::Sync`] source on a preflight/map/apply failure (sync-on),
+    ///   including a target that is the session database or a sidecar (`PATH_TRAVERSAL`, exit 6).
     /// - [`EngineError::ShutdownInProgress`] if a shutdown is in progress.
     /// - [`EngineError::FeatureNotWired`] (`feature: "sync"`) under `--no-default-features`.
     #[cfg(feature = "sync")]
@@ -138,9 +150,14 @@ impl Session {
         let _lock = self.storage.acquire_write_lock().await?;
         // D57: the gate and the actor come from ONE snapshot taken under both guards.
         let runtime = self.gated_runtime()?;
-        let report =
-            unblock_sync::import_bd(&*self.storage, path, &self.unblock_dir, &runtime.actor)
-                .await?;
+        let report = unblock_sync::import_bd(
+            &*self.storage,
+            path,
+            &self.unblock_dir,
+            &runtime.actor,
+            &unblock_sync::SessionFiles::of_database(&self.db_path),
+        )
+        .await?;
         Ok(report)
     }
 

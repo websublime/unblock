@@ -103,6 +103,11 @@ pub enum ExportScan {
         /// The scanner's error text.
         reason: String,
     },
+    /// The export path is the session database or one of its `-wal`/`-shm`/`-journal` sidecars (same
+    /// device and inode, under any name, a hard link or a symlink included; PRD §4 D5 amendment,
+    /// `ub-c15`). It was not scanned: a path that stats as one is never opened, and one recognized
+    /// only on its opened descriptor is kept open, never closed.
+    SessionFile,
 }
 
 /// The inputs of the advisories.

@@ -11,7 +11,8 @@
 //! from [`scan_export`] and the clock in [`AdvisoryFacts`]. [`classify`] returns a
 //! [`WorkspaceClassification`] with the anomalies, the advisories, one [`PlannedRepair`] per
 //! anomaly and the composite level. The [`recovery`] module names, creates and fills the
-//! `.unblock/.recovery/` run directories; it never opens the database. Health holds no `Storage`
+//! `.unblock/.recovery/` run directories; it never opens a database connection and never closes a
+//! descriptor on the database or a sidecar. Health holds no `Storage`
 //! handle, never names a libsql type (NFR-15) and uses no git (NFR-6) or network.
 //!
 //! See `docs/plans/crates/unblock-health.md`.
@@ -28,6 +29,13 @@ mod integrity;
 mod level;
 mod paths;
 pub mod recovery;
+
+// The fd witness (PRD §4 D5 amendment, `ub-c15`) for the in-crate `recovery` cell; included here at
+// the crate root, because inside `recovery.rs`'s inline `mod tests` the same `#[path]` would
+// resolve under `src/recovery/`.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[path = "../../unblock-sync/tests/common/fd_witness.rs"]
+mod fd_witness;
 
 pub use anomaly::{Advisory, AnomalyClass, PlannedAction, PlannedRepair, RepairPath};
 pub use audit::ReliabilityAuditRecord;

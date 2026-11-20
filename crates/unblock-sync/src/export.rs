@@ -22,7 +22,7 @@ use unblock_storage::Storage;
 use crate::atomic::write_atomic;
 use crate::error::SyncError;
 use crate::jsonl::serialize_issue_line;
-use crate::path::validate_sync_path;
+use crate::path::{SessionFiles, validate_sync_path};
 
 /// Options for [`export_jsonl`].
 #[derive(Debug, Clone, Default)]
@@ -47,14 +47,16 @@ pub struct ExportOptions {
 /// # Errors
 ///
 /// [`SyncError::ExternalOverrideWithoutReason`] when `allow_external` is set without a written
-/// reason (NFR-5/D30); [`SyncError::PathTraversal`] on a rejected path; [`SyncError::JsonEncode`] on
-/// serialization; [`SyncError::Io`] on the atomic write; the transparent `Storage` source on a
-/// backend read failure.
+/// reason (NFR-5/D30); [`SyncError::PathTraversal`] on a rejected path — including a target that is
+/// one of `session`'s files ([`crate::PathReject::SessionDatabase`], PRD §4 D5 amendment, `ub-c15`),
+/// refused before any storage read; [`SyncError::JsonEncode`] on serialization; [`SyncError::Io`] on
+/// the atomic write; the transparent `Storage` source on a backend read failure.
 pub async fn export_jsonl(
     storage: &dyn Storage,
     path: &Path,
     confine_root: &Path,
     opts: &ExportOptions,
+    session: SessionFiles,
 ) -> Result<ExportReport, SyncError> {
     // NFR-5/D30 (forward seam): an `allow_external` override MUST carry a written reason. The reject
     // lives in the orchestrator (it holds the opts + knows the operation label).
@@ -64,6 +66,10 @@ pub async fn export_jsonl(
         opts.external_reason.as_deref(),
     )?;
     let canonical: PathBuf = validate_sync_path(path, confine_root, opts.allow_external)?;
+    // PRD §4 D5 amendment (`ub-c15`): never rename over the session database or a sidecar — refused
+    // by a stat before any storage read and before any temp is created (and re-checked right before
+    // the rename, `write_atomic`).
+    session.reject(&canonical)?;
     if opts.allow_external && !canonical.starts_with(confine_root) {
         // NFR-13 (D30): ONE INFO covering BOTH external-path use AND force-override (they coincide in
         // v1 — the only external-path mechanism IS the reason-gated `allow_external`). The reject
@@ -115,7 +121,7 @@ pub async fn export_jsonl(
         lines.push(serialize_issue_line(issue)?);
     }
 
-    let written = write_atomic(&canonical, confine_root, lines.into_iter()).await?;
+    let written = write_atomic(&canonical, confine_root, lines.into_iter(), session).await?;
     Ok(ExportReport {
         written,
         path: canonical,
@@ -248,6 +254,7 @@ fn corpus_closed_under_blockers(all: Vec<Issue>) -> (Vec<Issue>, usize) {
 mod tests {
     use super::{ExportOptions, export_jsonl};
     use crate::error::SyncError;
+    use crate::path::SessionFiles;
     use crate::testutil::FakeStorage;
     use crate::testutil::sample_issue;
 
@@ -260,9 +267,15 @@ mod tests {
             sample_issue("ub-3"),
         ]);
         let target = dir.path().join("issues.jsonl");
-        let report = export_jsonl(&storage, &target, dir.path(), &ExportOptions::default())
-            .await
-            .expect("export");
+        let report = export_jsonl(
+            &storage,
+            &target,
+            dir.path(),
+            &ExportOptions::default(),
+            SessionFiles::none(),
+        )
+        .await
+        .expect("export");
         assert_eq!(report.written, 3);
         let content = std::fs::read_to_string(&target).unwrap();
         // 3 lines, id ASC order (ub-1, ub-2, ub-3).
@@ -287,9 +300,15 @@ mod tests {
             sample_issue("ub-wisp-x"),
         ]);
         let target = dir.path().join("issues.jsonl");
-        let report = export_jsonl(&storage, &target, dir.path(), &ExportOptions::default())
-            .await
-            .expect("export");
+        let report = export_jsonl(
+            &storage,
+            &target,
+            dir.path(),
+            &ExportOptions::default(),
+            SessionFiles::none(),
+        )
+        .await
+        .expect("export");
         assert_eq!(report.written, 1, "only the non-ephemeral non-wisp row");
         let content = std::fs::read_to_string(&target).unwrap();
         assert!(content.contains("ub-1"));
@@ -302,9 +321,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = FakeStorage::with_issues(vec![]);
         let target = dir.path().join("issues.jsonl");
-        let report = export_jsonl(&storage, &target, dir.path(), &ExportOptions::default())
-            .await
-            .expect("export");
+        let report = export_jsonl(
+            &storage,
+            &target,
+            dir.path(),
+            &ExportOptions::default(),
+            SessionFiles::none(),
+        )
+        .await
+        .expect("export");
         assert_eq!(report.written, 0);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
     }
@@ -315,9 +340,15 @@ mod tests {
         let other = tempfile::tempdir().unwrap();
         let storage = FakeStorage::with_issues(vec![sample_issue("ub-1")]);
         let target = other.path().join("issues.jsonl");
-        let err = export_jsonl(&storage, &target, dir.path(), &ExportOptions::default())
-            .await
-            .expect_err("external rejected");
+        let err = export_jsonl(
+            &storage,
+            &target,
+            dir.path(),
+            &ExportOptions::default(),
+            SessionFiles::none(),
+        )
+        .await
+        .expect_err("external rejected");
         assert!(matches!(err, SyncError::PathTraversal { .. }));
     }
 
@@ -366,9 +397,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = FakeStorage::with_issues(issues);
         let target = dir.path().join("issues.jsonl");
-        let report = export_jsonl(&storage, &target, dir.path(), &ExportOptions::default())
-            .await
-            .expect("export");
+        let report = export_jsonl(
+            &storage,
+            &target,
+            dir.path(),
+            &ExportOptions::default(),
+            SessionFiles::none(),
+        )
+        .await
+        .expect("export");
         let content = std::fs::read_to_string(&target).unwrap();
         let values: Vec<serde_json::Value> = content
             .lines()

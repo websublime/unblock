@@ -75,9 +75,15 @@ async fn main() {
 
     // ONE export first, so a COMPLETE target exists before the loop; the parent's kill then lands
     // during a SUBSEQUENT export while a complete file is already in place.
-    export_jsonl(&storage, &target, &confine_root, &opts)
-        .await
-        .expect("first export");
+    export_jsonl(
+        &storage,
+        &target,
+        &confine_root,
+        &opts,
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("first export");
     println!("READY-EXPORTED");
     std::io::stdout().flush().expect("flush the marker");
 
@@ -86,6 +92,13 @@ async fn main() {
     while Instant::now() < deadline {
         // Errors are ignored: the parent SIGKILLs mid-write; the loop's job is only to keep the atomic
         // write path busy so the kill lands inside an export.
-        let _ = export_jsonl(&storage, &target, &confine_root, &opts).await;
+        let _ = export_jsonl(
+            &storage,
+            &target,
+            &confine_root,
+            &opts,
+            unblock_sync::SessionFiles::none(),
+        )
+        .await;
     }
 }

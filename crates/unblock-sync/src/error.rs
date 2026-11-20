@@ -361,6 +361,18 @@ mod tests {
     }
 
     #[test]
+    fn session_database_maps_to_path_traversal_exit_6() {
+        // PRD §4 D5 amendment (`ub-c15`): the new reject reason reuses the existing code.
+        let err = SyncError::PathTraversal {
+            path: PathBuf::from("/x/.unblock/issues.jsonl"),
+            reason: PathReject::SessionDatabase,
+        };
+        assert_eq!(err.code(), ErrorCode::PathTraversal);
+        assert_eq!(err.code().exit_code(), 6);
+        assert!(err.to_string().contains("SessionDatabase"));
+    }
+
+    #[test]
     fn json_encode_maps_to_exit_8() {
         // Fabricate a serde error via a non-serializable-to-string map key is awkward; instead a
         // number-out-of-range parse error stands in for the JSON encode class code assertion.
