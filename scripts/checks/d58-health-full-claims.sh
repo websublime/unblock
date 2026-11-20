@@ -87,6 +87,7 @@ VACUUM_STMT_RE='[Vv][Aa][Cc][Uu][Uu][Mm]([^ [:alnum:]_]| +[^Ii ]|$)'
 # =================================================================================================
 REQUIRE="
 P1@.unblock/issues.jsonl@\"id\":\"ub-lp9\.3\"@the tracker record names the work D58 implements. The export keeps closed rows, so the row survives the merge-time close
+P2@.unblock/issues.jsonl@\"id\":\"ub-c15\"@the tracker record names the work the PRD §4 D5 amendment implements (PROCESS.md §6: re-export in the SAME commit as the work)
 "
 
 # =================================================================================================
@@ -164,6 +165,13 @@ N4@crates/unblock-health/src/*.rs@<{7}|>{7}@NEGATIVE: unblock-health spells no c
 #      exposure window and the ruling (b) disposition (fixed in v1.0.3, D29 clause F6), criterion (n)'s measured
 #      result and fd6's silent loss, the measured fd7 citations in PRD clause (6)(c) and spine §3.3
 #      step (c), the health plan's src/file_state.rs row, and T4.3's out-of-scope ub-2vp entry.
+# Q304..Q318 (ub-c15 spec commit, the PRD §4 D5 amendment, tracker comments 477, 478 and 482) one
+#      row per D58 insertion (a)..(f), the D5 amendment, NFR-7's v1.1 sentence, D29 clause F6's
+#      pointer, spine §4.1's doctor note and engine-root re-export, the health plan's src/export.rs
+#      row, and the windows-check release-cut precondition in RELEASING.md §1, ci-cd §3.3 and §2.
+# Q370..Q372 (ub-c15 spec commit) PROCESS §6's tracker-issue branch name and ci-cd §2.3.3's ruleset
+#      verification (the required-check read and the no-bypass check); numbered after the ci
+#      commit's rows so no code already cited on the tracker moves.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@scripts/checks/d44-create-deps-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D44 sibling's live-range knob carries the SAME range as this script — anchored on the knob line, so the file's own prose about the knob cannot satisfy the pin
@@ -469,6 +477,24 @@ Q300@docs/plans/01-design-spine.md@^- \*\*Pre-open health primitives and the rea
 Q301@docs/plans/crates/unblock-health.md@^\| .src/file_state\.rs. \|@the shipped v1 path is .ub-2vp. \*\*\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1.*fixed in v1\.0\.3 \(released [0-9-]+; ub-kpe, ruling \(b\) = B1a, 2026-11-18; PRD §4 D29 clause F6\)@the health plan's file_state.rs row carries the measured ub-2vp note and the v1.0.3 fix
 Q302@docs/plans/implementation-plan.md@^  copy repeats it\) \*\*\[D58 amendment, measured@\[D58 amendment, measured 2026-11-18 on local macOS 27\.2\.1 and on CI .macos-15-arm64. and\$@T4.3's out-of-scope ub-2vp entry carries the dated measured note
 Q303@docs/plans/implementation-plan.md@fixed in v1\.0\.3@  and G3\); fixed in v1\.0\.3 \(released [0-9-]+; ub-kpe, ruling \(b\) = B1a, 2026-11-18; PRD §4 D29 clause F6\)\]\*\*, .ub-p1h.@T4.3's out-of-scope ub-2vp entry carries the v1.0.3 fix
+Q304@docs/PRD.md@^\| \*\*D58\*\* \|@\*\*\[D58 amendment, .ub-c15. \(PRD §4 D5 amendment\), tracker comment 478\]\*\* .export_is_session_file.@clause (1) as amended (PRD §4 D5 amendment, ub-c15): the export_is_session_file advisory joins the advisory list
+Q305@docs/PRD.md@^\| \*\*D58\*\* \|@the call is now .unblock_health::scan_export\(path, session\).@clause (4) as amended (PRD §4 D5 amendment, ub-c15): the export scan takes the session's files, so a session-file export is never opened
+Q306@docs/PRD.md@^\| \*\*D58\*\* \|@as first landed on .main. \(T4\.3\), the export scan and the export evidence copy did repeat it@clause (6)(a2) as amended (ub-c15): the claim that no D58 probe or evidence copy repeats the close is corrected for the export scan and copy
+Q307@docs/PRD.md@^\| \*\*D58\*\* \|@\[D58 amendment, .ub-c15. \(PRD §4 D5 amendment\)\]:\*\* the copy also takes the session's files@clause (9) as amended (PRD §4 D5 amendment, ub-c15): the export evidence copy takes the session's files and never closes a descriptor on one
+Q308@docs/PRD.md@^\| \*\*D58\*\* \|@\[D58 amendment, .ub-c15.\]:\*\* an export path that is the database \(by its own JSONL name@criterion (j) as amended (ub-c15): a session-file export reports export_is_session_file and plans no regenerate_export
+Q309@docs/PRD.md@^\| \*\*D58\*\* \|@it never opens the database \*\*\[D58 amendment, .ub-c15.\]: it opens no libsql connection@the module list as amended (ub-c15): recovery.rs opens no libsql connection and keeps a raced session file open, never closed
+Q310@docs/PRD.md@^\| \*\*D5\*\* \|@\*\*D5 amendment \(2026-11-19, .ub-c15., tracker comments 454, 477 and 478\): a JSONL operation never touches the session's own database\.\*\*@the PRD §4 D5 amendment (ub-c15): a JSONL operation never touches the session's own database
+Q311@docs/PRD.md@^- \*\*NFR-7 \[security\]\*\*@\*\*v1\.1 \(D5 amendment, .ub-c15.\):\*\* a JSONL target that is the session database or one of its sidecars \(by device and inode on unix@NFR-7's v1.1 sentence (PRD §4 D5 amendment, ub-c15): a session-file JSONL target is refused before anything is written
+Q312@docs/PRD.md@^\| \*\*D29\*\* \|@\*\*\[D5 amendment, .ub-c15.\]\*\* F6's JSONL-scan rule has its main counterpart@D29 clause F6's reciprocal pointer (ub-c15): the 1.0 line's JSONL-scan rule has its main counterpart in the D5 amendment
+Q313@docs/plans/01-design-spine.md@after the open — \[D5 amendment, .ub-c15.\] an export that stats as the database@an export that stats as the database or a sidecar is never opened\$@spine §4.1 doctor as amended (PRD §4 D5 amendment, ub-c15): the export scan never opens a file that stats as the session database or a sidecar
+Q314@docs/plans/01-design-spine.md@^    //   \[D5 amendment, .ub-c15.\] .SIDECAR_SUFFIXES. and .sidecar.@\(owner .unblock-sync.\) are re-exported at the\$@spine §4.1 as amended (PRD §4 D5 amendment, ub-c15): the engine root re-exports the sidecar suffixes from unblock-sync, for the cli
+Q315@docs/plans/crates/unblock-health.md@^\| .src/export\.rs. .\[v1\.1\]. \|@that refusal \(.PathReject::SessionDatabase.\) becomes .ExportScan::SessionFile.@the health plan's src/export.rs row as amended (PRD §4 D5 amendment, ub-c15): a session-file export is ExportScan::SessionFile, never opened
+Q316@RELEASING.md@^- \*\*From v1\.1\.0 on\*\*@ci-cd §3\.3\): .windows-check. is green on the push@RELEASING.md §1 (ub-c15 spec commit): from v1.1.0 on, windows-check green on the push run of main's head, the release commit's parent, is a release-cut precondition
+Q317@docs/plans/ci-cd-and-distribution.md@^- \*\*Release-cut precondition \(v1\.1\.0 on\)@\[D5 amendment, .ub-c15.\]\.\*\* .windows-check. is green on@ci-cd §3.3 (ub-c15 spec commit): windows-check green on the push run of main's head, the release commit's parent, is a v1.1.0 release-cut precondition
+Q318@docs/plans/ci-cd-and-distribution.md@^\| .windows-check. \|@a v1\.1\.0 release-cut precondition instead \(RELEASING\.md §1; §3\.3 here\)@ci-cd §2's windows-check row (ub-c15 spec commit): not a required status check, a v1.1.0 release-cut precondition instead
+Q370@docs/PROCESS.md@^- \*\*Branch off .main.\*\*@Branch name: .ub-<id>-<slug>. for work@PROCESS §6 (ub-c15 spec commit, addendum ruling on the branch-name drift): tracker-issue work branches as ub-<id>-<slug>, the form every T4.x branch uses
+Q371@docs/plans/ci-cd-and-distribution.md@^repos/\{owner\}/\{repo\}/rules/branches/main --jq@select\(\.type == .required_status_checks.\) \|\$@ci-cd §2.3.3 (ub-c15 spec commit): the required-check verification reads main's effective ruleset rules, not the branch-protection endpoint
+Q372@docs/plans/ci-cd-and-distribution.md@^repos/\{owner\}/\{repo\}/rulesets/19670603 --jq@'\.enforcement, \(\.bypass_actors \| length\)'. must print\$@ci-cd §2.3.3 (ub-c15 spec commit): administrator enforcement is verified as an active ruleset with no bypass actors
 "
 
 blocked=0
@@ -551,9 +577,9 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 
 # The floors are the counts this file shipped with; the implementation and test commits RAISE them in
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
-check_table_floor 'required-landing (P)' "$p_count" 1 || blocked=1
+check_table_floor 'required-landing (P)' "$p_count" 2 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 4 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 303 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 321 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."

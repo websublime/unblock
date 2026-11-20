@@ -179,7 +179,9 @@ outcome, not a process violation. The Understand comment on the task's issue (§
   issue (the `comment` tool). The comment thread IS the durable, auditable per-task narrative that the verbose
   `STATUS.md` rows used to carry; `.unblock/issues.jsonl` snapshots it into git (re-export in the **same commit** as
   the work, with the wiki run-report — §8 — when the work is substantive).
-- **Branch off `main`** — never commit directly to `main`. Branch name: `t<mid>.<n>-<slug>` (e.g. `t0.6-libsql-impl`).
+- **Branch off `main`** — never commit directly to `main`. Branch name: `ub-<id>-<slug>` for work
+  tracked by an unblock issue (e.g. `ub-c15-sync-refuses-session-db`); `t<mid>.<n>-<slug>` (e.g.
+  `t0.6-libsql-impl`) is the historic form, named after an implementation-plan T-id.
 - A change may be committed only **after both gates pass** (design Review **and** Verify). The Track team
   (`git-workflow-manager`) makes **Conventional Commits** (`feat`/`fix`/`docs`/`refactor`/`test`/`chore`/`ci`…),
   **atomic** — one logical change per commit. **Exception — CI for the Verify gate (Miguel, 2026-10-29):** because

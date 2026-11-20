@@ -23,8 +23,14 @@ Before cutting a release:
   default `GITHUB_TOKEN`. A secret cannot be verified from the client, so `cargo xtask release` only
   prints a reminder — confirm it is set before you push. (The `actions/attest` provenance step is
   unchanged; it uses the workflow OIDC identity, not the PAT.)
+- **From v1.1.0 on** ([D5 amendment, `ub-c15`]; ci-cd §3.3): `windows-check` is green on the push
+  CI run of `main`'s head — the parent commit that the helper's version bump (`Cargo.toml` and
+  `Cargo.lock` only) is cut on top of, and the only Windows compile before `release.yml` builds
+  the tag. It is not a required status check on pull requests, so check it here. After
+  `git fetch origin`, this must show a completed, successful run:
+  `gh run list --commit "$(git rev-parse origin/main)" --event push --workflow ci.yml`.
 
-The pre-flight below enforces the first three; the token is your responsibility to have configured.
+The pre-flight below enforces the first three; the token and the green CI run are your responsibility.
 
 ## 2. `cargo xtask release`
 

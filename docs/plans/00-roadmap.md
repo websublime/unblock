@@ -578,8 +578,10 @@ FR, re-tiers nothing, and leaves the v1.2+ resequence of PRD §4 D41 untouched. 
   database. v1.0.3 refuses such a target with `PATH_TRAVERSAL` before anything is written, including a target
   that links to the sidecars at the symlink-resolved database path; it never closes a descriptor on it, and opens
   none when the target already is such a file (an amendment on the 1.0 line's PRD §4 D5 row). The cells are
-  `w1j0`–`w1j5` (Linux and macOS). No tool schema or `contract_version` changes. The same hazard on `main` is
-  tracked for v1.1 (`ub-c15`); a database named like the write-lock file is a separate open residual (`ub-k4j`).
+  `w1j0`–`w1j5` (Linux and macOS). No tool schema or `contract_version` changes. The same hazard on `main`,
+  where it also reaches D58's in-session export scan, export copy and export regeneration, is fixed for v1.1.0 by
+  main's own PRD §4 D5 amendment (`ub-c15`, implementation-plan T4.5); a database named like the write-lock file is
+  a separate open residual (`ub-k4j`).
 - **Release builds compile only the shipped package** (the PRD §4 D17 amendment of `ub-2vp`, backported).
   `precise-builds = true` under `[dist]` in `dist-workspace.toml`. v1.0.0–v1.0.2 built `--workspace` and so
   compiled the storage testkit into the shipped `unblock`. The v1.0.3 release job's build log must read
@@ -638,7 +640,7 @@ DB config layer's writer is the `issue` action `config`; `unblock-storage` takes
 three trait methods, and `unblock-sync` only forwards them in its three test doubles. **[D58]** FR-16 full adds NO MCP surface
 (`doctor --repair` is a CLI flag, D3): `unblock-storage` takes two trait methods (`health_facts`, `repair`) and four
 local-file primitives, `unblock-health` becomes a pure classifier over engine-gathered facts, `unblock-config` refuses a
-LOST database and gives `no_db` its reader, `unblock-cli`'s `init` gains a database-only mode, and `unblock-sync`'s scanner gets its health consumer. **[D59]** The rmcp 3.10 move (`ub-9ov`) touches `unblock-mcp` (code), `unblock-cli` (wire tests, the D40 closed-stdout exit, the managed-block renderer in `src/commands/agents.rs` with the regenerated `AGENTS.md` and `init_agents` snapshot, and the cancel sentence in `src/commands/mcp.rs` `instructions()`) and `unblock-fuzz` (the oracle's types), and adds no tool, because the MCP 2026-07-28 lifecycle and `server/discover` are rmcp's and serve the same eight tools.
+LOST database and gives `no_db` its reader, `unblock-cli`'s `init` gains a database-only mode, and `unblock-sync`'s scanner gets its health consumer. **[D59]** The rmcp 3.10 move (`ub-9ov`) touches `unblock-mcp` (code), `unblock-cli` (wire tests, the D40 closed-stdout exit, the managed-block renderer in `src/commands/agents.rs` with the regenerated `AGENTS.md` and `init_agents` snapshot, and the cancel sentence in `src/commands/mcp.rs` `instructions()`) and `unblock-fuzz` (the oracle's types), and adds no tool, because the MCP 2026-07-28 lifecycle and `server/discover` are rmcp's and serve the same eight tools. **[D5 amendment]** `ub-c15` (implementation-plan T4.5) adds no FR and no MCP surface: `unblock-sync` gains `SessionFiles` and `PathReject::SessionDatabase` and becomes the owner, above L2, of the `SQLite` sidecar suffixes, `unblock-health` passes the session's files through its export scan and evidence copy and gains the `export_is_session_file` advisory, `unblock-engine` hands `SessionFiles::of_database` to every in-session JSONL call, `unblock-cli` reads the suffixes through the engine, and CI gains `windows-check` and the lock cells' `exclusivity-macos` steps; `unblock.mcp.v1.13` stands.
 
 ---
 
