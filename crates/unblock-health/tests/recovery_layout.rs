@@ -2,7 +2,13 @@
 //!
 //! Name format, collision retry, the 16-attempt cap, confinement, the symlinked-root refusal, the
 //! export copy and its refusals, the 0700/0600 modes, manifest round-trip, the temp-then-rename
-//! manifest write and the stale scan.
+//! manifest write and the stale scan. PRD §4 D5 amendment (`ub-c15`): the export copy refuses a
+//! session-file source with no copy and no leaked descriptor (the fd witness); sidecar names and
+//! symlinks are refused at the preflight first.
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "../../unblock-sync/tests/common/fd_witness.rs"]
+mod fd_witness;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -671,4 +677,155 @@ fn scan_recovery_root_of_an_absent_root_is_empty_and_creates_nothing() {
     let dir = TempDir::new().unwrap();
     assert!(scan_recovery_root(&root(&dir)).is_empty());
     assert!(!dir.path().join(".unblock").exists());
+}
+
+// ---- PRD §4 D5 amendment (`ub-c15`): the export copy never takes a session file ----
+
+/// The conflict-marker bytes every session file carries here.
+const MARKED: &[u8] = b"{}\n<<<<<<< HEAD\n{}\n";
+
+/// A file's bytes and (on unix) identity.
+fn identity(p: &Path) -> (Vec<u8>, Option<(u64, u64)>) {
+    #[cfg(unix)]
+    let id = {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = std::fs::metadata(p).unwrap();
+        Some((meta.dev(), meta.ino()))
+    };
+    #[cfg(not(unix))]
+    let id = None;
+    (std::fs::read(p).unwrap(), id)
+}
+
+/// Copy `src` with the session of `db` and assert the refusal: `RecoveryEvidenceWrite` (`IO_ERROR`),
+/// no `export/issues.jsonl`, `watched` unchanged, and no descriptor left on it (fd witness +0).
+fn assert_copy_refused(dir: &TempDir, db: &Path, src: &Path, watched: &Path, what: &str) {
+    let run = RunDir::create(&root(dir), now(), PID).unwrap();
+    let session = unblock_sync::SessionFiles::of_database(db);
+    let before = identity(watched);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let fds = {
+        fd_witness::assert_witness_sees(watched);
+        fd_witness::descriptors_on(watched)
+    };
+    assert_refused(run.copy_export(src, &unblock_dir(dir), &session), what);
+    assert_no_export_copy(&run);
+    assert_eq!(
+        identity(watched),
+        before,
+        "{what}: the session file changed"
+    );
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    assert_eq!(
+        fd_witness::descriptors_on(watched),
+        fds,
+        "{what}: a descriptor was left on {}",
+        watched.display()
+    );
+    std::fs::remove_dir_all(run.path()).unwrap();
+}
+
+/// `.unblock/<db_name>` plus its three sidecars, each carrying [`MARKED`]; returns db first.
+fn session_files(dir: &TempDir, db_name: &str) -> Vec<PathBuf> {
+    std::fs::create_dir_all(unblock_dir(dir)).unwrap();
+    let db = unblock_dir(dir).join(db_name);
+    std::fs::write(&db, MARKED).unwrap();
+    let mut all = vec![db.clone()];
+    for suffix in unblock_sync::SIDECAR_SUFFIXES {
+        let path = unblock_sync::sidecar(&db, suffix);
+        std::fs::write(&path, MARKED).unwrap();
+        all.push(path);
+    }
+    all
+}
+
+/// (H4) The export copy refuses a session-file source — the database itself named `issues.jsonl`, a
+/// hard link to the database or a sidecar, or a hard link to a symlinked database's target files —
+/// with no copy written, the source unchanged and no descriptor left on it.
+#[test]
+fn copy_export_refuses_a_session_file_and_writes_no_copy() {
+    // Own name: the database itself is the export (`db_filename = "issues.jsonl"`).
+    let dir = TempDir::new().unwrap();
+    let all = session_files(&dir, "issues.jsonl");
+    assert_copy_refused(
+        &dir,
+        &all[0],
+        &all[0],
+        &all[0],
+        "the database named issues.jsonl",
+    );
+
+    #[cfg(unix)]
+    {
+        let dir = TempDir::new().unwrap();
+        let all = session_files(&dir, "unblock.db");
+        let alias = unblock_dir(&dir).join("issues.jsonl");
+        for target in &all {
+            std::fs::hard_link(target, &alias).unwrap();
+            assert_copy_refused(
+                &dir,
+                &all[0],
+                &alias,
+                target,
+                "a hard link to a session file",
+            );
+            std::fs::remove_file(&alias).unwrap();
+        }
+
+        // A symlinked database: its sidecars live beside the TARGET.
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(unblock_dir(&dir).join("store")).unwrap();
+        let all = session_files(&dir, "store/unblock.db");
+        let link = unblock_dir(&dir).join("unblock.db");
+        std::os::unix::fs::symlink(&all[0], &link).unwrap();
+        let alias = unblock_dir(&dir).join("issues.jsonl");
+        for target in &all {
+            std::fs::hard_link(target, &alias).unwrap();
+            assert_copy_refused(
+                &dir,
+                &link,
+                &alias,
+                target,
+                "a hard link to a symlinked database's target file",
+            );
+            std::fs::remove_file(&alias).unwrap();
+        }
+    }
+}
+
+/// (H5) Precedence pin: a sidecar's own name is refused by the sync allowlist and a symlink leaf as a
+/// non-regular file, both at the preflight, before the session check.
+#[test]
+fn copy_export_refuses_session_sidecar_names_and_symlinks_at_preflight_first() {
+    let dir = TempDir::new().unwrap();
+    let all = session_files(&dir, "issues.jsonl");
+    let run = RunDir::create(&root(&dir), now(), PID).unwrap();
+    let session = unblock_sync::SessionFiles::of_database(&all[0]);
+    for sidecar in &all[1..] {
+        let err = run
+            .copy_export(sidecar, &unblock_dir(&dir), &session)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("DisallowedExtension"),
+            "{}: {err}",
+            sidecar.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        let alias = unblock_dir(&dir).join("alias.jsonl");
+        for target in &all {
+            std::os::unix::fs::symlink(target, &alias).unwrap();
+            let err = run
+                .copy_export(&alias, &unblock_dir(&dir), &session)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("NonRegularFile"),
+                "{}: {err}",
+                target.display()
+            );
+            std::fs::remove_file(&alias).unwrap();
+        }
+    }
+    assert_no_export_copy(&run);
 }

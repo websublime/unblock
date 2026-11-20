@@ -45,6 +45,10 @@ pub struct FakeStorage {
     rows: Mutex<HashMap<String, Issue>>,
     create_issues_calls: AtomicUsize,
     create_issue_calls: AtomicUsize,
+    /// `list_issues` calls (PRD §4 D5 amendment, `ub-c15`: a refused export reads no corpus).
+    list_issues_calls: AtomicUsize,
+    /// `get_issue` calls (a refused import, `dry_run` included, reads no row).
+    get_issue_calls: AtomicUsize,
 }
 
 impl FakeStorage {
@@ -55,6 +59,8 @@ impl FakeStorage {
             rows: Mutex::new(rows),
             create_issues_calls: AtomicUsize::new(0),
             create_issue_calls: AtomicUsize::new(0),
+            list_issues_calls: AtomicUsize::new(0),
+            get_issue_calls: AtomicUsize::new(0),
         }
     }
 
@@ -67,11 +73,22 @@ impl FakeStorage {
     pub fn create_issue_calls(&self) -> usize {
         self.create_issue_calls.load(Ordering::SeqCst)
     }
+
+    #[must_use]
+    pub fn list_issues_calls(&self) -> usize {
+        self.list_issues_calls.load(Ordering::SeqCst)
+    }
+
+    #[must_use]
+    pub fn get_issue_calls(&self) -> usize {
+        self.get_issue_calls.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
 impl Storage for FakeStorage {
     async fn list_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError> {
+        self.list_issues_calls.fetch_add(1, Ordering::SeqCst);
         let rows = self.rows.lock().expect("rows lock");
         let mut out: Vec<Issue> = rows
             .values()
@@ -90,6 +107,7 @@ impl Storage for FakeStorage {
     }
 
     async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
+        self.get_issue_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.rows.lock().expect("rows lock").get(id).cloned())
     }
 
