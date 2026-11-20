@@ -68,16 +68,29 @@ async fn export_then_import_round_trip_identity() {
     source.create_issue(&issue("ub-2"), "t").await.unwrap();
 
     let target = dir.join("issues.jsonl");
-    let report = export_jsonl(&source, &target, &dir, &ExportOptions::default())
-        .await
-        .expect("export");
+    let report = export_jsonl(
+        &source,
+        &target,
+        &dir,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export");
     assert_eq!(report.written, 2);
 
     // Import into a fresh DB → both issues land, sync_equals identity.
     let dest = fresh_storage().await;
-    let ir = import_jsonl(&dest, &target, &dir, "t", &ImportOptions::default())
-        .await
-        .expect("import");
+    let ir = import_jsonl(
+        &dest,
+        &target,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("import");
     assert_eq!(ir.imported, 2);
     let a = dest.get_issue("ub-1").await.unwrap().unwrap();
     assert!(issue("ub-1").sync_equals(&a));
@@ -89,14 +102,27 @@ async fn re_import_is_idempotent() {
     let storage = fresh_storage().await;
     storage.create_issue(&issue("ub-1"), "t").await.unwrap();
     let target = dir.join("issues.jsonl");
-    export_jsonl(&storage, &target, &dir, &ExportOptions::default())
-        .await
-        .unwrap();
+    export_jsonl(
+        &storage,
+        &target,
+        &dir,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .unwrap();
 
     // Re-import the same file into the SAME DB → imported == 0 (all skipped as identical).
-    let ir = import_jsonl(&storage, &target, &dir, "t", &ImportOptions::default())
-        .await
-        .expect("import");
+    let ir = import_jsonl(
+        &storage,
+        &target,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("import");
     assert_eq!(ir.imported, 0);
     assert_eq!(ir.skipped, 1);
     assert_eq!(count_rows(&storage).await, 1);
@@ -109,9 +135,16 @@ async fn conflict_marker_file_rejected_zero_writes() {
     let path = dir.join("issues.jsonl");
     std::fs::write(&path, "<<<<<<< HEAD\n=======\n").unwrap();
     let before = count_rows(&storage).await;
-    let err = import_jsonl(&storage, &path, &dir, "t", &ImportOptions::default())
-        .await
-        .expect_err("markers");
+    let err = import_jsonl(
+        &storage,
+        &path,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect_err("markers");
     assert!(matches!(
         err,
         unblock_sync::SyncError::ConflictMarkers { .. }
@@ -143,9 +176,16 @@ async fn tombstone_non_resurrection_zero_writes() {
     // Import a NON-tombstone line for ub-1 → skipped, still a tombstone.
     let line = serialize_issue_line(&issue("ub-1")).unwrap();
     let path = write_lines(&dir, "issues.jsonl", &[line]);
-    let ir = import_jsonl(&storage, &path, &dir, "t", &ImportOptions::default())
-        .await
-        .expect("import");
+    let ir = import_jsonl(
+        &storage,
+        &path,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("import");
     assert_eq!(ir.imported, 0, "must not resurrect");
     assert_eq!(ir.skipped, 1);
     let after = storage.get_issue("ub-1").await.unwrap().unwrap();
@@ -180,6 +220,7 @@ async fn dry_run_over_resurrection_path_zero_writes() {
             dry_run: true,
             ..ImportOptions::default()
         },
+        &unblock_sync::SessionFiles::none(),
     )
     .await
     .expect("dry run");
@@ -230,6 +271,7 @@ async fn tombstone_guard_wins_over_error_policy_on_real_libsql() {
             on_collision: CollisionPolicy::Error,
             ..ImportOptions::default()
         },
+        &unblock_sync::SessionFiles::none(),
     )
     .await
     .expect("the tombstone guard must skip BEFORE the Error collision branch");
@@ -268,9 +310,16 @@ async fn k_of_n_mid_batch_failure_rolls_back_whole_batch() {
     ];
     let path = write_lines(&dir, "issues.jsonl", &lines);
 
-    let err = import_jsonl(&storage, &path, &dir, "t", &ImportOptions::default())
-        .await
-        .expect_err("mid-batch id collision must fail the atomic tx");
+    let err = import_jsonl(
+        &storage,
+        &path,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect_err("mid-batch id collision must fail the atomic tx");
     assert!(
         matches!(err, unblock_sync::SyncError::Storage { .. }),
         "{err:?}"
@@ -656,9 +705,16 @@ async fn malformed_line_rejected_zero_writes() {
     let storage = fresh_storage().await;
     let good = serialize_issue_line(&issue("ub-1")).unwrap();
     let path = write_lines(&dir, "issues.jsonl", &[good, "not json".to_string()]);
-    let err = import_jsonl(&storage, &path, &dir, "t", &ImportOptions::default())
-        .await
-        .expect_err("malformed");
+    let err = import_jsonl(
+        &storage,
+        &path,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect_err("malformed");
     assert!(matches!(
         err,
         unblock_sync::SyncError::ValidationFailed { .. }
@@ -711,9 +767,15 @@ async fn export_then_import_round_trips_comments_including_the_redacted_state() 
     source.create_issue(&seeded, "t").await.unwrap();
 
     let target = dir.join("issues.jsonl");
-    let report = export_jsonl(&source, &target, &dir, &ExportOptions::default())
-        .await
-        .expect("export");
+    let report = export_jsonl(
+        &source,
+        &target,
+        &dir,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export");
     assert_eq!(report.written, 1);
 
     // The exported line actually carries the comments (the export is non-vacuous).
@@ -729,9 +791,16 @@ async fn export_then_import_round_trips_comments_including_the_redacted_state() 
 
     // Import into a fresh DB.
     let dest = fresh_storage().await;
-    let ir = import_jsonl(&dest, &target, &dir, "t", &ImportOptions::default())
-        .await
-        .expect("import");
+    let ir = import_jsonl(
+        &dest,
+        &target,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("import");
     assert_eq!(ir.imported, 1);
 
     let from_source = source.get_issue("ub-1").await.unwrap().unwrap();
@@ -805,9 +874,15 @@ async fn dep_metadata_survives_export_import_export() {
     source.create_issue(&carrier, "t").await.unwrap();
 
     let first = dir.join("issues.jsonl");
-    export_jsonl(&source, &first, &dir, &ExportOptions::default())
-        .await
-        .expect("export 1");
+    export_jsonl(
+        &source,
+        &first,
+        &dir,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export 1");
     let first_bytes = std::fs::read(&first).expect("read 1");
     assert!(
         String::from_utf8_lossy(&first_bytes).contains("KEEP"),
@@ -815,14 +890,27 @@ async fn dep_metadata_survives_export_import_export() {
     );
 
     let dest = fresh_storage().await;
-    import_jsonl(&dest, &first, &dir, "t", &ImportOptions::default())
-        .await
-        .expect("import");
+    import_jsonl(
+        &dest,
+        &first,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("import");
 
     let second = dir.join("issues2.jsonl");
-    export_jsonl(&dest, &second, &dir, &ExportOptions::default())
-        .await
-        .expect("export 2");
+    export_jsonl(
+        &dest,
+        &second,
+        &dir,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export 2");
     assert_eq!(
         first_bytes,
         std::fs::read(&second).expect("read 2"),
@@ -843,9 +931,15 @@ async fn a_dep_without_metadata_still_emits_exactly_five_keys() {
     storage.create_issue(&carrier, "t").await.unwrap();
 
     let target = dir.join("issues.jsonl");
-    export_jsonl(&storage, &target, &dir, &ExportOptions::default())
-        .await
-        .expect("export");
+    export_jsonl(
+        &storage,
+        &target,
+        &dir,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export");
     let text = std::fs::read_to_string(&target).expect("read");
     let line = text
         .lines()
@@ -895,14 +989,27 @@ async fn a_record_carrying_a_gating_cycle_still_imports() {
         .expect("the bulk path commits a mutual gating cycle - unchanged by D44");
 
     let path = dir.join("issues.jsonl");
-    export_jsonl(&source, &path, &dir, &ExportOptions::default())
-        .await
-        .expect("export");
+    export_jsonl(
+        &source,
+        &path,
+        &dir,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export");
 
     let dest = fresh_storage().await;
-    let report = import_jsonl(&dest, &path, &dir, "t", &ImportOptions::default())
-        .await
-        .expect("an exported record must stay importable - D44 changed NOTHING on this leg");
+    let report = import_jsonl(
+        &dest,
+        &path,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("an exported record must stay importable - D44 changed NOTHING on this leg");
     assert_eq!(report.imported, 2, "both records landed");
 
     let restored = dest.list_dependencies("ub-cyc-a").await.expect("list");
@@ -1001,15 +1108,28 @@ async fn a_kept_issue_blocked_by_an_ephemeral_blocker_is_still_blocked_after_a_r
     );
 
     let path = dir.join("issues.jsonl");
-    let report = export_jsonl(&source, &path, &dir, &ExportOptions::default())
-        .await
-        .expect("export");
+    let report = export_jsonl(
+        &source,
+        &path,
+        &dir,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export");
     assert_eq!(report.written, 2, "the ephemeral blocker travels too");
 
     let dest = fresh_storage().await;
-    let imported = import_jsonl(&dest, &path, &dir, "t", &ImportOptions::default())
-        .await
-        .expect("every file the exporter produces must import under the D45 guard");
+    let imported = import_jsonl(
+        &dest,
+        &path,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("every file the exporter produces must import under the D45 guard");
     assert_eq!(imported.imported, 2);
 
     // The kept edge set is preserved …
@@ -1056,18 +1176,31 @@ async fn a_kept_epic_with_an_ephemeral_child_is_still_blocked_after_a_round_trip
     );
 
     let path = dir.join("issues.jsonl");
-    let report = export_jsonl(&source, &path, &dir, &ExportOptions::default())
-        .await
-        .expect("export");
+    let report = export_jsonl(
+        &source,
+        &path,
+        &dir,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export");
     assert_eq!(
         report.written, 2,
         "the excluded CHILD travels because it BLOCKS the kept epic (the IN direction)"
     );
 
     let dest = fresh_storage().await;
-    let imported = import_jsonl(&dest, &path, &dir, "t", &ImportOptions::default())
-        .await
-        .expect("import");
+    let imported = import_jsonl(
+        &dest,
+        &path,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("import");
     assert_eq!(imported.imported, 2);
 
     let restored = dest.list_dependencies("ub-eph-child").await.expect("list");
@@ -1099,9 +1232,15 @@ async fn an_already_dangling_workspace_exports_fine_and_the_guarded_import_refus
     let source = StorageInjector::already_dangling_edge(inner.clone(), "ub-1", "ub-ghost");
 
     let path = dir.join("issues.jsonl");
-    let report = export_jsonl(&source, &path, &dir, &ExportOptions::default())
-        .await
-        .expect("the exporter does not repair — it exports fine");
+    let report = export_jsonl(
+        &source,
+        &path,
+        &dir,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("the exporter does not repair — it exports fine");
     assert_eq!(report.written, 1, "a dangling target is no row to pull");
     assert!(
         std::fs::read_to_string(&path).unwrap().contains("ub-ghost"),
@@ -1109,9 +1248,16 @@ async fn an_already_dangling_workspace_exports_fine_and_the_guarded_import_refus
     );
 
     let dest = fresh_storage().await;
-    let err = import_jsonl(&dest, &path, &dir, "t", &ImportOptions::default())
-        .await
-        .expect_err("the guarded import must refuse a dangling edge whole-batch");
+    let err = import_jsonl(
+        &dest,
+        &path,
+        &dir,
+        "t",
+        &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect_err("the guarded import must refuse a dangling edge whole-batch");
     let unblock_sync::SyncError::Storage { source } = &err else {
         panic!("expected the transparent storage source, got {err:?}");
     };

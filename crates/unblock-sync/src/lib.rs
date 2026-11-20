@@ -19,6 +19,10 @@ mod reliability;
 
 #[cfg(test)]
 mod testutil;
+// The fd witness (PRD §4 D5 amendment, `ub-c15`) for the in-crate session-file cells.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[path = "../tests/common/fd_witness.rs"]
+mod fd_witness;
 
 // Reports are model-owned (CF-A): re-export, never redefine.
 pub use unblock_model::{ExportReport, ImportReport};
@@ -29,7 +33,8 @@ pub use bd_import::import_bd;
 pub use export::{ExportOptions, export_jsonl};
 pub use import::{CollisionPolicy, ImportOptions, import_jsonl};
 
-// Preflight + scanning primitives (also consumed by `unblock-health` lite + the fuzz targets).
+// Preflight + scanning primitives (`scan_conflict_markers` is also consumed by `unblock-health`'s
+// export scan, which passes the session's files — PRD §4 D58 clause (4) and D5 amendment).
 pub use conflict::{
     ConflictMarker, ConflictMarkerType, MAX_IMPORT_FILE_BYTES, ensure_no_conflict_markers,
     scan_conflict_markers,
@@ -43,7 +48,7 @@ pub use path::{JOURNAL_SUFFIX, SHM_SUFFIX, SIDECAR_SUFFIXES, WAL_SUFFIX, sidecar
 
 // The per-crate error + its `PathReject` detail.
 pub use error::SyncError;
-pub use path::PathReject;
+pub use path::{PathReject, SessionFiles};
 
 // T3.4/D30 EXPORT-side fault-injection seam (NFR-4). Behind the non-default `fault-injection`
 // feature ONLY — driven from `tests/atomic_failure.rs`; NEVER in the shipped binary.

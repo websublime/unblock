@@ -62,7 +62,7 @@ fn conflict_marker_jsonl_replays_as_recoverable() {
     .unwrap();
 
     let facts = gather_preopen(&paths).expect("gather_preopen");
-    let export = scan_export(Some(&paths.jsonl_path));
+    let export = scan_export(Some(&paths.jsonl_path), &unblock_sync::SessionFiles::none());
     let classification = classify(
         &facts,
         None,

@@ -3,9 +3,10 @@
 //! One run directory per mutating phase, named `YYYYMMDDTHHMMSSZ-<run-id>`. This module names and
 //! creates it, copies the export into it, writes the pre-gate sidecar captures under `original/`,
 //! hashes the copies and writes `manifest.json` temp-file-then-rename. Every write stays inside the run directory. Directories are created 0700
-//! and files 0600 on unix, because the evidence holds the whole database. It never opens the
-//! database or a sidecar, never deletes anything and never writes a `.gitignore`. Its file I/O
-//! blocks, so async callers run it on a blocking thread.
+//! and files 0600 on unix, because the evidence holds the whole database. It never opens a database
+//! connection, never closes a descriptor on the database or a sidecar (PRD §4 D5 amendment), never
+//! deletes anything and never writes a `.gitignore`. Its file I/O blocks, so async callers run it on
+//! a blocking thread.
 
 use std::fs::{DirBuilder, File, Metadata, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
@@ -15,6 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use snafu::ResultExt;
+use unblock_sync::SessionFiles;
 
 use crate::error::{HealthError, RecoveryEvidenceWriteSnafu, SerializeSnafu};
 use crate::facts::RecoveryEntry;
@@ -169,17 +171,42 @@ impl RunDir {
     /// [`unblock_sync::MAX_IMPORT_FILE_BYTES`] bytes are copied. The copy is created new with mode
     /// 0600 on unix, so existing evidence is never overwritten.
     ///
+    /// PRD §4 D5 amendment (`ub-c15`): `src` is never one of `session`'s files. One that stats as
+    /// one is refused before any open; one recognized only on its opened descriptor (a source that
+    /// raced into the database or a sidecar) is refused and that descriptor is kept open, never
+    /// closed (`unblock_sync::SessionFiles::open_verified`).
+    ///
     /// # Errors
     ///
-    /// [`HealthError::RecoveryEvidenceWrite`] when `src` fails the preflight, is not a regular
-    /// file, changes between its check and its open, exceeds the size cap, cannot be read, or
-    /// the copy cannot be written.
-    pub fn copy_export(&self, src: &Path, confine_root: &Path) -> Result<PathBuf, HealthError> {
-        let cap = unblock_sync::MAX_IMPORT_FILE_BYTES;
+    /// [`HealthError::RecoveryEvidenceWrite`] when `src` fails the preflight, is a session file, is
+    /// not a regular file, changes between its check and its open, exceeds the size cap, cannot be
+    /// read, or the copy cannot be written.
+    pub fn copy_export(
+        &self,
+        src: &Path,
+        confine_root: &Path,
+        session: &SessionFiles,
+    ) -> Result<PathBuf, HealthError> {
         let checked = unblock_sync::validate_sync_path(src, confine_root, false)
             .map_err(|err| refusal(src, ErrorKind::InvalidInput, err.to_string()))?;
-        let before = std::fs::symlink_metadata(&checked)
-            .context(RecoveryEvidenceWriteSnafu { path: src })?;
+        session
+            .reject(&checked)
+            .map_err(|err| refusal(src, ErrorKind::InvalidInput, err.to_string()))?;
+        self.copy_checked(&checked, src, session)
+    }
+
+    /// The copy half of [`RunDir::copy_export`], after the preflight and the session stat: lstat →
+    /// `open_verified` → `same_file` → copy. Its own fstat for `same_file` stays beside the one
+    /// inside `open_verified` (one extra syscall per `--repair` copy, rather than new sync API).
+    fn copy_checked(
+        &self,
+        checked: &Path,
+        src: &Path,
+        session: &SessionFiles,
+    ) -> Result<PathBuf, HealthError> {
+        let cap = unblock_sync::MAX_IMPORT_FILE_BYTES;
+        let before =
+            std::fs::symlink_metadata(checked).context(RecoveryEvidenceWriteSnafu { path: src })?;
         if !before.file_type().is_file() {
             return Err(refusal(
                 src,
@@ -187,7 +214,17 @@ impl RunDir {
                 "the export is not a regular file".to_string(),
             ));
         }
-        let input = File::open(&checked).context(RecoveryEvidenceWriteSnafu { path: src })?;
+        let Some(input) = session
+            .open_verified(checked)
+            .context(RecoveryEvidenceWriteSnafu { path: src })?
+        else {
+            // The descriptor is a session file: `open_verified` kept it open, never closed.
+            return Err(refusal(
+                src,
+                ErrorKind::InvalidInput,
+                "the export is the session database or one of its sidecars".to_string(),
+            ));
+        };
         let opened = input
             .metadata()
             .context(RecoveryEvidenceWriteSnafu { path: src })?;
@@ -748,6 +785,51 @@ mod tests {
         assert_eq!(
             parse_run_dir_name("19700101T000001Z-0123abcd"),
             Some(UNIX_EPOCH + Duration::from_secs(1))
+        );
+    }
+
+    /// H6 (PRD §4 D5 amendment, `ub-c15`): a source that raced into the session database after the
+    /// stat check is refused on its opened descriptor, no copy is written, and that descriptor is
+    /// kept open (fd witness +1). The database holds no conflict-marker bytes (claims row N4).
+    #[cfg(unix)]
+    #[test]
+    fn copy_checked_keeps_a_raced_session_file_open() {
+        use super::{EXPORT_COPY, RunDir};
+        use std::time::SystemTime;
+        use unblock_sync::SessionFiles;
+
+        let dir = tempfile::tempdir().unwrap();
+        let unblock = dir.path().join(".unblock");
+        std::fs::create_dir(&unblock).unwrap();
+        let db = unblock.join("unblock.db");
+        std::fs::write(&db, b"SQLite format 3\0").unwrap();
+        let alias = unblock.join("issues.jsonl");
+        std::fs::hard_link(&db, &alias).expect("hard link");
+        let run = RunDir::create(&unblock.join(".recovery"), SystemTime::now(), 1).unwrap();
+        let session = SessionFiles::of_database(&db);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let before = {
+            crate::fd_witness::assert_witness_sees(&db);
+            crate::fd_witness::descriptors_on(&db)
+        };
+
+        let err = run
+            .copy_checked(&alias, &alias, &session)
+            .expect_err("a raced session-file source is refused");
+        assert!(
+            err.to_string().contains("session database"),
+            "unexpected refusal: {err}"
+        );
+        assert!(
+            !run.path().join(EXPORT_COPY).exists(),
+            "no export copy is written"
+        );
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(
+            crate::fd_witness::descriptors_on(&db),
+            before + 1,
+            "the raced session file's descriptor is kept open, never closed"
         );
     }
 }

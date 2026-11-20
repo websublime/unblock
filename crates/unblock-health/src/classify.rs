@@ -129,6 +129,9 @@ pub fn classify(
         ExportScan::Unscannable { reason } => anomalies.push(AnomalyClass::JsonlUnscannable {
             reason: reason.clone(),
         }),
+        // PRD §4 D5 amendment (`ub-c15`): a session-file export is reported, never scanned and never
+        // regenerated, so it is an advisory (no level, no planned action).
+        ExportScan::SessionFile => advisories.push(Advisory::ExportIsSessionFile),
     }
 
     if let Some(db) = db {

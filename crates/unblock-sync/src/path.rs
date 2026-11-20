@@ -46,6 +46,11 @@ pub enum PathReject {
     NonRegularFile,
     /// A temp-file allocation collided (`create_new` `AlreadyExists`).
     TempCollision,
+    /// PRD §4 D5 amendment (v1.1, `ub-c15`): the target is the session's own database or one of its
+    /// `-wal`/`-shm`/`-journal` sidecars (same `(dev, ino)` on unix, under any name): importing it
+    /// would open and close a descriptor on a file the process holds `SQLite` locks on; exporting
+    /// would rename over it.
+    SessionDatabase,
 }
 
 /// The `SQLite` write-ahead-log sidecar suffix.
@@ -71,6 +76,234 @@ pub fn sidecar(db: &Path, suffix: &str) -> PathBuf {
     let mut raw = db.as_os_str().to_os_string();
     raw.push(suffix);
     PathBuf::from(raw)
+}
+
+/// The most `(dev, ino)` pairs a [`SessionFiles`] holds: two bases (the db path as given and its
+/// canonical form), each the database plus its three sidecars.
+#[cfg(unix)]
+const SESSION_FILES_CAP: usize = 2 * (1 + SIDECAR_SUFFIXES.len());
+
+/// The files the live session holds open — the database and its `-wal`, `-shm`, `-journal` sidecars
+/// (PRD §4 D5 amendment, v1.1, `ub-c15`; NFR-7). The workspace's ONE session-file type: every sync
+/// target and `unblock-health`'s export scan and evidence copy compare against it.
+///
+/// - unix: up to 8 `(dev, ino)` pairs in a fixed array (the set holds no heap), taken by
+///   `std::fs::metadata` (a stat, no descriptor; a missing file is skipped).
+/// - The sidecar names are derived from the db path as given AND from its canonical
+///   (symlink-resolved) form: `SQLite` resolves a symlinked database and keeps its
+///   `-wal`/`-shm`/`-journal` next to the TARGET, so both locations are covered (`canonicalize` is a
+///   path walk, it opens no descriptor).
+/// - non-unix: each path canonicalized (the raw path when it does not exist), compared by equality
+///   with the canonicalized target. A hard link is not caught there; that is harmless: Windows locks
+///   belong to their handle, so no close-drop exists there.
+#[derive(Debug, Clone)]
+pub struct SessionFiles {
+    #[cfg(unix)]
+    ids: [(u64, u64); SESSION_FILES_CAP],
+    #[cfg(unix)]
+    len: u8,
+    #[cfg(not(unix))]
+    paths: Vec<PathBuf>,
+}
+
+impl SessionFiles {
+    /// Stat `db` and its sidecars NOW, at `db` as given and at `dunce::canonicalize(db)` when that
+    /// differs (the engine builds one per call, so a sidecar created since the session opened is
+    /// included). Building allocates only the canonical `PathBuf` and one sidecar-name buffer per
+    /// base, reused across the three suffixes.
+    #[must_use]
+    pub fn of_database(db: &Path) -> Self {
+        let mut files = Self::none();
+        files.add_base(db);
+        if let Ok(real) = dunce::canonicalize(db)
+            && real != db
+        {
+            files.add_base(&real);
+        }
+        files
+    }
+
+    /// No session files: matches nothing, and allocates nothing (tests; callers outside a session).
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            #[cfg(unix)]
+            ids: [(0, 0); SESSION_FILES_CAP],
+            #[cfg(unix)]
+            len: 0,
+            #[cfg(not(unix))]
+            paths: Vec::new(),
+        }
+    }
+
+    /// Add `base` and its three sidecars, reusing one name buffer: push the suffix, stat, truncate
+    /// back.
+    #[cfg(unix)]
+    fn add_base(&mut self, base: &Path) {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        self.add(base);
+        let base_len = base.as_os_str().len();
+        let mut name = OsString::with_capacity(base_len + JOURNAL_SUFFIX.len());
+        name.push(base.as_os_str());
+        for suffix in SIDECAR_SUFFIXES {
+            name.push(suffix);
+            self.add(Path::new(&name));
+            let mut bytes = name.into_vec();
+            bytes.truncate(base_len);
+            name = OsString::from_vec(bytes);
+        }
+    }
+
+    /// Add `base` and its three sidecars (each stored as its canonical path).
+    #[cfg(not(unix))]
+    fn add_base(&mut self, base: &Path) {
+        self.add(base);
+        for suffix in SIDECAR_SUFFIXES {
+            self.add(&sidecar(base, suffix));
+        }
+    }
+
+    /// Record `p`'s `(dev, ino)` when it exists and is not yet in the set.
+    #[cfg(unix)]
+    fn add(&mut self, p: &Path) {
+        let len = usize::from(self.len);
+        if let Some(id) = file_id(p)
+            && len < SESSION_FILES_CAP
+            && !self.ids[..len].contains(&id)
+        {
+            self.ids[len] = id;
+            self.len += 1;
+        }
+    }
+
+    /// Record `p`'s canonical form when it is not yet in the set.
+    #[cfg(not(unix))]
+    fn add(&mut self, p: &Path) {
+        let path = canonical_or_raw(p);
+        if !self.paths.contains(&path) {
+            self.paths.push(path);
+        }
+    }
+
+    /// The recorded identities (unix).
+    #[cfg(unix)]
+    fn ids(&self) -> &[(u64, u64)] {
+        &self.ids[..usize::from(self.len)]
+    }
+
+    /// Stat `p` (no descriptor): is it one of the session's files?
+    #[must_use]
+    pub fn contains(&self, p: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            let ids = self.ids();
+            !ids.is_empty() && file_id(p).is_some_and(|id| ids.contains(&id))
+        }
+        #[cfg(not(unix))]
+        {
+            !self.paths.is_empty() && self.paths.contains(&canonical_or_raw(p))
+        }
+    }
+
+    /// Refuse `path` when it stats as a session file (no descriptor is opened).
+    ///
+    /// # Errors
+    ///
+    /// [`SyncError::PathTraversal`] with [`PathReject::SessionDatabase`] when `path` is a session file.
+    pub fn reject(&self, path: &Path) -> Result<(), SyncError> {
+        if self.contains(path) {
+            return Err(SyncError::PathTraversal {
+                path: path.to_path_buf(),
+                reason: PathReject::SessionDatabase,
+            });
+        }
+        Ok(())
+    }
+
+    /// The open + check half: `File::open(p)`, then `fstat` the OPENED descriptor. If its
+    /// `(dev, ino)` is a session file — `p` was renamed or linked onto one after the caller's stat —
+    /// the descriptor is deliberately kept open with [`std::mem::forget`] and `Ok(None)` is returned;
+    /// else `Ok(Some(file))`.
+    ///
+    /// Never closing it is REQUIRED, not merely sufficient: the session's locks live until the session
+    /// closes (for `unblock mcp`, effectively process exit), and a close at any earlier point would
+    /// release them (`sqlite.org` `howtocorrupt.html` §2.2). `SQLite` likewise never closes such a
+    /// descriptor while it holds locks on the inode (`unixUnusedFd`). Bound: at most one descriptor per
+    /// racing call, because every caller returns right after `Ok(None)`; for the long-lived
+    /// `unblock mcp` server that is one per raced call for the server's lifetime, reachable only by a
+    /// concurrent local writer to `.unblock/`, which could delete the database anyway. Off unix this is
+    /// a plain open (no close-drop exists there). With an empty set ([`SessionFiles::none`]) it is a
+    /// plain open too. Residual: a FIFO swapped in between the caller's stat guard and this blocking
+    /// open blocks the open; adversarial only.
+    ///
+    /// # Errors
+    ///
+    /// The `File::open` error, or the `fstat` error of the opened descriptor — in which case the
+    /// descriptor is KEPT open (its identity is unknown, so it is treated like a match).
+    #[cfg_attr(not(unix), allow(clippy::unused_self))]
+    pub fn open_verified(&self, p: &Path) -> std::io::Result<Option<std::fs::File>> {
+        let file = std::fs::File::open(p)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let ids = self.ids();
+            if ids.is_empty() {
+                return Ok(Some(file));
+            }
+            let meta = match file.metadata() {
+                Ok(meta) => meta,
+                Err(err) => {
+                    // The descriptor's identity is unknown: it may be a session file, so it is kept
+                    // open rather than closed (the same rule as a match).
+                    std::mem::forget(file);
+                    return Err(err);
+                }
+            };
+            if ids.contains(&(meta.dev(), meta.ino())) {
+                std::mem::forget(file);
+                return Ok(None);
+            }
+        }
+        Ok(Some(file))
+    }
+
+    /// For an import reader: replaces ONLY the `File::open(path)` call after the reader's existing
+    /// stat guards (regular file, size cap), so a FIFO is still never opened. An open error maps to
+    /// the same [`SyncError::Io`] (`"opening"`) as before; a session file to
+    /// [`PathReject::SessionDatabase`], its descriptor kept open.
+    ///
+    /// # Errors
+    ///
+    /// As described.
+    pub(crate) fn open_import_source(&self, path: &Path) -> Result<std::fs::File, SyncError> {
+        match self.open_verified(path) {
+            Ok(Some(file)) => Ok(file),
+            Ok(None) => Err(SyncError::PathTraversal {
+                path: path.to_path_buf(),
+                reason: PathReject::SessionDatabase,
+            }),
+            Err(source) => Err(SyncError::Io {
+                path: path.to_path_buf(),
+                action: "opening",
+                source,
+            }),
+        }
+    }
+}
+
+/// `(dev, ino)` of `p` by `stat` (follows symlinks; no descriptor); `None` when `p` cannot be stated.
+#[cfg(unix)]
+fn file_id(p: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// The canonical form of `p`, or `p` itself when it cannot be canonicalized (it does not exist).
+#[cfg(not(unix))]
+fn canonical_or_raw(p: &Path) -> PathBuf {
+    dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// Reject an `allow_external` override that carries NO written reason (NFR-5/D30 forward seam).
@@ -580,6 +813,37 @@ mod tests {
         assert_eq!(
             sidecar(db, WAL_SUFFIX),
             PathBuf::from("does/not/exist.db-wal")
+        );
+    }
+
+    /// S7b (PRD §4 D5 amendment, `ub-c15`): the crate-internal reader open refuses a session file
+    /// recognized on the OPENED descriptor (`SessionDatabase`) and keeps that descriptor open
+    /// (fd witness +1): closing it would drop the session's locks.
+    #[cfg(unix)]
+    #[test]
+    fn open_import_source_refuses_and_keeps_a_session_file_open() {
+        let root = tmp_root();
+        let db = root.path().join("unblock.db");
+        std::fs::write(&db, b"db").unwrap();
+        let alias = root.path().join("alias.jsonl");
+        std::fs::hard_link(&db, &alias).expect("hard link");
+        let session = super::SessionFiles::of_database(&db);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let before = {
+            crate::fd_witness::assert_witness_sees(&db);
+            crate::fd_witness::descriptors_on(&db)
+        };
+
+        let err = session
+            .open_import_source(&alias)
+            .expect_err("a session file is refused at the open");
+        assert_eq!(reason_of(&err), PathReject::SessionDatabase);
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(
+            crate::fd_witness::descriptors_on(&db),
+            before + 1,
+            "the session file's descriptor is kept open, never closed"
         );
     }
 }

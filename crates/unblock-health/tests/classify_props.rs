@@ -186,6 +186,7 @@ fn class_table_golden() {
         .collect();
     let advisories: Vec<&str> = [
         Advisory::DatabaseNotCreated,
+        Advisory::ExportIsSessionFile,
         Advisory::StaleRecoveryArtifacts {
             count: 1,
             oldest_days: Some(31),
@@ -567,6 +568,7 @@ fn export_strategy() -> impl Strategy<Value = ExportFacts> {
         Just(ExportScan::Clean),
         (1usize..100).prop_map(|first_line| ExportScan::ConflictMarkers { first_line }),
         "[a-z ]{0,16}".prop_map(|reason| ExportScan::Unscannable { reason }),
+        Just(ExportScan::SessionFile),
     ]
     .prop_map(|scan| ExportFacts { path: None, scan })
 }

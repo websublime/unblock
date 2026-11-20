@@ -25,7 +25,7 @@ use unblock_health::{
 };
 use unblock_model::{DiagnosticFinding, DiagnosticKind, DiagnosticReport};
 use unblock_storage::{ExclusiveOutcome, ExclusiveRequest, StorageError};
-use unblock_sync::{JOURNAL_SUFFIX, SHM_SUFFIX, WAL_SUFFIX, sidecar};
+use unblock_sync::{JOURNAL_SUFFIX, SHM_SUFFIX, SessionFiles, WAL_SUFFIX, sidecar};
 
 use crate::error::{EngineError, Result};
 
@@ -464,20 +464,33 @@ pub(crate) async fn write_manifest(run: &RunDir, manifest: &Manifest) -> Result<
 }
 
 /// Copy the export at `src` into `run`'s `export/` on a blocking thread, refusing a source
-/// outside `confine_root`.
-pub(crate) async fn copy_export(run: &RunDir, src: &Path, confine_root: &Path) -> Result<PathBuf> {
+/// outside `confine_root` or one that is the session database `db` or a sidecar (PRD §4 D5
+/// amendment, `ub-c15`; the session's files are stat-ed inside the blocking closure, fresh).
+pub(crate) async fn copy_export(
+    run: &RunDir,
+    src: &Path,
+    confine_root: &Path,
+    db: &Path,
+) -> Result<PathBuf> {
     let owned_run = run.clone();
     let (owned_src, owned_root) = (src.to_path_buf(), confine_root.to_path_buf());
+    let owned_db = db.to_path_buf();
     on_blocking_thread(run.path(), move || {
-        owned_run.copy_export(&owned_src, &owned_root)
+        let session = SessionFiles::of_database(&owned_db);
+        owned_run.copy_export(&owned_src, &owned_root, &session)
     })
     .await
 }
 
-/// Scan the export at `path` for conflict markers on a blocking thread.
-pub(crate) async fn scan_export(path: Option<PathBuf>) -> Result<ExportFacts> {
+/// Scan the export at `path` for conflict markers on a blocking thread, skipping (and reporting) an
+/// export that is the session database `db` or a sidecar (PRD §4 D5 amendment, `ub-c15`; the
+/// session's files are stat-ed inside the blocking closure, fresh).
+pub(crate) async fn scan_export(path: Option<PathBuf>, db: PathBuf) -> Result<ExportFacts> {
     let probed = path.clone().unwrap_or_default();
-    let scan = tokio::task::spawn_blocking(move || unblock_health::scan_export(path.as_deref()));
+    let scan = tokio::task::spawn_blocking(move || {
+        let session = SessionFiles::of_database(&db);
+        unblock_health::scan_export(path.as_deref(), &session)
+    });
     let facts = scan.await.map_err(|join| HealthError::Io {
         source: std::io::Error::other(join.to_string()),
         path: probed,

@@ -10,7 +10,6 @@
 //! failures are collected; the orchestrator aborts with ZERO DB writes if any survive. Uses the same
 //! bounded per-line read + fd-metadata size guard as [`crate::conflict`] (MF-3).
 
-use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
@@ -19,7 +18,7 @@ use unblock_model::{Issue, IssueValidator, fmt_ts_secs};
 
 use crate::conflict::{MAX_IMPORT_FILE_BYTES, read_line_bounded};
 use crate::error::SyncError;
-use crate::path::PathReject;
+use crate::path::{PathReject, SessionFiles};
 
 /// The result of validating every record in an import file (records carried so the apply pass does
 /// not re-parse — a single parse pass).
@@ -110,7 +109,15 @@ pub fn normalize(issue: &mut Issue) {
 ///
 /// Ingestion-guard errors ([`SyncError::Io`]/[`SyncError::FileTooLarge`]/[`SyncError::LineTooLong`]).
 /// Per-record parse/validation failures are COLLECTED into the summary, not returned as `Err`.
-pub fn validate_records(path: &Path) -> Result<JsonlValidationSummary, SyncError> {
+/// [`SyncError::PathTraversal`] ([`PathReject::SessionDatabase`]) when the opened file is a session
+/// file.
+///
+/// The open goes through `session` (PRD §4 D5 amendment, `ub-c15`): the second import reader refuses
+/// a session file and never closes a descriptor on it.
+pub(crate) fn validate_records(
+    path: &Path,
+    session: &SessionFiles,
+) -> Result<JsonlValidationSummary, SyncError> {
     let meta = std::fs::metadata(path).map_err(|source| SyncError::Io {
         path: path.to_path_buf(),
         action: "reading metadata for",
@@ -129,11 +136,7 @@ pub fn validate_records(path: &Path) -> Result<JsonlValidationSummary, SyncError
             cap: MAX_IMPORT_FILE_BYTES,
         });
     }
-    let file = File::open(path).map_err(|source| SyncError::Io {
-        path: path.to_path_buf(),
-        action: "opening",
-        source,
-    })?;
+    let file = session.open_import_source(path)?;
     let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
 
     let mut summary = JsonlValidationSummary::default();
@@ -190,6 +193,7 @@ mod tests {
         validate_records,
     };
     use crate::error::SyncError;
+    use crate::path::SessionFiles;
     use chrono::{TimeZone, Utc};
     use serde_json::json;
     use std::io::Write;
@@ -277,7 +281,7 @@ mod tests {
         let good = serialize_issue_line(&issue("ub-1")).unwrap();
         let dup = serialize_issue_line(&issue("ub-1")).unwrap();
         let path = write_lines(&dir, &[&good, "not json", "", &dup]);
-        let summary = validate_records(&path).unwrap();
+        let summary = validate_records(&path, &SessionFiles::none()).unwrap();
         // 3 non-empty records (the blank line is skipped, not counted).
         assert_eq!(summary.record_count, 3);
         // One parse failure + one duplicate-id failure.
@@ -292,8 +296,46 @@ mod tests {
         let a = serialize_issue_line(&issue("ub-1")).unwrap();
         let b = serialize_issue_line(&issue("ub-2")).unwrap();
         let path = write_lines(&dir, &[&a, &b]);
-        let summary = validate_records(&path).unwrap();
+        let summary = validate_records(&path, &SessionFiles::none()).unwrap();
         assert!(summary.failures.is_empty());
         assert_eq!(summary.records.len(), 2);
+    }
+
+    /// S11 (PRD §4 D5 amendment, `ub-c15`): the record reader's own open refuses a target that raced
+    /// into a session file and keeps that descriptor open (fd witness +1).
+    #[cfg(unix)]
+    #[test]
+    fn validate_records_refuses_a_session_file_at_the_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = serialize_issue_line(&issue("ub-1")).unwrap();
+        let db = dir.path().join("unblock.db");
+        std::fs::write(&db, format!("{line}\n")).unwrap();
+        let alias = dir.path().join("issues.jsonl");
+        std::fs::hard_link(&db, &alias).expect("hard link");
+        let session = SessionFiles::of_database(&db);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let before = {
+            crate::fd_witness::assert_witness_sees(&db);
+            crate::fd_witness::descriptors_on(&db)
+        };
+
+        let err = validate_records(&alias, &session).expect_err("a session file is refused");
+        assert!(
+            matches!(
+                err,
+                SyncError::PathTraversal {
+                    reason: crate::path::PathReject::SessionDatabase,
+                    ..
+                }
+            ),
+            "expected SessionDatabase, got {err:?}"
+        );
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(
+            crate::fd_witness::descriptors_on(&db),
+            before + 1,
+            "the raced session file's descriptor is kept open, never closed"
+        );
     }
 }

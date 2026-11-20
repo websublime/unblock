@@ -167,7 +167,13 @@ fn evidence_directories_are_0700_and_evidence_files_0600() {
     let src = export_src(&dir, b"{}\n");
     std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
     let run = RunDir::create(&root(&dir), now(), PID).unwrap();
-    let copy = run.copy_export(&src, &unblock_dir(&dir)).unwrap();
+    let copy = run
+        .copy_export(
+            &src,
+            &unblock_dir(&dir),
+            &unblock_sync::SessionFiles::none(),
+        )
+        .unwrap();
     run.write_manifest(&sample_manifest(&run)).unwrap();
     assert_eq!(mode(&root(&dir)), 0o700, "a created recovery root");
     assert_eq!(mode(run.path()), 0o700, "the run directory");
@@ -206,16 +212,24 @@ fn copy_export_writes_export_issues_jsonl_and_never_overwrites() {
     let src = export_src(&dir, b"<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> theirs\n");
     let confine = unblock_dir(&dir);
     let run = RunDir::create(&root(&dir), now(), PID).unwrap();
-    let copy = run.copy_export(&src, &confine).unwrap();
+    let copy = run
+        .copy_export(&src, &confine, &unblock_sync::SessionFiles::none())
+        .unwrap();
     assert_eq!(copy, run.path().join("export").join("issues.jsonl"));
     assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&src).unwrap());
 
-    let err = run.copy_export(&src, &confine).unwrap_err();
+    let err = run
+        .copy_export(&src, &confine, &unblock_sync::SessionFiles::none())
+        .unwrap_err();
     assert!(matches!(err, HealthError::RecoveryEvidenceWrite { .. }));
     assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&src).unwrap());
 
     assert_refused(
-        run.copy_export(&confine.join("absent.jsonl"), &confine),
+        run.copy_export(
+            &confine.join("absent.jsonl"),
+            &confine,
+            &unblock_sync::SessionFiles::none(),
+        ),
         "a missing export",
     );
 }
@@ -232,13 +246,18 @@ fn copy_export_refuses_a_path_outside_the_confine_root() {
     std::fs::write(&outside, b"{}\n").unwrap();
     let run = RunDir::create(&root(&dir), now(), PID).unwrap();
     assert_refused(
-        run.copy_export(&outside, &unblock_dir(&dir)),
+        run.copy_export(
+            &outside,
+            &unblock_dir(&dir),
+            &unblock_sync::SessionFiles::none(),
+        ),
         "an export outside .unblock/",
     );
     assert_refused(
         run.copy_export(
             &unblock_dir(&dir).join("..").join("issues.jsonl"),
             &unblock_dir(&dir),
+            &unblock_sync::SessionFiles::none(),
         ),
         "a .. escape",
     );
@@ -258,11 +277,19 @@ fn copy_export_refuses_a_symlink() {
     std::os::unix::fs::symlink(&outside, &escaping).unwrap();
     let run = RunDir::create(&root(&dir), now(), PID).unwrap();
     assert_refused(
-        run.copy_export(&link, &unblock_dir(&dir)),
+        run.copy_export(
+            &link,
+            &unblock_dir(&dir),
+            &unblock_sync::SessionFiles::none(),
+        ),
         "a symlink inside .unblock/",
     );
     assert_refused(
-        run.copy_export(&escaping, &unblock_dir(&dir)),
+        run.copy_export(
+            &escaping,
+            &unblock_dir(&dir),
+            &unblock_sync::SessionFiles::none(),
+        ),
         "a symlink leading outside .unblock/",
     );
     assert_no_export_copy(&run);
@@ -280,7 +307,14 @@ fn copy_export_refuses_a_fifo_without_blocking() {
         .unwrap();
     assert!(status.success());
     let run = RunDir::create(&root(&dir), now(), PID).unwrap();
-    assert_refused(run.copy_export(&fifo, &unblock_dir(&dir)), "a FIFO");
+    assert_refused(
+        run.copy_export(
+            &fifo,
+            &unblock_dir(&dir),
+            &unblock_sync::SessionFiles::none(),
+        ),
+        "a FIFO",
+    );
     assert_no_export_copy(&run);
 }
 
@@ -290,7 +324,14 @@ fn copy_export_refuses_a_directory() {
     let src = unblock_dir(&dir).join("issues.jsonl");
     std::fs::create_dir_all(&src).unwrap();
     let run = RunDir::create(&root(&dir), now(), PID).unwrap();
-    assert_refused(run.copy_export(&src, &unblock_dir(&dir)), "a directory");
+    assert_refused(
+        run.copy_export(
+            &src,
+            &unblock_dir(&dir),
+            &unblock_sync::SessionFiles::none(),
+        ),
+        "a directory",
+    );
     assert_no_export_copy(&run);
 }
 
@@ -306,7 +347,13 @@ fn copy_export_refuses_a_file_over_the_import_cap() {
         .set_len(unblock_sync::MAX_IMPORT_FILE_BYTES + 1)
         .unwrap();
     let run = RunDir::create(&root(&dir), now(), PID).unwrap();
-    let err = run.copy_export(&src, &unblock_dir(&dir)).unwrap_err();
+    let err = run
+        .copy_export(
+            &src,
+            &unblock_dir(&dir),
+            &unblock_sync::SessionFiles::none(),
+        )
+        .unwrap_err();
     match &err {
         HealthError::RecoveryEvidenceWrite { source, .. } => {
             assert_eq!(source.kind(), std::io::ErrorKind::FileTooLarge, "{err:?}");
@@ -380,7 +427,13 @@ fn manifest_file_hashes_the_copy_inside_the_run_dir() {
     let dir = TempDir::new().unwrap();
     let src = export_src(&dir, b"abc");
     let run = RunDir::create(&root(&dir), now(), PID).unwrap();
-    let copy = run.copy_export(&src, &unblock_dir(&dir)).unwrap();
+    let copy = run
+        .copy_export(
+            &src,
+            &unblock_dir(&dir),
+            &unblock_sync::SessionFiles::none(),
+        )
+        .unwrap();
 
     let entry = manifest_file(run.path(), &copy).unwrap();
     assert_eq!(entry.path, "export/issues.jsonl");
@@ -433,7 +486,13 @@ fn manifest_round_trips_with_exactly_the_clause_nine_keys() {
     let dir = TempDir::new().unwrap();
     let src = export_src(&dir, b"{}\n");
     let run = RunDir::create(&root(&dir), now(), PID).unwrap();
-    let copy = run.copy_export(&src, &unblock_dir(&dir)).unwrap();
+    let copy = run
+        .copy_export(
+            &src,
+            &unblock_dir(&dir),
+            &unblock_sync::SessionFiles::none(),
+        )
+        .unwrap();
     let mut manifest = sample_manifest(&run);
     manifest
         .files

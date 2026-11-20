@@ -173,6 +173,9 @@ N4@crates/unblock-health/src/*.rs@<{7}|>{7}@NEGATIVE: unblock-health spells no c
 #      verification (the required-check read and the no-bypass check); numbered after the ci
 #      commit's rows so no code already cited on the tracker moves.
 # Q319 (ub-c15 refactor commit) the engine-root re-export of SIDECAR_SUFFIXES and sidecar.
+# Q320..Q328 (ub-c15 implementation commit) health's SessionFile arm, the engine's
+#      SessionFiles::of_database arguments, and the in-crate cells of open_import_source,
+#      open_guarded, validate_records, read_bd_records, write_atomic and copy_checked. Q198 moved.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@scripts/checks/d44-create-deps-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D44 sibling's live-range knob carries the SAME range as this script — anchored on the knob line, so the file's own prose about the knob cannot satisfy the pin
@@ -372,7 +375,7 @@ Q194@crates/unblock-health/src/integrity.rs@^    let index = if let Some\(rest\)
 Q195@crates/unblock-health/src/integrity.rs@^    \} else if let Some\(rest\) = message\.strip_prefix\(\"rowid@\"rowid not at end-of-record for row \"@clause (3): the index-only shape rowid not at end-of-record for row <N> of index <I>
 Q196@crates/unblock-health/src/integrity.rs@^        after_row_number\(rest, \" missing@\" missing from index \"@clause (3): the index-only shape row <N> missing from index <I>
 Q197@crates/unblock-health/src/integrity.rs@^            \.or_else\(\|\| after_row_number\(rest, \" values@\" values differ from index \"@clause (3): the index-only shape row <N> values differ from index <I>
-Q198@crates/unblock-health/src/export.rs@^    let scan = match scan_conflict_markers\(@scan_conflict_markers\(path\)@clause (4): health's export scan calls unblock-sync's ONE conflict-marker scanner
+Q198@crates/unblock-health/src/export.rs@^    let scan = match scan_conflict_markers\(@scan_conflict_markers\(path, session\)@clause (4) as amended (PRD §4 D5 amendment, ub-c15): health's export scan calls unblock-sync's ONE conflict-marker scanner with the session's files, so a session-file export is never opened
 Q199@crates/unblock-config/src/error.rs@^    DatabaseMissing \{@    DatabaseMissing \{\$@clause (7): the lost-database refusal is a typed ConfigError variant
 Q200@crates/unblock-config/src/error.rs@^            Self::DatabaseMissing \{ \.\. \} => ErrorCode::@=> ErrorCode::DatabaseNotFound,\$@clause (7): DatabaseMissing rides the EXISTING DATABASE_NOT_FOUND code — no ErrorCode minted
 Q201@crates/unblock-config/src/cli.rs@^pub enum StorageOpenMode \{@pub enum StorageOpenMode \{\$@clause (8): the open modes (Migrate, ReadOnly, NoMigrate) exist on the config facade
@@ -494,6 +497,15 @@ Q316@RELEASING.md@^- \*\*From v1\.1\.0 on\*\*@ci-cd §3\.3\): .windows-check. is
 Q317@docs/plans/ci-cd-and-distribution.md@^- \*\*Release-cut precondition \(v1\.1\.0 on\)@\[D5 amendment, .ub-c15.\]\.\*\* .windows-check. is green on@ci-cd §3.3 (ub-c15 spec commit): windows-check green on the push run of main's head, the release commit's parent, is a v1.1.0 release-cut precondition
 Q318@docs/plans/ci-cd-and-distribution.md@^\| .windows-check. \|@a v1\.1\.0 release-cut precondition instead \(RELEASING\.md §1; §3\.3 here\)@ci-cd §2's windows-check row (ub-c15 spec commit): not a required status check, a v1.1.0 release-cut precondition instead
 Q319@crates/unblock-engine/src/lib.rs@^pub use unblock_sync::\{SIDECAR_SUFFIXES, sidecar\};@:[0-9]+:pub use unblock_sync::\{SIDECAR_SUFFIXES, sidecar\};\$@spine §4.1 as amended (PRD §4 D5 amendment, ub-c15): the engine root re-exports the sidecar suffixes from unblock-sync, for the cli
+Q320@crates/unblock-health/src/export.rs@\}\) => ExportScan::SessionFile,@\}\) => ExportScan::SessionFile,@clause (4) as amended (PRD §4 D5 amendment, ub-c15): health maps sync's SessionDatabase refusal to ExportScan::SessionFile, never Unscannable
+Q321@crates/unblock-engine/src/session/interchange.rs@SessionFiles::of_database@SessionFiles::of_database\(&self\.db_path\),@spine §4.1 interchange as amended (PRD §4 D5 amendment, ub-c15): every in-session sync call passes the session's own database files
+Q322@crates/unblock-engine/src/preopen.rs@SessionFiles::of_database@SessionFiles::of_database\(&@clause (4) and (9) as amended (PRD §4 D5 amendment, ub-c15): the export scan and copy wrappers build the session's files from the db path
+Q323@crates/unblock-sync/src/path.rs@fn open_import_source_refuses_and_keeps_a_session_file_open\(@fn open_import_source_refuses_and_keeps_a_session_file_open\(@PRD §4 D5 amendment (ub-c15), in-crate cell: a raced session file is refused and its descriptor kept open (fd witness)
+Q324@crates/unblock-sync/src/conflict.rs@fn open_guarded_refuses_a_session_file_without_preflight\(@fn open_guarded_refuses_a_session_file_without_preflight\(@PRD §4 D5 amendment (ub-c15), in-crate cell: the scanner's open refuses a session file even without the preflight (fd witness)
+Q325@crates/unblock-sync/src/jsonl.rs@fn validate_records_refuses_a_session_file_at_the_reader\(@fn validate_records_refuses_a_session_file_at_the_reader\(@PRD §4 D5 amendment (ub-c15), in-crate cell: the import's record reader refuses a session file (fd witness)
+Q326@crates/unblock-sync/src/bd_import.rs@fn read_bd_records_refuses_a_session_file_at_the_reader\(@fn read_bd_records_refuses_a_session_file_at_the_reader\(@PRD §4 D5 amendment (ub-c15), in-crate cell: the bd reader refuses a session file (fd witness)
+Q327@crates/unblock-sync/src/atomic.rs@fn write_atomic_rechecks_the_target_before_the_rename\(@fn write_atomic_rechecks_the_target_before_the_rename\(@PRD §4 D5 amendment (ub-c15), in-crate cell: the atomic writer re-checks the target before the rename and writes nothing
+Q328@crates/unblock-health/src/recovery.rs@fn copy_checked_keeps_a_raced_session_file_open\(@fn copy_checked_keeps_a_raced_session_file_open\(@PRD §4 D5 amendment (ub-c15), in-crate cell: the evidence copy keeps a raced session file open and writes no copy (fd witness)
 Q370@docs/PROCESS.md@^- \*\*Branch off .main.\*\*@Branch name: .ub-<id>-<slug>. for work@PROCESS §6 (ub-c15 spec commit, addendum ruling on the branch-name drift): tracker-issue work branches as ub-<id>-<slug>, the form every T4.x branch uses
 Q371@docs/plans/ci-cd-and-distribution.md@^repos/\{owner\}/\{repo\}/rules/branches/main --jq@select\(\.type == .required_status_checks.\) \|\$@ci-cd §2.3.3 (ub-c15 spec commit): the required-check verification reads main's effective ruleset rules, not the branch-protection endpoint
 Q372@docs/plans/ci-cd-and-distribution.md@^repos/\{owner\}/\{repo\}/rulesets/19670603 --jq@'\.enforcement, \(\.bypass_actors \| length\)'. must print\$@ci-cd §2.3.3 (ub-c15 spec commit): administrator enforcement is verified as an active ruleset with no bypass actors
@@ -581,7 +593,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 2 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 4 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 322 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 331 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."

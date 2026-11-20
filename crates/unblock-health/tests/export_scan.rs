@@ -38,7 +38,7 @@ fn classify_export(scan: &unblock_health::ExportFacts) -> unblock_health::Worksp
 
 #[test]
 fn no_configured_export_is_absent() {
-    let facts = scan_export(None);
+    let facts = scan_export(None, &unblock_sync::SessionFiles::none());
     assert_eq!(facts.path, None);
     assert_eq!(facts.scan, ExportScan::Absent);
     assert!(classify_export(&facts).anomalies.is_empty());
@@ -48,7 +48,7 @@ fn no_configured_export_is_absent() {
 fn a_missing_file_is_absent() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("issues.jsonl");
-    let facts = scan_export(Some(&path));
+    let facts = scan_export(Some(&path), &unblock_sync::SessionFiles::none());
     assert_eq!(facts.path, Some(path));
     assert_eq!(facts.scan, ExportScan::Absent);
 }
@@ -57,7 +57,7 @@ fn a_missing_file_is_absent() {
 fn a_clean_export_is_clean() {
     let dir = TempDir::new().unwrap();
     let path = write(&dir, b"{\"id\":\"ub-1\"}\n{\"id\":\"ub-2\"}\n");
-    let facts = scan_export(Some(&path));
+    let facts = scan_export(Some(&path), &unblock_sync::SessionFiles::none());
     assert_eq!(facts.scan, ExportScan::Clean);
     assert_eq!(classify_export(&facts).level, HealthLevel::Healthy);
 }
@@ -69,7 +69,7 @@ fn conflict_markers_are_recoverable_with_regenerate_export() {
         &dir,
         b"{\"id\":\"ub-1\"}\n<<<<<<< HEAD\n{\"id\":\"ub-2\"}\n=======\n{\"id\":\"ub-3\"}\n>>>>>>> theirs\n",
     );
-    let facts = scan_export(Some(&path));
+    let facts = scan_export(Some(&path), &unblock_sync::SessionFiles::none());
     assert_eq!(facts.scan, ExportScan::ConflictMarkers { first_line: 2 });
     let class = classify_export(&facts);
     assert_eq!(class.level, HealthLevel::Recoverable);
@@ -87,7 +87,7 @@ fn an_over_long_line_is_unscannable_with_the_same_repair() {
     // One line past `unblock-sync`'s 4 MiB per-line cap, with no newline.
     let body = vec![b'x'; 4 * 1024 * 1024 + 2];
     let path = write(&dir, &body);
-    let facts = scan_export(Some(&path));
+    let facts = scan_export(Some(&path), &unblock_sync::SessionFiles::none());
     assert!(
         matches!(facts.scan, ExportScan::Unscannable { .. }),
         "{:?}",
@@ -105,7 +105,7 @@ fn a_directory_in_place_of_the_export_is_unscannable() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("issues.jsonl");
     std::fs::create_dir(&path).unwrap();
-    let facts = scan_export(Some(&path));
+    let facts = scan_export(Some(&path), &unblock_sync::SessionFiles::none());
     assert!(
         matches!(facts.scan, ExportScan::Unscannable { .. }),
         "{:?}",
@@ -121,7 +121,7 @@ fn an_unreadable_export_is_unscannable() {
     let dir = TempDir::new().unwrap();
     let path = write(&dir, b"{}\n");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let facts = scan_export(Some(&path));
+    let facts = scan_export(Some(&path), &unblock_sync::SessionFiles::none());
     if std::fs::File::open(&path).is_ok() {
         // A privileged user reads through mode 000, so the file scans clean. The I/O-error route
         // to `Unscannable` stays covered for root by

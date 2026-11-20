@@ -109,6 +109,7 @@ async fn tracing_capture_reliability() {
         &unblock,
         "tester",
         &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
     )
     .await
     .expect_err("conflict markers must be rejected");
@@ -188,6 +189,7 @@ async fn tracing_capture_reliability_detail_debug() {
         &unblock,
         "tester",
         &ImportOptions::default(),
+        &unblock_sync::SessionFiles::none(),
     )
     .await
     .expect("import must succeed with the record skipped");
@@ -249,9 +251,15 @@ async fn capture_export_reliability(issues: Vec<Issue>) -> Vec<Captured> {
     let path = unblock.join("issues.jsonl");
 
     let storage = FakeStorage::with_issues(issues);
-    export_jsonl(&storage, &path, &unblock, &ExportOptions::default())
-        .await
-        .expect("export");
+    export_jsonl(
+        &storage,
+        &path,
+        &unblock,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export");
 
     drop(guard);
     let events = captured.lock().expect("capture lock");

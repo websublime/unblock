@@ -351,6 +351,10 @@ impl fmt::Display for AnomalyClass {
 pub enum Advisory {
     /// No database file (or a 0-byte one) and no `.unblock/.write.lock`: a fresh clone or worktree.
     DatabaseNotCreated,
+    /// The JSONL export path is the session database or one of its `-wal`/`-shm`/`-journal` sidecars
+    /// (PRD §4 D5 amendment, `ub-c15`): it was not scanned, and `doctor --repair` plans no
+    /// regeneration of it.
+    ExportIsSessionFile,
     /// Run directories under `.unblock/.recovery/` older than 30 days, or whose name does not parse.
     StaleRecoveryArtifacts {
         /// How many run directories are stale.
@@ -368,6 +372,7 @@ impl Advisory {
     pub fn code(&self) -> &'static str {
         match self {
             Self::DatabaseNotCreated => "database_not_created",
+            Self::ExportIsSessionFile => "export_is_session_file",
             Self::StaleRecoveryArtifacts { .. } => "stale_recovery_artifacts",
             Self::WriteLockHeld => "write_lock_held",
         }
@@ -380,6 +385,12 @@ impl fmt::Display for Advisory {
             Self::DatabaseNotCreated => f.write_str(
                 "no database file and no .unblock/.write.lock exist (a fresh clone or worktree); \
                  the next ordinary command creates the database",
+            ),
+            Self::ExportIsSessionFile => f.write_str(
+                "the JSONL export path is the session database or one of its -wal/-shm/-journal \
+                 sidecars; it was not scanned, and doctor --repair does not regenerate it; point \
+                 jsonl_export_filename at a file that is not the database, a sidecar, or a link to \
+                 either",
             ),
             Self::StaleRecoveryArtifacts { count, oldest_days } => {
                 write!(

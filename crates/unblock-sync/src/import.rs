@@ -22,7 +22,7 @@ use unblock_storage::Storage;
 use crate::conflict::ensure_no_conflict_markers;
 use crate::error::SyncError;
 use crate::jsonl::validate_records;
-use crate::path::validate_sync_path;
+use crate::path::{SessionFiles, validate_sync_path};
 
 /// How to handle an incoming record whose id already exists in the DB.
 ///
@@ -158,19 +158,26 @@ fn classify(existing: Option<Issue>, incoming: Issue, policy: CollisionPolicy) -
 ///
 /// Returns the canonicalized, confined path (the caller then reads records from it).
 ///
+/// PRD §4 D5 amendment (`ub-c15`): `validate_sync_path` → the conflict scan, whose FIRST step refuses
+/// a path that stats as one of `session`'s files (no descriptor opened) and whose open re-checks the
+/// opened descriptor; ZERO DB writes on refusal, and a `dry_run` refuses exactly as a real import.
+///
 /// # Errors
 ///
-/// [`SyncError::PathTraversal`] (confinement) / [`SyncError::ConflictMarkers`] (a merge accident) /
-/// the ingestion-guard errors from the bounded read — all BEFORE any DB write.
+/// [`SyncError::PathTraversal`] (confinement, or [`crate::PathReject::SessionDatabase`]) /
+/// [`SyncError::ConflictMarkers`] (a merge accident) / the ingestion-guard errors from the bounded
+/// read — all BEFORE any DB write.
 pub(crate) fn preflight_source(
     path: &Path,
     confine_root: &Path,
     allow_external: bool,
+    session: &SessionFiles,
 ) -> Result<std::path::PathBuf, SyncError> {
     // (1) path confinement.
     let canonical = validate_sync_path(path, confine_root, allow_external)?;
-    // (2) conflict markers (also enforces the fd-metadata size guard + bounded per-line read, MF-3).
-    ensure_no_conflict_markers(&canonical)?;
+    // (2) the session check, then conflict markers (also enforces the fd-metadata size guard +
+    //     bounded per-line read, MF-3): the scanner refuses a session file before any open.
+    ensure_no_conflict_markers(&canonical, session)?;
     Ok(canonical)
 }
 
@@ -302,13 +309,16 @@ pub(crate) async fn apply_records(
 /// [`SyncError::PathTraversal`]/[`SyncError::ConflictMarkers`]/[`SyncError::JsonlParse`]/
 /// [`SyncError::ValidationFailed`]/[`SyncError::DuplicateId`] at preflight (ZERO DB writes);
 /// [`SyncError::ImportCollision`] under `Error`; the transparent `Storage` source if the atomic
-/// `create_issues` tx fails (rollback → ZERO rows).
+/// `create_issues` tx fails (rollback → ZERO rows). A target that is one of `session`'s files (PRD
+/// §4 D5 amendment, `ub-c15`) is [`SyncError::PathTraversal`] (`SessionDatabase`), `dry_run`
+/// included: both readers open before the dry-run stop.
 pub async fn import_jsonl(
     storage: &dyn Storage,
     path: &Path,
     confine_root: &Path,
     actor: &str,
     opts: &ImportOptions,
+    session: &SessionFiles,
 ) -> Result<ImportReport, SyncError> {
     // NFR-5/D30 (forward seam): reject an `allow_external` override without a written reason.
     crate::path::reject_external_without_reason(
@@ -319,7 +329,7 @@ pub async fn import_jsonl(
     // (1)/(2) shared FR-8 preflight: path confinement + conflict-marker rejection (ZERO DB writes).
     // `preflight_source` STAYS pure; NFR-13's conflict-marker guard is emitted HERE (the orchestrator
     // knows its operation label) at the true guard site, right before propagating (D30).
-    let canonical = match preflight_source(path, confine_root, opts.allow_external) {
+    let canonical = match preflight_source(path, confine_root, opts.allow_external, session) {
         Ok(canonical) => canonical,
         Err(err) => {
             if let SyncError::ConflictMarkers {
@@ -338,7 +348,7 @@ pub async fn import_jsonl(
         }
     };
     // (3) per-line validation — ALL failures collected; ANY survivor aborts with ZERO writes.
-    let summary = validate_records(&canonical)?;
+    let summary = validate_records(&canonical, session)?;
     if let Some((line, detail)) = summary.failures.first() {
         return Err(first_failure_to_error(*line, detail));
     }
@@ -381,6 +391,7 @@ mod tests {
     use super::{CollisionPolicy, ImportOptions, classify, import_jsonl};
     use crate::error::SyncError;
     use crate::jsonl::serialize_issue_line;
+    use crate::path::SessionFiles;
     use crate::testutil::{FakeStorage, sample_issue, tombstone_of};
     use std::io::Write;
 
@@ -406,6 +417,7 @@ mod tests {
             dir.path(),
             "tester",
             &ImportOptions::default(),
+            &SessionFiles::none(),
         )
         .await
         .expect("import");
@@ -422,9 +434,16 @@ mod tests {
         let path = dir.path().join("issues.jsonl");
         std::fs::write(&path, "<<<<<<< HEAD\n=======\n").unwrap();
         let storage = FakeStorage::with_issues(vec![]);
-        let err = import_jsonl(&storage, &path, dir.path(), "t", &ImportOptions::default())
-            .await
-            .expect_err("markers");
+        let err = import_jsonl(
+            &storage,
+            &path,
+            dir.path(),
+            "t",
+            &ImportOptions::default(),
+            &SessionFiles::none(),
+        )
+        .await
+        .expect_err("markers");
         assert!(matches!(err, SyncError::ConflictMarkers { .. }));
         assert_eq!(storage.create_issues_calls(), 0);
     }
@@ -435,9 +454,16 @@ mod tests {
         let good = serialize_issue_line(&sample_issue("ub-1")).unwrap();
         let path = write_lines(&dir, &[good, "not json".to_string()]);
         let storage = FakeStorage::with_issues(vec![]);
-        let err = import_jsonl(&storage, &path, dir.path(), "t", &ImportOptions::default())
-            .await
-            .expect_err("malformed");
+        let err = import_jsonl(
+            &storage,
+            &path,
+            dir.path(),
+            "t",
+            &ImportOptions::default(),
+            &SessionFiles::none(),
+        )
+        .await
+        .expect_err("malformed");
         assert!(matches!(err, SyncError::ValidationFailed { .. }));
         assert_eq!(storage.create_issues_calls(), 0);
     }
@@ -449,9 +475,16 @@ mod tests {
         let path = write_lines(&dir, &[line]);
         // Existing identical row → the second import is a no-op.
         let storage = FakeStorage::with_issues(vec![sample_issue("ub-1")]);
-        let report = import_jsonl(&storage, &path, dir.path(), "t", &ImportOptions::default())
-            .await
-            .expect("import");
+        let report = import_jsonl(
+            &storage,
+            &path,
+            dir.path(),
+            "t",
+            &ImportOptions::default(),
+            &SessionFiles::none(),
+        )
+        .await
+        .expect("import");
         assert_eq!(report.imported, 0);
         assert_eq!(report.skipped, 1);
         assert_eq!(storage.create_issues_calls(), 0);
@@ -464,9 +497,16 @@ mod tests {
         let line = serialize_issue_line(&sample_issue("ub-1")).unwrap();
         let path = write_lines(&dir, &[line]);
         let storage = FakeStorage::with_issues(vec![tombstone_of("ub-1")]);
-        let report = import_jsonl(&storage, &path, dir.path(), "t", &ImportOptions::default())
-            .await
-            .expect("import");
+        let report = import_jsonl(
+            &storage,
+            &path,
+            dir.path(),
+            "t",
+            &ImportOptions::default(),
+            &SessionFiles::none(),
+        )
+        .await
+        .expect("import");
         assert_eq!(report.imported, 0, "must not resurrect the tombstone");
         assert_eq!(report.skipped, 1);
         assert_eq!(storage.create_issues_calls(), 0);
@@ -487,6 +527,7 @@ mod tests {
                 dry_run: true,
                 ..ImportOptions::default()
             },
+            &SessionFiles::none(),
         )
         .await
         .expect("dry run");
@@ -511,6 +552,7 @@ mod tests {
                 on_collision: CollisionPolicy::Error,
                 ..ImportOptions::default()
             },
+            &SessionFiles::none(),
         )
         .await
         .expect_err("collision");

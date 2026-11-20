@@ -55,9 +55,15 @@ async fn rejected_export_leaves_original_intact_and_no_orphan_temp() {
     // An external (out-of-confine) target is rejected at preflight — BEFORE any temp is created.
     let external = dir.path().join("outside.jsonl");
     let storage = FakeStorage::with_issues(vec![sample_issue("ub-1")]);
-    let err = export_jsonl(&storage, &external, &unblock, &ExportOptions::default())
-        .await
-        .expect_err("external rejected");
+    let err = export_jsonl(
+        &storage,
+        &external,
+        &unblock,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect_err("external rejected");
     assert!(
         !external.exists(),
         "no file written to the rejected path: {err:?}"
@@ -78,9 +84,15 @@ async fn successful_export_leaves_no_temp_sibling() {
     let target = unblock.join("issues.jsonl");
 
     let storage = FakeStorage::with_issues(vec![sample_issue("ub-1"), sample_issue("ub-2")]);
-    let report = export_jsonl(&storage, &target, &unblock, &ExportOptions::default())
-        .await
-        .expect("export");
+    let report = export_jsonl(
+        &storage,
+        &target,
+        &unblock,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export");
     assert_eq!(report.written, 2);
     assert!(target.exists());
     // The temp was renamed over the target — no `.tmp` sibling remains.
@@ -104,9 +116,15 @@ async fn overwrite_preserves_content_and_no_partial() {
     std::fs::write(&target, "STALE LINE\n").unwrap();
 
     let storage = FakeStorage::with_issues(vec![sample_issue("ub-1")]);
-    export_jsonl(&storage, &target, &unblock, &ExportOptions::default())
-        .await
-        .expect("export");
+    export_jsonl(
+        &storage,
+        &target,
+        &unblock,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect("export");
     let content = std::fs::read_to_string(&target).unwrap();
     // Atomic replace: the stale content is gone, exactly one fresh line, no partial concatenation.
     assert!(!content.contains("STALE LINE"), "content: {content}");
@@ -132,9 +150,15 @@ async fn assert_pre_rename_fault(point: FaultPoint) {
     let storage = FakeStorage::with_issues(vec![sample_issue("ub-1")]);
     clear_faults();
     arm_fault(point);
-    let err = export_jsonl(&storage, &target, &unblock, &ExportOptions::default())
-        .await
-        .expect_err("an armed pre-rename fault must fail the export");
+    let err = export_jsonl(
+        &storage,
+        &target,
+        &unblock,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect_err("an armed pre-rename fault must fail the export");
     clear_faults();
 
     assert!(
@@ -197,9 +221,15 @@ async fn fault_parent_dir_fsync_applies_new_content_but_reports_err() {
     let storage = FakeStorage::with_issues(vec![sample_issue("ub-1")]);
     clear_faults();
     arm_fault(FaultPoint::ParentDirFsync);
-    let err = export_jsonl(&storage, &target, &unblock, &ExportOptions::default())
-        .await
-        .expect_err("an armed ParentDirFsync fault reports Err (durability unconfirmed)");
+    let err = export_jsonl(
+        &storage,
+        &target,
+        &unblock,
+        &ExportOptions::default(),
+        unblock_sync::SessionFiles::none(),
+    )
+    .await
+    .expect_err("an armed ParentDirFsync fault reports Err (durability unconfirmed)");
     clear_faults();
 
     assert!(

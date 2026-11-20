@@ -169,6 +169,7 @@ pub async fn import_bd(
     path: &Path,
     confine_root: &Path,
     actor: &str,
+    session: &crate::path::SessionFiles,
 ) -> Result<ImportReport, SyncError> {
     // NFR-5/D30 (forward seam): the reason-gate reject lives in every orchestrator. `import_bd` is
     // Skip-only with `allow_external` structurally `false`, so this is a defensive no-op (the reject
@@ -178,7 +179,7 @@ pub async fn import_bd(
     //         Skip-only production semantics → allow_external is always false). `preflight_source`
     //         STAYS pure; NFR-13's conflict-marker guard is emitted HERE (operation "import_bd") at
     //         the true guard site right before propagating (D30).
-    let canonical = match preflight_source(path, confine_root, false) {
+    let canonical = match preflight_source(path, confine_root, false, session) {
         Ok(canonical) => canonical,
         Err(err) => {
             if let SyncError::ConflictMarkers {
@@ -198,7 +199,7 @@ pub async fn import_bd(
     };
 
     // (3) per-line map + repair + validate + in-file dup-id — ALL failures abort with ZERO writes.
-    let mapped = read_bd_records(&canonical)?;
+    let mapped = read_bd_records(&canonical, session)?;
 
     // (4)/(5) funnel into the shared atomic classify+create tail (Skip-only, always applies). The
     //         tail returns the relation/comment sums over the APPLIED subset (the records it actually
@@ -248,8 +249,13 @@ struct MappedBd {
 /// mirrors the generic path exactly ([`crate::jsonl::validate_records`] re-runs the identical guard
 /// after preflight, `jsonl.rs`). Both readers open their OWN guarded fd rather than threading a reader
 /// out of `preflight_source`, keeping the FR-8 preflight a pure boolean gate (no fd handed across the
-/// classify boundary). Deduping would break that symmetry for a micro-opt, so it is left as-is.
-fn read_bd_records(path: &Path) -> Result<MappedBd, SyncError> {
+/// classify boundary). Deduping would break that symmetry for a micro-opt, so it is left as-is. The
+/// open itself goes through `session` (PRD §4 D5 amendment, `ub-c15`): it re-checks the opened
+/// descriptor, refuses a session file and never closes a descriptor on it.
+fn read_bd_records(
+    path: &Path,
+    session: &crate::path::SessionFiles,
+) -> Result<MappedBd, SyncError> {
     use std::io::BufReader;
 
     let meta = std::fs::metadata(path).map_err(|source| SyncError::Io {
@@ -270,11 +276,7 @@ fn read_bd_records(path: &Path) -> Result<MappedBd, SyncError> {
             cap: crate::conflict::MAX_IMPORT_FILE_BYTES,
         });
     }
-    let file = std::fs::File::open(path).map_err(|source| SyncError::Io {
-        path: path.to_path_buf(),
-        action: "opening",
-        source,
-    })?;
+    let file = session.open_import_source(path)?;
     let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
 
     let mut records: Vec<Issue> = Vec::new();
@@ -530,7 +532,7 @@ fn repair_external_ref(issue: &mut Issue) {
 mod tests {
     use super::{
         KNOWN_COMMENT_KEYS, KNOWN_DEP_KEYS, KNOWN_ISSUE_KEYS, dedup_dependencies, map_bd_record,
-        repair_closed_at_invariant, repair_dependency_types, repair_external_ref,
+        read_bd_records, repair_closed_at_invariant, repair_dependency_types, repair_external_ref,
         repair_terminal_status_alias, repair_wisp_ephemeral,
     };
     use chrono::{TimeZone, Utc};
@@ -893,5 +895,44 @@ mod tests {
         // shared normalize sorts+dedups labels and sets content_hash.
         assert_eq!(issue.labels, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(issue.content_hash, Some(issue.compute_content_hash()));
+    }
+
+    /// S12 (PRD §4 D5 amendment, `ub-c15`): the bd record reader's own open refuses a target that
+    /// raced into a session file and keeps that descriptor open (fd witness +1).
+    #[cfg(unix)]
+    #[test]
+    fn read_bd_records_refuses_a_session_file_at_the_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("unblock.db");
+        std::fs::write(&db, "{\"id\":\"bd-1\",\"title\":\"t\"}\n").unwrap();
+        let alias = dir.path().join("issues.jsonl");
+        std::fs::hard_link(&db, &alias).expect("hard link");
+        let session = crate::path::SessionFiles::of_database(&db);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let before = {
+            crate::fd_witness::assert_witness_sees(&db);
+            crate::fd_witness::descriptors_on(&db)
+        };
+
+        let Err(err) = read_bd_records(&alias, &session) else {
+            panic!("a session file must be refused at the bd reader");
+        };
+        assert!(
+            matches!(
+                err,
+                crate::error::SyncError::PathTraversal {
+                    reason: crate::path::PathReject::SessionDatabase,
+                    ..
+                }
+            ),
+            "expected SessionDatabase, got {err:?}"
+        );
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(
+            crate::fd_witness::descriptors_on(&db),
+            before + 1,
+            "the raced session file's descriptor is kept open, never closed"
+        );
     }
 }

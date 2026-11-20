@@ -5,6 +5,7 @@ expression: "json!({ \"anomalies\": classes, \"advisories\": advisories })"
 {
   "advisories": [
     "database_not_created",
+    "export_is_session_file",
     "stale_recovery_artifacts",
     "write_lock_held"
   ],

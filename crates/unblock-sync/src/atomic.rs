@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::error::SyncError;
-use crate::path::{validate_sync_path, validate_temp_path};
+use crate::path::{SessionFiles, validate_sync_path, validate_temp_path};
 
 /// The max number of temp-name collision-retry attempts before giving up.
 const MAX_TEMP_ATTEMPTS: u32 = 64;
@@ -204,19 +204,22 @@ fn sync_directory(dir: &Path) -> Result<(), SyncError> {
 /// # Errors
 ///
 /// [`SyncError::Io`] on any fs step; [`SyncError::PathTraversal`] if a temp/final path fails
-/// validation; [`SyncError::PathTraversal`] (`TempCollision`) if temp allocation cannot find a free
-/// name after [`MAX_TEMP_ATTEMPTS`] tries.
+/// validation, or ([`crate::PathReject::SessionDatabase`], PRD §4 D5 amendment, `ub-c15`) if
+/// `final_path` is one of `session`'s files right before the rename; [`SyncError::PathTraversal`]
+/// (`TempCollision`) if temp allocation cannot find a free name after [`MAX_TEMP_ATTEMPTS`] tries.
 pub async fn write_atomic(
     final_path: &Path,
     confine_root: &Path,
     lines: impl Iterator<Item = String> + Send + 'static,
+    session: SessionFiles,
 ) -> Result<usize, SyncError> {
-    // MF-11(b): own the paths BEFORE the 'static spawn_blocking closure (&Path is not 'static).
+    // MF-11(b): own the paths BEFORE the 'static spawn_blocking closure (&Path is not 'static); the
+    // owned `session` moves in beside them (PRD §4 D5 amendment).
     let final_path = final_path.to_path_buf();
     let confine_root = confine_root.to_path_buf();
 
     let handle = tokio::task::spawn_blocking(move || {
-        write_atomic_blocking(&final_path, &confine_root, lines)
+        write_atomic_blocking(&final_path, &confine_root, lines, &session)
     });
     handle.await.map_err(|join_err| SyncError::Io {
         path: PathBuf::new(),
@@ -265,6 +268,7 @@ fn write_atomic_blocking(
     final_path: &Path,
     confine_root: &Path,
     lines: impl Iterator<Item = String>,
+    session: &SessionFiles,
 ) -> Result<usize, SyncError> {
     let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| SyncError::Io {
@@ -329,6 +333,10 @@ fn write_atomic_blocking(
     // (8) re-validate both paths just before the rename.
     validate_temp_path(&temp_path, final_path, confine_root)?;
     validate_sync_path(final_path, confine_root, false)?;
+    // PRD §4 D5 amendment (`ub-c15`): a link to the session database or a sidecar created during the
+    // write is caught here (a stat, no descriptor); the target stays untouched and `TempFileGuard`
+    // removes the temp.
+    session.reject(final_path)?;
 
     // (9) atomic rename over the target.
     #[cfg(feature = "fault-injection")]
@@ -367,6 +375,7 @@ fn write_atomic_blocking(
 mod tests {
     use super::{temp_path_for, write_atomic};
     use crate::error::SyncError;
+    use crate::path::SessionFiles;
 
     /// Count the `*.tmp` files directly under `dir` (orphan-temp detector).
     fn tmp_count(dir: &std::path::Path) -> usize {
@@ -397,9 +406,14 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("occupant"), b"x").unwrap();
 
-        let err = write_atomic(&target, dir.path(), std::iter::once("line".to_string()))
-            .await
-            .expect_err("a directory target must fail the write");
+        let err = write_atomic(
+            &target,
+            dir.path(),
+            std::iter::once("line".to_string()),
+            SessionFiles::none(),
+        )
+        .await
+        .expect_err("a directory target must fail the write");
         assert!(
             matches!(err, SyncError::PathTraversal { .. }),
             "expected a post-temp PathTraversal(NonRegularFile), got {err:?}"
@@ -421,7 +435,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("issues.jsonl");
         let lines = vec!["a".to_string(), "b".to_string()];
-        let n = write_atomic(&target, dir.path(), lines.into_iter())
+        let n = write_atomic(&target, dir.path(), lines.into_iter(), SessionFiles::none())
             .await
             .expect("write");
         assert_eq!(n, 2);
@@ -453,7 +467,7 @@ mod tests {
     async fn rejects_disallowed_target_extension() {
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("issues.txt");
-        let err = write_atomic(&bad, dir.path(), std::iter::empty())
+        let err = write_atomic(&bad, dir.path(), std::iter::empty(), SessionFiles::none())
             .await
             .expect_err("bad ext");
         assert!(matches!(err, SyncError::PathTraversal { .. }));
@@ -465,9 +479,98 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("issues.jsonl");
         std::fs::write(&target, "old\n").unwrap();
-        write_atomic(&target, dir.path(), std::iter::once("new".to_string()))
-            .await
-            .expect("overwrite");
+        write_atomic(
+            &target,
+            dir.path(),
+            std::iter::once("new".to_string()),
+            SessionFiles::none(),
+        )
+        .await
+        .expect("overwrite");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new\n");
+    }
+
+    /// S13 (PRD §4 D5 amendment, `ub-c15`): `write_atomic` re-checks the target against the session's
+    /// files right before the rename, so a target that is (or became) the database is never replaced:
+    /// refused `SessionDatabase`, bytes and identity unchanged, no temp left, and no descriptor kept
+    /// on it (the re-check is a stat; fd witness +0).
+    #[tokio::test]
+    async fn write_atomic_rechecks_the_target_before_the_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        // Same name: the database itself is named like the export.
+        let same_name = dir.path().join("issues.jsonl");
+        std::fs::write(&same_name, b"db bytes\n").unwrap();
+        assert_rechecked(dir.path(), &same_name, &same_name).await;
+
+        // Hard link: a JSONL alias of a distinct database (unix).
+        #[cfg(unix)]
+        {
+            let db = dir.path().join("unblock.db");
+            std::fs::write(&db, b"other db bytes\n").unwrap();
+            let alias = dir.path().join("alias.jsonl");
+            std::fs::hard_link(&db, &alias).expect("hard link");
+            assert_rechecked(dir.path(), &db, &alias).await;
+        }
+    }
+
+    async fn assert_rechecked(
+        root: &std::path::Path,
+        db: &std::path::Path,
+        target: &std::path::Path,
+    ) {
+        let bytes = std::fs::read(db).unwrap();
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt as _;
+            let meta = std::fs::metadata(db).unwrap();
+            (meta.dev(), meta.ino())
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let before = {
+            crate::fd_witness::assert_witness_sees(db);
+            crate::fd_witness::descriptors_on(db)
+        };
+
+        let err = write_atomic(
+            target,
+            root,
+            std::iter::once("new".to_string()),
+            SessionFiles::of_database(db),
+        )
+        .await
+        .expect_err("a session-file target is refused before the rename");
+        assert!(
+            matches!(
+                err,
+                SyncError::PathTraversal {
+                    reason: crate::path::PathReject::SessionDatabase,
+                    ..
+                }
+            ),
+            "expected SessionDatabase, got {err:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(db).unwrap(),
+            bytes,
+            "the database bytes are unchanged"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let meta = std::fs::metadata(target).unwrap();
+            assert_eq!(
+                (meta.dev(), meta.ino()),
+                identity,
+                "the target was not replaced"
+            );
+        }
+        assert_eq!(tmp_count(root), 0, "the temp guard removed the temp");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(
+            crate::fd_witness::descriptors_on(db),
+            before,
+            "no descriptor is kept on a stat-refused target"
+        );
     }
 }
