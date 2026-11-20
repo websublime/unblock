@@ -507,6 +507,19 @@ pub fn shared_range(db: &Path, pid: i32) -> Observation {
     observe(db, Some(pid), SHARED_FIRST, SHARED_SIZE)
 }
 
+/// `SQLite`'s DMS ("dead man switch") byte of the `-shm` file: `UNIX_SHM_BASE` (120) + 8 = 128,
+/// length 1 (`[INFERENCE: SQLite os_unix.c]`, pinned by the engine's `kpe6m` positive control).
+/// Every open WAL connection holds a read lock on it (PRD §4 D5 amendment, `ub-c15`).
+#[allow(dead_code)] // used by the engine and cli lock cells through #[path]
+pub const SHM_DMS_BYTE: libc::off_t = 128;
+
+/// The lock `pid` holds on the `-shm` DMS byte (`F_GETLK` for `F_WRLCK` at offset 128, length 1;
+/// cross-checked against `/proc/locks` on the `-shm` inode on Linux).
+#[allow(dead_code)] // used by the engine and cli lock cells through #[path]
+pub fn shm_dms(shm: &Path, pid: i32) -> Option<LockKind> {
+    observe(shm, Some(pid), SHM_DMS_BYTE, 1).kind()
+}
+
 /// Any lock, by any process, on the whole of `path` (start 0, length 0).
 pub fn whole_file(path: &Path) -> Observation {
     observe(path, None, 0, 0)

@@ -16,6 +16,16 @@ use unblock_storage::{LibsqlStorage, Storage};
 #[cfg(target_os = "linux")]
 pub mod proc_locks;
 
+// PRD §4 D5 amendment (`ub-c15`): the holder/observer lock harness and the ONE lock instrument,
+// storage's `posix_locks.rs`, included by `#[path]` (no third copy).
+#[cfg(unix)]
+pub mod lock_harness;
+#[cfg(unix)]
+pub mod lock_observer;
+#[cfg(unix)]
+#[path = "../../../unblock-storage/tests/common/posix_locks.rs"]
+pub mod posix_locks;
+
 /// Build a `Session` over a fresh in-memory libsql backend (migrated), wired into a synthetic
 /// `WorkspaceContext` — the same shape `unblock-config` builds in production, but with an in-memory
 /// DB so tests are fast and isolated. Real storage, no mock.
@@ -276,6 +286,10 @@ pub mod parked {
         /// [`new_with_integrity_row`](Self::new_with_integrity_row)): one `integrity_check` row
         /// appended to every `health_facts` result.
         integrity_row: Option<&'static str>,
+        /// The `ub-c15` recover hook (set ONLY by [`with_before_repair`](Self::with_before_repair)):
+        /// runs before every `repair` delegates — between recover's evidence copy and its
+        /// `regenerate_export` — so a cell can race the export target into the database.
+        before_repair: Option<Box<dyn Fn() + Send + Sync>>,
     }
 
     impl ParkedStorage {
@@ -296,6 +310,7 @@ pub mod parked {
                 health_armed: AtomicBool::new(false),
                 repair_armed: AtomicBool::new(false),
                 integrity_row: None,
+                before_repair: None,
             })
         }
 
@@ -317,6 +332,7 @@ pub mod parked {
                 health_armed: AtomicBool::new(false),
                 repair_armed: AtomicBool::new(false),
                 integrity_row: None,
+                before_repair: None,
             })
         }
 
@@ -337,6 +353,7 @@ pub mod parked {
                 health_armed: AtomicBool::new(false),
                 repair_armed: AtomicBool::new(false),
                 integrity_row: None,
+                before_repair: None,
             })
         }
 
@@ -358,6 +375,7 @@ pub mod parked {
                 health_armed: AtomicBool::new(false),
                 repair_armed: AtomicBool::new(false),
                 integrity_row: None,
+                before_repair: None,
             })
         }
 
@@ -378,6 +396,7 @@ pub mod parked {
                 health_armed: AtomicBool::new(false),
                 repair_armed: AtomicBool::new(false),
                 integrity_row: None,
+                before_repair: None,
             })
         }
 
@@ -399,6 +418,7 @@ pub mod parked {
                 health_armed: AtomicBool::new(false),
                 repair_armed: AtomicBool::new(false),
                 integrity_row: None,
+                before_repair: None,
             })
         }
 
@@ -420,6 +440,7 @@ pub mod parked {
                 health_armed: AtomicBool::new(true),
                 repair_armed: AtomicBool::new(true),
                 integrity_row: None,
+                before_repair: None,
             })
         }
 
@@ -441,6 +462,33 @@ pub mod parked {
                 health_armed: AtomicBool::new(false),
                 repair_armed: AtomicBool::new(false),
                 integrity_row: Some(row),
+                before_repair: None,
+            })
+        }
+
+        /// Wrap an inner storage with every gate disarmed; `hook` runs before each `repair`
+        /// delegates (PRD §4 D5 amendment, `ub-c15`: recover's export target races into the
+        /// database between the evidence copy and the regeneration). A real-storage delegate, not
+        /// a mock.
+        #[must_use]
+        pub fn with_before_repair(
+            inner: Arc<dyn Storage>,
+            hook: impl Fn() + Send + Sync + 'static,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                gate: Notify::new(),
+                entered: Notify::new(),
+                armed: AtomicBool::new(false),
+                bulk_armed: AtomicBool::new(false),
+                org_armed: AtomicBool::new(false),
+                close_armed: AtomicBool::new(false),
+                close_calls: AtomicUsize::new(0),
+                config_armed: AtomicBool::new(false),
+                health_armed: AtomicBool::new(false),
+                repair_armed: AtomicBool::new(false),
+                integrity_row: None,
+                before_repair: Some(Box::new(hook)),
             })
         }
 
@@ -741,6 +789,9 @@ pub mod parked {
             request: &unblock_storage::RepairRequest,
         ) -> Result<unblock_storage::RepairOutcome, StorageError> {
             self.park_if_repair_armed().await;
+            if let Some(hook) = &self.before_repair {
+                hook();
+            }
             self.inner.repair(request).await
         }
     }

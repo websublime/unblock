@@ -18,6 +18,19 @@ workspace = true
 name = "engine_write_lock_race"
 path = "tests/bin/engine_write_lock_race.rs"
 
+# PRD §4 D5 amendment and D58 amendment (ub-c15) test-only helper: ONE process holding a real
+# `Session` (and so SQLite's SHARED lock and the `-shm` DMS lock) in the MCP server's (`sync`), the
+# cli doctor's (`doctor`) or the cli recover's (`recover`) open order, located from
+# `tests/sync_target_lock_retention.rs` and `tests/export_scan_lock_retention.rs` via
+# `env!("CARGO_BIN_EXE_session_lock_holder")`. Source under `tests/bin/` (never `src/`); uses the
+# crate's own lib + existing `[dependencies]` (config/error + tokio, and the optional `unblock-sync`
+# behind `sync`), NO new dep. Its `doctor`/`recover` modes and commands are `#[cfg(feature =
+# "health")]` and its sync commands `#[cfg(feature = "sync")]`, replying `UNSUPPORTED <feature>`
+# otherwise. No `required-features`: it would drop the bin from builds without `sync`/`health`.
+[[bin]]
+name = "session_lock_holder"
+path = "tests/bin/session_lock_holder.rs"
+
 [dependencies]
 unblock-config = { workspace = true }
 unblock-storage = { workspace = true }
@@ -94,6 +107,12 @@ libsql = { workspace = true }
 # NFR-1 HYBRID engine-overhead perf gate (T3.5/D34): `benches/engine.rs`. Already declared
 # workspace-wide (root Cargo.toml, `features=[async_tokio]`); adds no NEW transitive surface.
 criterion = { workspace = true }
+
+# Safe `fcntl(F_GETLK)` for the PRD §4 D5 amendment (ub-c15) lock-retention cells, which include
+# storage's `tests/common/posix_locks.rs` (the one lock instrument) by `#[path]`. Test-only and
+# Unix-only; already locked through `homedir`, so it adds no crate. `libc` is reached as `nix::libc`.
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true, features = ["fs"] }
 
 # NFR-1 engine perf gate (T3.5/D34): export/import (10k) + create/ready/list/claim engine overhead
 # vs the storage budgets. `harness = false` → criterion owns `main`. The bench BODY is
