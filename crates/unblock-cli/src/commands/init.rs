@@ -76,8 +76,6 @@ const DB_FILENAME: &str = "unblock.db";
 const DEFAULT_PREFIX: &str = "ub";
 /// `init` names a new workspace dir with the name discovery probes first.
 const NEW_UNBLOCK_DIR: &str = UNBLOCK_DIR_NAMES[0];
-/// The `SQLite` sidecar suffixes the database-only mode refuses to open beside, in report order.
-const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Run `unblock init`.
 ///
@@ -239,14 +237,13 @@ fn database_is_missing(db_path: &Path) -> Result<bool, CliError> {
     }
 }
 
-/// Lists the `-wal`, `-shm` and `-journal` entries present beside `db_path`, in that order. Any
-/// directory entry counts, a dangling symlink included.
+/// Lists the `-wal`, `-shm` and `-journal` entries present beside `db_path`, in that order (the
+/// order of `unblock_engine::SIDECAR_SUFFIXES`, owned by `unblock-sync`). Any directory entry
+/// counts, a dangling symlink included.
 fn orphan_sidecars(db_path: &Path) -> Result<Vec<PathBuf>, CliError> {
     let mut files = Vec::new();
-    for suffix in SIDECAR_SUFFIXES {
-        let mut name = db_path.as_os_str().to_owned();
-        name.push(suffix);
-        let path = PathBuf::from(name);
+    for suffix in unblock_engine::SIDECAR_SUFFIXES {
+        let path = unblock_engine::sidecar(db_path, suffix);
         match std::fs::symlink_metadata(&path) {
             Ok(_) => files.push(path),
             Err(err) if err.kind() == ErrorKind::NotFound => {}

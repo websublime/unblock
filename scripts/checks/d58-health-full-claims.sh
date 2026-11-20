@@ -172,6 +172,7 @@ N4@crates/unblock-health/src/*.rs@<{7}|>{7}@NEGATIVE: unblock-health spells no c
 # Q370..Q372 (ub-c15 spec commit) PROCESS §6's tracker-issue branch name and ci-cd §2.3.3's ruleset
 #      verification (the required-check read and the no-bypass check); numbered after the ci
 #      commit's rows so no code already cited on the tracker moves.
+# Q319 (ub-c15 refactor commit) the engine-root re-export of SIDECAR_SUFFIXES and sidecar.
 # =================================================================================================
 REQUIRE_ROW="
 Q1@scripts/checks/d44-create-deps-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D44 sibling's live-range knob carries the SAME range as this script — anchored on the knob line, so the file's own prose about the knob cannot satisfy the pin
@@ -492,6 +493,7 @@ Q315@docs/plans/crates/unblock-health.md@^\| .src/export\.rs. .\[v1\.1\]. \|@tha
 Q316@RELEASING.md@^- \*\*From v1\.1\.0 on\*\*@ci-cd §3\.3\): .windows-check. is green on the push@RELEASING.md §1 (ub-c15 spec commit): from v1.1.0 on, windows-check green on the push run of main's head, the release commit's parent, is a release-cut precondition
 Q317@docs/plans/ci-cd-and-distribution.md@^- \*\*Release-cut precondition \(v1\.1\.0 on\)@\[D5 amendment, .ub-c15.\]\.\*\* .windows-check. is green on@ci-cd §3.3 (ub-c15 spec commit): windows-check green on the push run of main's head, the release commit's parent, is a v1.1.0 release-cut precondition
 Q318@docs/plans/ci-cd-and-distribution.md@^\| .windows-check. \|@a v1\.1\.0 release-cut precondition instead \(RELEASING\.md §1; §3\.3 here\)@ci-cd §2's windows-check row (ub-c15 spec commit): not a required status check, a v1.1.0 release-cut precondition instead
+Q319@crates/unblock-engine/src/lib.rs@^pub use unblock_sync::\{SIDECAR_SUFFIXES, sidecar\};@:[0-9]+:pub use unblock_sync::\{SIDECAR_SUFFIXES, sidecar\};\$@spine §4.1 as amended (PRD §4 D5 amendment, ub-c15): the engine root re-exports the sidecar suffixes from unblock-sync, for the cli
 Q370@docs/PROCESS.md@^- \*\*Branch off .main.\*\*@Branch name: .ub-<id>-<slug>. for work@PROCESS §6 (ub-c15 spec commit, addendum ruling on the branch-name drift): tracker-issue work branches as ub-<id>-<slug>, the form every T4.x branch uses
 Q371@docs/plans/ci-cd-and-distribution.md@^repos/\{owner\}/\{repo\}/rules/branches/main --jq@select\(\.type == .required_status_checks.\) \|\$@ci-cd §2.3.3 (ub-c15 spec commit): the required-check verification reads main's effective ruleset rules, not the branch-protection endpoint
 Q372@docs/plans/ci-cd-and-distribution.md@^repos/\{owner\}/\{repo\}/rulesets/19670603 --jq@'\.enforcement, \(\.bypass_actors \| length\)'. must print\$@ci-cd §2.3.3 (ub-c15 spec commit): administrator enforcement is verified as an active ruleset with no bypass actors
@@ -579,7 +581,7 @@ q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 # the same commit as the rows they add. A floor never moves down because a rule became inconvenient.
 check_table_floor 'required-landing (P)' "$p_count" 2 || blocked=1
 check_table_floor 'negative (N)' "$n_count" 4 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 321 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 322 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
 say "OK — the D58 row, its reciprocal notes on D29, D27, D14 and D31, FR-16 and PRD §7/§8.2/§12/§13/RK-5, the spine's health types, trait methods, CF-E withdrawal, pre-open primitives, facade, doctor/recover and §5b command, the crate plans, both roadmaps and the T4.3 task are in the tree; unblock-health names no storage dependency and no source spells VACUUM; the contract is unmoved; the tracker names ub-lp9.3; the live range sits at every prose site and every SIBLING script's knob — including d57's two — and every newest-pointer row names this gate."

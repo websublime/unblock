@@ -48,6 +48,31 @@ pub enum PathReject {
     TempCollision,
 }
 
+/// The `SQLite` write-ahead-log sidecar suffix.
+pub const WAL_SUFFIX: &str = "-wal";
+/// The `SQLite` shared-memory sidecar suffix.
+pub const SHM_SUFFIX: &str = "-shm";
+/// The `SQLite` rollback-journal sidecar suffix.
+pub const JOURNAL_SUFFIX: &str = "-journal";
+/// The three `SQLite` sidecar suffixes, in the cli's report order (`-wal`, `-shm`, `-journal`).
+///
+/// PRD §4 D5 amendment (`ub-c15`): `unblock-sync` owns these names above L2; `unblock-health` and
+/// the engine root re-export them (`unblock-storage`, at L2, keeps its own private literals, NFR-15).
+pub const SIDECAR_SUFFIXES: [&str; 3] = [WAL_SUFFIX, SHM_SUFFIX, JOURNAL_SUFFIX];
+
+/// Derive a `SQLite` sidecar path by **appending** `suffix` to the db path's raw bytes (`{db}{suffix}`),
+/// matching `SQLite`'s own `-wal`/`-shm`/`-journal` naming — NOT `Path::with_extension`, which would
+/// corrupt a db path that has no extension or a multi-dot name.
+///
+/// Uses [`OsString`](std::ffi::OsString) concatenation rather than string formatting so a non-UTF-8
+/// db path is preserved byte-for-byte; the result is identical for every valid UTF-8 path.
+#[must_use]
+pub fn sidecar(db: &Path, suffix: &str) -> PathBuf {
+    let mut raw = db.as_os_str().to_os_string();
+    raw.push(suffix);
+    PathBuf::from(raw)
+}
+
 /// Reject an `allow_external` override that carries NO written reason (NFR-5/D30 forward seam).
 ///
 /// The reason gates `allow_external` at the sync boundary: writing/reading outside `confine_root`
@@ -357,8 +382,9 @@ fn is_allowed_jsonl_temp_name(file_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        PathReject, is_allowed_jsonl_temp_name, normalize_lexically,
-        reject_external_without_reason, validate_sync_path, validate_temp_path,
+        JOURNAL_SUFFIX, PathReject, SHM_SUFFIX, WAL_SUFFIX, is_allowed_jsonl_temp_name,
+        normalize_lexically, reject_external_without_reason, sidecar, validate_sync_path,
+        validate_temp_path,
     };
     use crate::error::SyncError;
     use std::path::{Path, PathBuf};
@@ -515,5 +541,45 @@ mod tests {
         // (4) no external override, reason present → still a no-op.
         reject_external_without_reason(path, false, Some("operator reason"))
             .expect("no external override is always allowed, reason ignored");
+    }
+
+    #[test]
+    fn sidecar_appends_to_a_dotted_db_name() {
+        let db = Path::new("/ws/.unblock/unblock.db");
+        assert_eq!(
+            sidecar(db, WAL_SUFFIX),
+            PathBuf::from("/ws/.unblock/unblock.db-wal")
+        );
+        assert_eq!(
+            sidecar(db, SHM_SUFFIX),
+            PathBuf::from("/ws/.unblock/unblock.db-shm")
+        );
+        assert_eq!(
+            sidecar(db, JOURNAL_SUFFIX),
+            PathBuf::from("/ws/.unblock/unblock.db-journal")
+        );
+    }
+
+    #[test]
+    fn sidecar_appends_to_an_extensionless_db_name() {
+        // `with_extension("-wal")` would produce a WRONG `unblock-wal`-as-extension; append is right.
+        let db = Path::new("/ws/unblock");
+        assert_eq!(sidecar(db, WAL_SUFFIX), PathBuf::from("/ws/unblock-wal"));
+    }
+
+    #[test]
+    fn sidecar_appends_to_a_multi_dot_db_name() {
+        let db = Path::new("issues.sqlite");
+        assert_eq!(sidecar(db, SHM_SUFFIX), PathBuf::from("issues.sqlite-shm"));
+    }
+
+    #[test]
+    fn sidecar_is_pure_no_side_effects() {
+        // A relative, non-existent path derives without touching the filesystem.
+        let db = Path::new("does/not/exist.db");
+        assert_eq!(
+            sidecar(db, WAL_SUFFIX),
+            PathBuf::from("does/not/exist.db-wal")
+        );
     }
 }

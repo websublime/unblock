@@ -20,11 +20,12 @@ use unblock_health::recovery::{
 };
 use unblock_health::{
     AdvisoryFacts, AnomalyClass, DbFileFact, ExportFacts, ExportScan, HealthError, HealthLevel,
-    JOURNAL_SUFFIX, PlannedAction, PlannedRepair, PreOpenFacts, RepairPath, SHM_SUFFIX, WAL_SUFFIX,
-    WorkspaceClassification, WorkspacePaths, sidecar,
+    PlannedAction, PlannedRepair, PreOpenFacts, RepairPath, WorkspaceClassification,
+    WorkspacePaths,
 };
 use unblock_model::{DiagnosticFinding, DiagnosticKind, DiagnosticReport};
 use unblock_storage::{ExclusiveOutcome, ExclusiveRequest, StorageError};
+use unblock_sync::{JOURNAL_SUFFIX, SHM_SUFFIX, WAL_SUFFIX, sidecar};
 
 use crate::error::{EngineError, Result};
 
