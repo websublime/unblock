@@ -497,6 +497,10 @@ impl Member {
     const ALL: [Self; 4] = [Self::Database, Self::Wal, Self::Shm, Self::Journal];
 
     /// The member's path beside `db_path`.
+    ///
+    /// The suffix literals are `SQLite`'s fixed sidecar names. Above L2 their owner is
+    /// `unblock_sync::SIDECAR_SUFFIXES` (PRD §4 D5 amendment, `ub-c15`); this crate (L2) cannot
+    /// depend on `unblock-sync` (L3, NFR-15), so it keeps its own private copy here.
     fn path(self, db_path: &Path) -> PathBuf {
         let suffix = match self {
             Self::Database => "",

@@ -144,6 +144,11 @@ pub use unblock_health::{
     DbFileFact, HealthLevel, PlannedAction, PlannedRepair, PreOpenFacts, RepairPath,
 };
 
+// --- the `SQLite` sidecar suffixes (owner `unblock-sync`, PRD §4 D5 amendment, `ub-c15`),
+//     re-exported so the cli needs no `unblock-sync` edge (`init`'s orphan-sidecar check) ---
+#[cfg(feature = "sync")]
+pub use unblock_sync::{SIDECAR_SUFFIXES, sidecar};
+
 // --- the report module owns the engine-local `ImportOptions` and re-exports the model-owned
 //     report/outcome DTOs (CF-A) from one place ---
 pub use report::{CloseOutcome, ExportReport, ImportOptions, ImportReport};
@@ -181,6 +186,10 @@ mod tests {
         RepairPath,
         preopen::{ActionOutcome, ActionResult, PreOpenRepairOutcome},
     };
+    // The `SQLite` sidecar suffixes (`sync` feature; PRD §4 D5 amendment, `ub-c15`).
+    #[cfg(feature = "sync")]
+    #[allow(unused_imports)]
+    use crate::{SIDECAR_SUFFIXES, sidecar};
 
     #[test]
     fn engine_owned_re_exports_construct() {

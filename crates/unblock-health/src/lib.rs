@@ -39,4 +39,6 @@ pub use facts::{
 };
 pub use integrity::classify_integrity_row;
 pub use level::HealthLevel;
-pub use paths::{JOURNAL_SUFFIX, SHM_SUFFIX, WAL_SUFFIX, WorkspacePaths, sidecar};
+pub use paths::WorkspacePaths;
+// The `SQLite` sidecar suffixes are owned by `unblock-sync` (PRD §4 D5 amendment, `ub-c15`).
+pub use unblock_sync::{JOURNAL_SUFFIX, SHM_SUFFIX, WAL_SUFFIX, sidecar};

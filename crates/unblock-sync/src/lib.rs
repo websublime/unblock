@@ -37,6 +37,10 @@ pub use conflict::{
 pub use jsonl::{parse_issue_line, serialize_issue_line};
 pub use path::validate_sync_path;
 
+// The `SQLite` sidecar suffixes, owned here above L2 (PRD §4 D5 amendment, `ub-c15`); health and the
+// engine root re-export them.
+pub use path::{JOURNAL_SUFFIX, SHM_SUFFIX, SIDECAR_SUFFIXES, WAL_SUFFIX, sidecar};
+
 // The per-crate error + its `PathReject` detail.
 pub use error::SyncError;
 pub use path::PathReject;
