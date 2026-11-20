@@ -2393,3 +2393,163 @@ fn file_tree(root: &Path) -> BTreeMap<PathBuf, Node> {
     walk(root, root, &mut tree);
     tree
 }
+
+// ------------------------------------------------------------------------------------------------
+// PRD §4 D58 amendment (`ub-c15`): an export that IS the database is skipped, reported, never
+// regenerated
+// ------------------------------------------------------------------------------------------------
+
+/// The two shapes of the export resolving to the database: `db_filename = "issues.jsonl"` (the
+/// data-loss shape: the default export path IS the database) and, on unix, a hard link
+/// `issues.jsonl` → `unblock.db`. Each is seeded with an issue whose description holds a
+/// `<<<<<<< HEAD` line, and the database FILE bytes are asserted to carry `\n<<<<<<< ` (so a scan
+/// that read the database would report `jsonl_conflict_markers` and `--repair` would regenerate
+/// over it). Returns `(shape, workspace, database path)`.
+fn export_is_the_database_shapes() -> Vec<(&'static str, Workspace, PathBuf)> {
+    let mut shapes = Vec::new();
+
+    let ws = Workspace::init();
+    std::fs::rename(ws.db_path(), ws.unblock_dir().join("issues.jsonl")).expect("rename the db");
+    let config = std::fs::read_to_string(ws.config_path()).expect("read config.toml");
+    std::fs::write(
+        ws.config_path(),
+        format!("db_filename = \"issues.jsonl\"\n{config}"),
+    )
+    .expect("write config.toml");
+    let db = ws.unblock_dir().join("issues.jsonl");
+    shapes.push(("same-name", ws, db));
+
+    #[cfg(unix)]
+    {
+        let ws = Workspace::init();
+        let db = ws.db_path();
+        std::fs::hard_link(&db, ws.unblock_dir().join("issues.jsonl")).expect("hard link");
+        shapes.push(("hard-link", ws, db));
+    }
+
+    for (shape, ws, db) in &shapes {
+        seed_marker_issue(ws);
+        let bytes = std::fs::read(db).expect("read the database file");
+        assert!(
+            bytes.windows(9).any(|w| w == b"\n<<<<<<< "),
+            "{shape}: precondition: the database file carries a conflict-marker line"
+        );
+    }
+    shapes
+}
+
+/// Create one issue whose description holds a `<<<<<<< HEAD` line, through the real engine.
+fn seed_marker_issue(ws: &Workspace) {
+    runtime().block_on(async {
+        let session = open_session(ws).await;
+        session
+            .create_issue(unblock_engine::NewIssue {
+                title: "carries a marker line".to_string(),
+                description: Some("before\n<<<<<<< HEAD\nafter".to_string()),
+                ..unblock_engine::NewIssue::default()
+            })
+            .await
+            .expect("create the marker issue");
+        drop(session);
+    });
+}
+
+/// The database's SHA-256 and (unix) inode.
+fn db_fingerprint(db: &Path) -> (String, Option<u64>) {
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(std::fs::metadata(db).expect("stat the database").ino())
+    };
+    #[cfg(not(unix))]
+    let ino = None;
+    (
+        sha256_hex(&std::fs::read(db).expect("read the database")),
+        ino,
+    )
+}
+
+/// (C0) Plain `doctor` with the export resolving to the database exits by the level (`Healthy`, 0:
+/// the skip is an advisory), reports `export_is_session_file` and no scan finding, and writes
+/// nothing: the database's SHA-256 and inode are unchanged and no `.unblock/.recovery/` exists.
+#[test]
+fn c15e0_doctor_reports_an_export_that_is_the_database_and_writes_nothing() {
+    for (shape, ws, db) in export_is_the_database_shapes() {
+        let before = db_fingerprint(&db);
+        let (code, report) = doctor(&ws, false);
+        assert_eq!(code, Some(0), "{shape}: report: {report}");
+        assert_eq!(
+            detail(&report, "health"),
+            Some("healthy"),
+            "{shape}: report: {report}"
+        );
+        assert!(
+            has_label(&report, "export_is_session_file"),
+            "{shape}: report: {report}"
+        );
+        assert!(
+            !has_label(&report, "jsonl_conflict_markers")
+                && !has_label(&report, "jsonl_unscannable"),
+            "{shape}: the database was scanned as the export; report: {report}"
+        );
+        assert_eq!(
+            db_fingerprint(&db),
+            before,
+            "{shape}: doctor changed the database"
+        );
+        assert!(
+            !ws.unblock_dir().join(".recovery").exists(),
+            "{shape}: doctor created a .recovery/ entry"
+        );
+    }
+}
+
+/// (C1) `doctor --repair` with the export resolving to the database regenerates nothing. In
+/// document order: (1) the `recover` / `nothing to repair online` row; (2) `export_is_session_file`
+/// exactly once, after it; (3) no `repair_planned`, `regenerate_export` or `evidence` row; (4) exit
+/// 0; (5) no `.unblock/.recovery/`; (6) the database's SHA-256 and inode unchanged.
+#[test]
+fn c15e1_repair_with_an_export_that_is_the_database_regenerates_nothing() {
+    for (shape, ws, db) in export_is_the_database_shapes() {
+        let before = db_fingerprint(&db);
+        let (code, report) = doctor(&ws, true);
+        let labels = labels(&report);
+        let recover = labels
+            .iter()
+            .position(|l| l == "recover")
+            .unwrap_or_else(|| panic!("{shape}: no recover row; report: {report}"));
+        assert_eq!(
+            details(&report, "recover"),
+            vec!["nothing to repair online".to_string()],
+            "{shape}: report: {report}"
+        );
+        let skips: Vec<usize> = labels
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| *l == "export_is_session_file")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(skips.len(), 1, "{shape}: report: {report}");
+        assert!(skips[0] > recover, "{shape}: report: {report}");
+        assert!(
+            !labels
+                .iter()
+                .any(|l| l == "repair_planned" || l == "regenerate_export" || l == "evidence"),
+            "{shape}: report: {report}"
+        );
+        assert!(
+            !report.to_string().contains("regenerate_export"),
+            "{shape}: report: {report}"
+        );
+        assert_eq!(code, Some(0), "{shape}: report: {report}");
+        assert!(
+            !ws.unblock_dir().join(".recovery").exists(),
+            "{shape}: --repair created a .recovery/ entry"
+        );
+        assert_eq!(
+            db_fingerprint(&db),
+            before,
+            "{shape}: --repair changed or replaced the database"
+        );
+    }
+}

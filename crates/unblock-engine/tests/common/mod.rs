@@ -60,16 +60,28 @@ pub async fn session_over_in_dir(
     workspace_dir: PathBuf,
     unblock_dir: PathBuf,
 ) -> Session {
+    let startup = ResolvedConfig::default().startup;
+    let paths = ConfigPaths {
+        db_path: unblock_dir.join(&startup.db_filename),
+        jsonl_path: unblock_dir.join(&startup.jsonl_filename),
+        unblock_dir,
+    };
+    session_over_paths(storage, cfg, workspace_dir, paths).await
+}
+
+/// Like `session_over_in_dir`, with explicit `ConfigPaths` — a database named like the export (PRD
+/// §4 D5 amendment, `ub-c15`).
+pub async fn session_over_paths(
+    storage: Arc<dyn Storage>,
+    cfg: SessionConfig,
+    workspace_dir: PathBuf,
+    paths: ConfigPaths,
+) -> Session {
     // D57: the actor lives in `config.runtime`, at the `$USER` (`os_user`) tier, and the reloader
     // reproduces it — so a `config_set` keeps "tester" while a DB `actor` row still overrides it.
     let mut config = ResolvedConfig::default();
     config.runtime.actor = "tester".to_string();
     config.runtime.sources.actor = unblock_model::ConfigSource::OsUser;
-    let paths = ConfigPaths {
-        db_path: unblock_dir.join(&config.startup.db_filename),
-        jsonl_path: unblock_dir.join(&config.startup.jsonl_filename),
-        unblock_dir,
-    };
     let ctx = WorkspaceContext {
         storage,
         workspace_dir,

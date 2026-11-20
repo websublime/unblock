@@ -30,6 +30,8 @@
 #     when `self-update` is off) + the default-on leg + cargo-tree (dis)appearance controls.
 # D58 (T4.3, v1.1) adds `exclusivity-macos`: the criterion (f) exclusive-window cells on the pinned
 # `macos-15` image, the same file the `storage-testkit` job runs on Linux.
+# ub-c15 (v1.1; PRD §4 D5 amendment and D58 amendment) runs the session-file lock-retention cells in
+# `exclusivity-macos` (F_GETLK) and as a named step of `test` (F_GETLK + /proc/locks).
 #
 # Feature policy (D15/NFR-10, ci-cd §2.2): the testkit clippy/test steps use TARGETED features
 # (`-p unblock-storage --features testkit`), never `--all-features` — at v1.3 `--all-features` selects
@@ -98,6 +100,13 @@ jobs:
       # feature and Cargo unifies features across the workspace. Their dedicated jobs below remain
       # the named gates.
       - run: cargo test --workspace --locked
+      # PRD §4 D5 amendment + D58 amendment (ub-c15): the session-file lock-retention cells, run as a
+      # named step with `--show-output` so the Linux leg's evidence lines (F_GETLK + /proc/locks,
+      # `UB2VP-MEASURE leg=linux/test`) of PASSING cells are printed in the log.
+      - name: D5 sync-target + D58 export-scan lock retention, measured on Linux (F_GETLK + /proc/locks)
+        run: |
+          cargo test -p unblock-engine --locked --test sync_target_lock_retention --test export_scan_lock_retention -- --show-output
+          cargo test -p unblock-cli --locked --test sync_target_lock_retention_cli -- --show-output
 
   storage-testkit:
     name: storage testkit (NFR-16 contract + NFR-3 contention)
@@ -138,7 +147,7 @@ jobs:
       - name: D58 read-only open (criterion (l))
         run: cargo test -p unblock-storage --features testkit --locked --test read_only
       - name: D58 engine health cells (testkit counters)
-        run: cargo test -p unblock-engine --features testkit --locked --test health
+        run: cargo test -p unblock-engine --features testkit --locked --test health -- --show-output
 
   exclusivity-macos:
     name: exclusivity (macOS, D58 criterion (f))
@@ -146,7 +155,12 @@ jobs:
     # lock-loss cells, as the `storage-testkit` step above, on the second shipped OS family. Pinned
     # image (the update-smoke.yml precedent). The cache matters because a cold libsql-ffi C build on
     # a macOS runner bills at ten times the Linux rate.
+    # ub-c15 (PRD §4 D5 amendment, D58 amendment) adds the session-file lock-retention cells, where
+    # F_GETLK is the only lock witness (`--show-output` prints the `UB2VP-MEASURE` lines), and their
+    # unit halves (hard links and inodes need a unix leg beside Linux).
     runs-on: macos-15
+    # A wedged holder must not bill a macOS runner for the 6 h default (the bench-gate precedent).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -155,6 +169,14 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: D58 exclusive window, criterion (f) measured on macOS
         run: cargo test -p unblock-storage --features testkit --locked --test exclusive_window
+      - name: D5 sync-target + D58 export-scan lock retention, measured on macOS
+        run: |
+          cargo test -p unblock-engine --locked --test sync_target_lock_retention --test export_scan_lock_retention -- --show-output
+          cargo test -p unblock-cli --locked --test sync_target_lock_retention_cli -- --show-output
+      - name: D5 + D58 unit cells on macOS (sync session-file matrix, health export scan and copy)
+        run: |
+          cargo test -p unblock-sync --locked --lib --test session_files
+          cargo test -p unblock-health --locked --lib --test export_scan --test recovery_layout
 
   stress-integrity:
     name: stress-integrity (NFR-5 long-lived/interleaved + NFR-4 fault-injection)

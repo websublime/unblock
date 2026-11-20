@@ -36,13 +36,19 @@ struct Workspace {
 impl Workspace {
     /// A workspace with a migrated database and its `.write.lock` marker.
     async fn new() -> Self {
+        Self::with_names("unblock.db", "issues.jsonl").await
+    }
+
+    /// [`Workspace::new`] with explicit database and export file names inside `.unblock/` — a
+    /// database named like the export (PRD §4 D5 amendment, `ub-c15`).
+    async fn with_names(db: &str, jsonl: &str) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         let unblock_dir = root.join(".unblock");
         std::fs::create_dir_all(&unblock_dir).expect("create .unblock");
         let paths = ConfigPaths {
-            db_path: unblock_dir.join("unblock.db"),
-            jsonl_path: unblock_dir.join("issues.jsonl"),
+            db_path: unblock_dir.join(db),
+            jsonl_path: unblock_dir.join(jsonl),
             unblock_dir,
         };
         let storage = LibsqlStorage::open_local(&paths.db_path, DEFAULT_WRITE_LOCK_TIMEOUT_MS)
@@ -93,14 +99,18 @@ impl Workspace {
 
     async fn session_over(&self, storage: Arc<LibsqlStorage>) -> (Session, Arc<LibsqlStorage>) {
         let shared: Arc<dyn Storage> = storage.clone();
-        let session = common::session_over_in_dir(
-            shared,
+        (self.session_over_dyn(shared).await, storage)
+    }
+
+    /// A session over any store (a decorator over the real one), with this workspace's paths.
+    async fn session_over_dyn(&self, storage: Arc<dyn Storage>) -> Session {
+        common::session_over_paths(
+            storage,
             SessionConfig::default(),
             self.root.clone(),
-            self.paths.unblock_dir.clone(),
+            self.paths.clone(),
         )
-        .await;
-        (session, storage)
+        .await
     }
 
     /// Run raw SQL on the database, then close it.
@@ -1377,4 +1387,255 @@ async fn gather_preopen_reports_a_dangling_wal_symlink() {
 
     let facts = gather_preopen(&ws.paths).expect("gather_preopen");
     assert!(facts.wal_len.is_some(), "{facts:?}");
+}
+
+// ------------------------------------------------------------------------------------------------
+// PRD §4 D5 amendment and D58 amendment (`ub-c15`): an export that is a session file
+// ------------------------------------------------------------------------------------------------
+
+/// The conflict-marker line seeded into the database, so a scan that READ the database would report
+/// `jsonl_conflict_markers` and recover would plan `regenerate_export`.
+const MARKER_LINE: &str = "<<<<<<< HEAD";
+
+/// Seed one issue whose description holds [`MARKER_LINE`] through `Session::create_issue`, drop
+/// every store, and assert the precondition: the database FILE bytes carry `\n<<<<<<< `.
+async fn seed_marker(ws: &Workspace) {
+    {
+        let (session, _storage) = ws.open().await;
+        session
+            .create_issue(NewIssue {
+                title: "carries a marker line".to_string(),
+                description: Some(format!("before\n{MARKER_LINE}\nafter")),
+                ..NewIssue::default()
+            })
+            .await
+            .expect("create the marker issue");
+    }
+    let bytes = std::fs::read(ws.db()).expect("read the database file");
+    assert!(
+        bytes.windows(9).any(|w| w == b"\n<<<<<<< "),
+        "precondition: the database file carries a conflict-marker line"
+    );
+}
+
+/// The database's inode (unix) and SHA-256.
+fn db_identity(db: &Path) -> (Option<u64>, String) {
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(std::fs::metadata(db).expect("stat the database").ino())
+    };
+    #[cfg(not(unix))]
+    let ino = None;
+    let (_, sha) = unblock_health::recovery::sha256_file(db).expect("hash the database");
+    (ino, sha)
+}
+
+/// Linux: this process's store holds `SQLite`'s SHARED lock on `db` (`/proc/locks`, the G3 witness).
+/// Elsewhere a no-op: `F_GETLK` cannot see this process's own lock, so the macOS legs of the lock
+/// claim are the holder cells.
+#[cfg(target_os = "linux")]
+fn assert_own_shared(cell: &str, point: &str, db: &Path) {
+    use common::proc_locks::{LockKind, shared_range};
+
+    let pid = i32::try_from(std::process::id()).expect("a pid fits i32");
+    let seen = shared_range(db, pid);
+    let leg = std::env::var("GITHUB_JOB").unwrap_or_else(|_| "local".to_owned());
+    eprintln!(
+        "UB2VP-MEASURE leg=linux/{leg} cell={cell} point={point} holder_pid={pid} sh={:?} \
+         attempts={} proc_reads={} proc_bytes={}",
+        seen.kind, seen.attempts, seen.proc_reads, seen.proc_bytes
+    );
+    assert_eq!(
+        seen.kind,
+        Some(LockKind::Read),
+        "{cell} at {point}: the store lost SQLite's SHARED lock (a descriptor on a session file was \
+         closed); raw lines on the inode per read {:?}",
+        seen.raw_on_inode
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn assert_own_shared(_cell: &str, _point: &str, _db: &Path) {}
+
+/// A `.tmp` left in `dir`, if any.
+fn temp_in(dir: &Path) -> Option<String> {
+    std::fs::read_dir(dir)
+        .expect("read_dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .find(|name| {
+            Path::new(name)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("tmp"))
+        })
+}
+
+/// (E1, D58 amendment) `doctor` with the export a hard link or a symlink to the database reports
+/// `export_is_session_file`, never `jsonl_conflict_markers` (the database carries a marker line, so
+/// a scan that read it would) or `jsonl_unscannable`, and the session keeps SHARED.
+#[cfg(unix)]
+#[tokio::test]
+async fn c15i0_doctor_reports_a_session_file_export_and_never_scans_it() {
+    for shape in ["hard-link", "symlink"] {
+        let ws = Workspace::new().await;
+        seed_marker(&ws).await;
+        if shape == "hard-link" {
+            std::fs::hard_link(ws.db(), &ws.paths.jsonl_path).expect("hard link");
+        } else {
+            std::os::unix::fs::symlink(ws.db(), &ws.paths.jsonl_path).expect("symlink");
+        }
+        let facts = gather_preopen(&ws.paths).expect("gather_preopen");
+        let (session, storage) = ws.open_read_only().await;
+        storage.schema_version().await.expect("one read");
+        assert_own_shared("c15i0", &format!("{shape}/before-doctor"), ws.db());
+        let health = session.doctor(&facts).await.expect("doctor");
+        assert_own_shared("c15i0", &format!("{shape}/after-doctor"), ws.db());
+        assert_eq!(
+            details(&health.report, "export_is_session_file").len(),
+            1,
+            "{shape}: {:?}",
+            health.report
+        );
+        assert!(
+            details(&health.report, "jsonl_conflict_markers").is_empty()
+                && details(&health.report, "jsonl_unscannable").is_empty(),
+            "{shape}: the session-file export was scanned: {:?}",
+            health.report
+        );
+        drop(session);
+        drop(storage);
+    }
+}
+
+/// (E2, D58 amendment) `recover()` with the export resolving to the database plans no
+/// `regenerate_export`: it reports `nothing to repair online`, creates no run directory, and leaves
+/// the database's inode and SHA-256 unchanged and its integrity `ok`. Shape (i) is the data-loss
+/// shape (`db_path == jsonl_path`): on unpatched main the copy passes the allowlist and
+/// `write_export` renames a JSONL over the database. Shapes (ii) a hard link and (iii)
+/// `jsonl_path = .unblock/unblock.db`.
+#[tokio::test]
+async fn c15i1_recover_skips_an_export_that_is_the_database_and_regenerates_nothing() {
+    let mut shapes = vec![
+        (
+            "same-name",
+            Workspace::with_names("issues.jsonl", "issues.jsonl").await,
+        ),
+        (
+            "jsonl-is-db",
+            Workspace::with_names("unblock.db", "unblock.db").await,
+        ),
+    ];
+    if cfg!(unix) {
+        shapes.push(("hard-link", Workspace::new().await));
+    }
+    for (shape, ws) in shapes {
+        seed_marker(&ws).await;
+        if shape == "hard-link" {
+            std::fs::hard_link(ws.db(), &ws.paths.jsonl_path).expect("hard link");
+        }
+        let before = db_identity(ws.db());
+        let (session, storage) = ws.open().await;
+        storage.schema_version().await.expect("one read");
+        assert_own_shared("c15i1", &format!("{shape}/before-recover"), ws.db());
+        let report = session.recover().await.expect("recover");
+        assert_own_shared("c15i1", &format!("{shape}/after-recover"), ws.db());
+        assert_eq!(
+            details(&report, "recover"),
+            vec!["nothing to repair online"],
+            "{shape}: {report:?}"
+        );
+        assert!(
+            !format!("{report:?}").contains("regenerate_export"),
+            "{shape}: a regeneration was planned: {report:?}"
+        );
+        assert!(ws.run_dirs().is_empty(), "{shape}: a run directory exists");
+        drop(session);
+        drop(storage);
+        assert_eq!(
+            db_identity(ws.db()),
+            before,
+            "{shape}: the database was replaced or rewritten"
+        );
+        let (session, _storage) = ws.open().await;
+        // `Session::integrity_check` returns only the problem rows: empty is `ok`.
+        let problems = session.integrity_check().await.expect("integrity_check");
+        assert!(problems.is_empty(), "{shape}: {problems:?}");
+    }
+}
+
+/// (E3, D5 amendment) A regeneration target that RACES into the database between recover's evidence
+/// copy and `write_export` (a hard link to the database renamed over a distinct, marker-bearing
+/// `issues.jsonl` by the repair hook) is refused `PATH_TRAVERSAL`/`SessionDatabase`: the manifest
+/// records the regeneration `failed`, `issues.jsonl` is still the database's inode (no rename over
+/// it), integrity stays `ok` and no temp is left.
+#[cfg(unix)]
+#[tokio::test]
+async fn c15i2_recover_refuses_a_regeneration_target_that_raced_into_the_database() {
+    use std::os::unix::fs::MetadataExt as _;
+    use unblock_error::CodedError as _;
+
+    let ws = Workspace::new().await;
+    {
+        let (session, _storage) = ws.open().await;
+        session
+            .create_issue(new_issue("kept", None))
+            .await
+            .expect("create");
+    }
+    std::fs::write(
+        &ws.paths.jsonl_path,
+        format!("{MARKER_LINE}\n{{\"id\":\"ub-ours\"}}\n=======\n"),
+    )
+    .expect("write the marker-bearing export");
+
+    let db = ws.db().to_path_buf();
+    let jsonl = ws.paths.jsonl_path.clone();
+    let staged = ws.paths.unblock_dir.join("raced-link");
+    let storage = Arc::new(
+        LibsqlStorage::open_local(ws.db(), DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+            .await
+            .expect("open_local"),
+    );
+    storage.schema_version().await.expect("one read");
+    let raced: Arc<dyn Storage> =
+        common::parked::ParkedStorage::with_before_repair(storage.clone(), move || {
+            std::fs::hard_link(&db, &staged).expect("link the database");
+            std::fs::rename(&staged, &jsonl).expect("race the link over the export");
+        });
+    let session = ws.session_over_dyn(raced).await;
+    assert_own_shared("c15i2", "before-recover", ws.db());
+    let err = session
+        .recover()
+        .await
+        .expect_err("the raced regeneration is refused");
+    assert_own_shared("c15i2", "after-recover", ws.db());
+    assert_eq!(err.code(), unblock_error::ErrorCode::PathTraversal, "{err}");
+    assert_eq!(err.code().exit_code(), 6);
+    assert!(err.to_string().contains("SessionDatabase"), "{err}");
+
+    let runs = ws.run_dirs();
+    assert_eq!(runs.len(), 1, "one run directory");
+    let regenerate: Vec<_> = manifest_actions(&runs[0])
+        .into_iter()
+        .filter(|(action, ..)| action == "regenerate_export")
+        .collect();
+    assert_eq!(regenerate.len(), 1, "{regenerate:?}");
+    assert_eq!(regenerate[0].2, "failed", "{regenerate:?}");
+    assert_eq!(
+        std::fs::metadata(&ws.paths.jsonl_path)
+            .expect("stat the export")
+            .ino(),
+        std::fs::metadata(ws.db()).expect("stat the database").ino(),
+        "the export is still the database's link: nothing was renamed over it"
+    );
+    assert_eq!(
+        temp_in(&ws.paths.unblock_dir),
+        None,
+        "a temp was left behind"
+    );
+    drop(session);
+    drop(storage);
+    let (session, _storage) = ws.open().await;
+    let problems = session.integrity_check().await.expect("integrity_check");
+    assert!(problems.is_empty(), "integrity_check: {problems:?}");
 }
