@@ -391,4 +391,18 @@ mod tests {
         assert_eq!(err.code().exit_code(), 6);
         assert!(err.to_string().contains("SessionDatabase"));
     }
+
+    #[test]
+    fn name_rejects_map_to_path_traversal_exit_6() {
+        // NFR-7 (`ub-b9z`): both name reasons reuse the existing code.
+        for reason in [PathReject::ColonInName, PathReject::ReservedDeviceName] {
+            let err = SyncError::PathTraversal {
+                path: PathBuf::from("/x/.unblock/NUL.jsonl"),
+                reason,
+            };
+            assert_eq!(err.code(), ErrorCode::PathTraversal);
+            assert_eq!(err.code().exit_code(), 6);
+            assert!(err.to_string().contains(&format!("{reason:?}")));
+        }
+    }
 }
