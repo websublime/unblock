@@ -586,6 +586,18 @@
   `--package=unblock-cli` in all five build logs, and the `v1.0.2 → v1.0.3` smoke (run 44537692027) passed on all
   five triples.)*
 
+- **T3.19 — Sync paths refuse a `:` or a Windows reserved device name. Implements the PRD NFR-7 and FR-8
+  refinement of `ub-b9z` (v1.0.4; code on the `release/v1.0.x` maintenance branch, and the same code on `main`
+  for v1.1.0).** *(Next free top-level id after T3.18.)* On Windows a sync target such as
+  `.unblock\unblock.db:x.jsonl` named an NTFS alternate data stream of the live database, and `NUL.jsonl` a
+  device. Scope: `unblock-sync` `validate_sync_path` step (1a), between the lexical `.git` test and the `.git`
+  ancestor resolution (`PathReject::ColonInName`, `PathReject::ReservedDeviceName`; the public `has_stream_colon`,
+  `leaf_name_reject` and `unportable_name_reject`). NOT in scope: the configured names (`ub-gp0`); merging the
+  branch back. *(AC: the `ub-b9z` cells pass on Linux on both lines and on macOS on `main`, and the end-to-end
+  cell on macOS on both lines; the branch `windows-check` job is green; `v1.0.4-rc.1` then `v1.0.4` are published
+  from `release/v1.0.x` with `--package=unblock-cli` in every build log; the live `v1.0.3 → v1.0.4` update smoke
+  passes on all five triples before any v1.1.0 is published.)*
+
 ## 5a. v1.1 — locked slices  *(tasks land just-in-time as v1.1 slices are decided — `docs/PROCESS.md` §2)*
 
 - **T4.1 — FR-6 remainder: label rename and catalog, epic rollups, explicit close of eligible epics. Implements

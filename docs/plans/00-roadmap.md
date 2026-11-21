@@ -1,6 +1,6 @@
 # unblock — Version Roadmap
 
-- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (released 2026-10-02; maintenance patch — the `v1.0.1` subsection of §1); v1.0.2 **PLANNED** (released 2026-10-29; maintenance patch — the `v1.0.2` subsection of §1); v1.0.3 **PLANNED** (released 2026-11-19; maintenance patch cut from the `release/v1.0.x` branch — the `v1.0.3` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
+- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (released 2026-10-02; maintenance patch — the `v1.0.1` subsection of §1); v1.0.2 **PLANNED** (released 2026-10-29; maintenance patch — the `v1.0.2` subsection of §1); v1.0.3 **PLANNED** (released 2026-11-19; maintenance patch cut from the `release/v1.0.x` branch — the `v1.0.3` subsection of §1); v1.0.4 **PLANNED** (maintenance patch cut from the `release/v1.0.x` branch — the `v1.0.4` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
 - **Date:** 2026-06-19 · **v1.2–v1.5 resequence:** 2026-07-07 (session ratified by Miguel; audience decision minted as PRD §4 D28) · **post-GA v1.2+ resequence:** 2026-07-20 (Miguel-ratified; the PROPOSED v1.2–v1.5 order is reworked and a v1.0.1 maintenance-patch slot added — full mapping in roadmap §8, rationale + guardrail in PRD §4 D41)
 - **Owner:** Miguel Ramos
 - **Sources of truth:** `docs/PRD.md` (PRD APPROVED v1.1, §5 tiers / §11 scope / §13 phasing), `docs/plans/01-design-spine.md` (cross-crate interfaces — wins on any cross-crate type/signature disagreement), `docs/plans/implementation-plan.md` (v1 walking skeleton). Hierarchy: PRD > spine > crate plans. Grounding for deferred/later items: original `temp/beads_rust-main` feature inventory; UX grounding for the v1.4 TUI: the TUI-adopted subset of the 14 mockups under `temp/tentative-v2/docs/designs/` (**reference-only**, same status as `temp/beads_rust-main`; the graph / burnup screens there inform the v2+ PRO web instead — roadmap §7).
@@ -603,6 +603,25 @@ FR, re-tiers nothing, and leaves the v1.2+ resequence of PRD §4 D41 untouched. 
   published green from `release/v1.0.x` on 2026-11-19, each build log reading `--package=unblock-cli` on all five
   triples, with attestations and SHA256 sums verified. **The `v1.0.2 → v1.0.3` live update smoke passed on every
   leg on 2026-11-19** (run 44537692027, all five triples in CI, no `403` or `429`).
+
+### v1.0.4 — maintenance patch  **[PLANNED]**
+
+A fourth maintenance patch on the 1.0 line, opened under `ub-b9z` by an inline sentence in PRD NFR-7 and an item
+in FR-8, on both lines. Like v1.0.3 it is cut from the maintenance branch `release/v1.0.x`. It adds no FR,
+re-tiers nothing, and leaves the v1.2+ resequence of PRD §4 D41 untouched. Its scope:
+- **A sync path could name an NTFS stream of the live database, or a Windows device** (`ub-b9z`, found under
+  `ub-c15`). On Windows an MCP `sync` target such as `.unblock\unblock.db:x.jsonl` passed the allowlist and named
+  an alternate data stream of `unblock.db`, and a leaf such as `NUL.jsonl` or `COM1.jsonl` named a device on
+  Windows 10 and earlier. `validate_sync_path` now refuses, lexically and before any filesystem probe of the path,
+  a file name containing `:` (on every platform; on Windows also any other normal component) as
+  `PathReject::ColonInName`, and a file name that is a Windows reserved device name as
+  `PathReject::ReservedDeviceName`; both map to `PATH_TRAVERSAL` (exit 6) and no external-path opt-in relaxes
+  them. On Linux and macOS this refuses names v1.0.3 accepted, so a committed `.unblock/` tree stays checkout-able
+  on Windows. The same fix lands on `main` for v1.1.0.
+- **The release path** (ci-cd §3.3, RELEASING.md), as for v1.0.3: `v1.0.4-rc.1`, then `v1.0.4`, then the live
+  `v1.0.3 → v1.0.4` `unblock update` smoke on all five triples. **That smoke passes before any v1.1.0 is
+  published**, because `unblock update` targets the latest stable release. The branch is never merged back into
+  `main`.
 
 ---
 
