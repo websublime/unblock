@@ -22,7 +22,8 @@ use crate::path::PathReject;
 #[snafu(visibility(pub(crate)))]
 pub enum SyncError {
     /// A sync path failed confinement/allowlist validation (NFR-7/8). `reason` is the precise
-    /// rejected layer; the `.git`/`..`/symlink-escape checks are never relaxed by `allow_external`.
+    /// rejected layer; the `.git`, name (`:`, device name), `..` and symlink-escape checks are
+    /// never relaxed by `allow_external`.
     #[snafu(display("path '{}' rejected: {reason:?}", path.display()))]
     PathTraversal {
         /// The offending path.

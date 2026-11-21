@@ -34,7 +34,7 @@ pub use conflict::{
     ConflictMarker, ConflictMarkerType, ensure_no_conflict_markers, scan_conflict_markers,
 };
 pub use jsonl::{parse_issue_line, serialize_issue_line};
-pub use path::validate_sync_path;
+pub use path::{has_stream_colon, leaf_name_reject, unportable_name_reject, validate_sync_path};
 
 // The per-crate error + its `PathReject` detail.
 pub use error::SyncError;

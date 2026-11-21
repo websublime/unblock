@@ -6,6 +6,14 @@
 //!
 //! 1. `.git` component — **ALWAYS** rejected, even under `allow_external` (raw path AND every
 //!    canonicalized existing ancestor).
+//!
+//!    (1a) lexical name check (`ub-b9z`) — **ALWAYS** rejected, even under `allow_external`. It
+//!    runs between the two halves of step 1 (after the raw-path `.git` test, before any existing
+//!    ancestor is canonicalized), so no filesystem probe precedes it: a leaf containing `:` on
+//!    every platform (an NTFS alternate data stream on Windows, a non-portable name elsewhere)
+//!    and, on Windows, every normal component containing `:` (prefix components never checked)
+//!    → [`PathReject::ColonInName`]; on every platform, a leaf that is a Windows reserved device
+//!    name → [`PathReject::ReservedDeviceName`].
 //! 2. lexical `..` normalization (pop on `ParentDir`; a pop past the root escapes → reject).
 //! 3. symlink-escape of an existing ancestor outside `confine_root`.
 //! 4. containment under `confine_root` — the **only** check `allow_external` relaxes.
@@ -13,10 +21,11 @@
 //! 6. (existing target) reject a non-regular file / an escaping symlink, then ext/name.
 //! 7. extension/exact-name allowlist (`*.jsonl`, `issues.jsonl`, `*.jsonl.<pid>.tmp`).
 //!
-//! **Invariant (NFR-8):** `allow_external = true` relaxes ONLY step 4 — steps 1/2/3 + the
+//! **Invariant (NFR-8):** `allow_external = true` relaxes ONLY step 4 — steps 1/1a/2/3 + the
 //! regular-file check are NEVER relaxed. (The ancestor-symlink check for external paths is a
 //! deliberate TIGHTENING over the original, which checked the leaf only there, SH-1.)
 
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::SyncError;
@@ -36,7 +45,7 @@ pub enum PathReject {
     ParentEscape,
     /// An existing ancestor is a symlink pointing outside `confine_root`.
     SymlinkEscape,
-    /// The file name is not in the exact-name allowlist.
+    /// The file name has no extension and is not an allowed exact name.
     DisallowedName,
     /// The file extension is not in the allowlist.
     DisallowedExtension,
@@ -51,6 +60,21 @@ pub enum PathReject {
     /// and close a descriptor on a file the process holds `SQLite` locks on; exporting would rename over
     /// it.
     SessionDatabase,
+    /// NFR-7 (v1.0.4, `ub-b9z`): a name in the path contains `:`. On NTFS `name:stream` addresses
+    /// an alternate data stream of `name` (`unblock.db:x.jsonl` would write into a stream of the
+    /// live database). Refused in the leaf on every platform, so a `.unblock/` tree stays usable on
+    /// Windows, and on Windows in every `Component::Normal` of the path (prefix components such as
+    /// `C:` or `\\?\C:` are never checked). Lexical, checked right after the raw-path `.git` test
+    /// and before any filesystem probe; never relaxed by `allow_external`.
+    ColonInName,
+    /// NFR-7 (v1.0.4, `ub-b9z`): the leaf is a Windows reserved device name: its stem (the text
+    /// before the first `.`, trailing spaces trimmed, any ASCII case) is `CON`, `PRN`, `AUX`,
+    /// `NUL`, `CONIN$`, `CONOUT$`, or `COM`/`LPT` plus a digit `0`–`9` or a superscript
+    /// `¹`/`²`/`³` (`NUL.jsonl`, `nul.x.jsonl`, `NUL .jsonl`, a bare `NUL`). Win32 opens such a
+    /// name as a device on Windows 10 and earlier; Windows 11 still opens a bare `NUL` as one, and
+    /// other forms become files that some tools mishandle. Refused on every platform for
+    /// portability. Lexical, checked with `ColonInName`; never relaxed by `allow_external`.
+    ReservedDeviceName,
 }
 
 /// `SQLite`'s fixed sidecar suffixes of the session database (the only copy in this crate).
@@ -274,7 +298,7 @@ pub(crate) fn reject_external_without_reason(
 /// Validate `path` for a sync read/write, returning the canonicalized confined path.
 ///
 /// `confine_root` is the absolute `.unblock/` dir (canonicalized once here). `allow_external`
-/// relaxes ONLY the containment check (step 4) — never `.git`/`..`/symlink-escape.
+/// relaxes ONLY the containment check (step 4) — never `.git`/name/`..`/symlink-escape.
 ///
 /// # Errors
 ///
@@ -284,8 +308,22 @@ pub fn validate_sync_path(
     confine_root: &Path,
     allow_external: bool,
 ) -> Result<PathBuf, SyncError> {
-    // (1) `.git` — checked FIRST, never relaxed.
-    reject_git_path(path)?;
+    // (1) `.git` — checked FIRST, never relaxed: the raw path here, its existing ancestors below.
+    reject_git_component(path)?;
+
+    // (1a) NFR-7 (`ub-b9z`): an NTFS stream (`:`) or a Windows device name. Lexical, on the RAW
+    // path (the `..` normalization below rebuilds it and can turn `d:s.jsonl` into a drive
+    // prefix), never relaxed, and before step 1 canonicalizes any ancestor: no probe touches a
+    // refused name.
+    if let Some(reason) = unportable_name_reject(path) {
+        return Err(SyncError::PathTraversal {
+            path: path.to_path_buf(),
+            reason,
+        });
+    }
+
+    // (1) continued: an existing ancestor that resolves into `.git` (a symlinked parent).
+    reject_git_ancestors(path)?;
 
     // (2) lexical `..` normalization. A `..` popping past the filesystem root is an outright escape.
     let had_parent_dir = path.components().any(|c| matches!(c, Component::ParentDir));
@@ -301,7 +339,7 @@ pub fn validate_sync_path(
 
     // A `..` that, after lexical normalization, leaves the confine root is a traversal attempt
     // (faithful port of the original `had_parent_dir` guard) — reported as `ParentEscape`, and NOT
-    // relaxed by `allow_external` (steps 1/2/3 are never relaxed, NFR-8).
+    // relaxed by `allow_external` (steps 1/1a/2/3 are never relaxed, NFR-8).
     if had_parent_dir
         && !normalized.starts_with(&canonical_root)
         && !normalized.starts_with(confine_root)
@@ -380,15 +418,21 @@ pub fn validate_temp_path(
     Ok(())
 }
 
-/// Reject a path that targets a `.git` component — the hard NGI-3 invariant (never relaxed).
-fn reject_git_path(path: &Path) -> Result<(), SyncError> {
+/// Step 1, first half: reject a raw path with a `.git` component — the hard NGI-3 invariant (never
+/// relaxed). Lexical: no filesystem access, so it runs before step (1a).
+fn reject_git_component(path: &Path) -> Result<(), SyncError> {
     if has_git_component(path) {
         return Err(SyncError::PathTraversal {
             path: path.to_path_buf(),
             reason: PathReject::GitComponent,
         });
     }
-    // Resolve each existing ancestor: a higher symlinked ancestor can still target `.git`.
+    Ok(())
+}
+
+/// Step 1, second half, after step (1a): resolve each existing ancestor, because a higher
+/// symlinked ancestor can still target `.git` (never relaxed).
+fn reject_git_ancestors(path: &Path) -> Result<(), SyncError> {
     for ancestor in path.ancestors() {
         if let Ok(canonical) = dunce::canonicalize(ancestor)
             && has_git_component(&canonical)
@@ -413,6 +457,117 @@ fn has_git_component(candidate: &Path) -> bool {
     }
     let s = candidate.to_string_lossy();
     s.contains("/.git/") || s.contains("\\.git\\") || s.ends_with("/.git") || s.ends_with("\\.git")
+}
+
+/// The three-letter Windows reserved device names, compared ASCII-case-insensitively.
+const DEVICE_NAMES: [&[u8]; 4] = [b"CON", b"PRN", b"AUX", b"NUL"];
+
+/// The console pseudo-devices `CreateFile` opens as console handles.
+const CONSOLE_NAMES: [&[u8]; 2] = [b"CONIN$", b"CONOUT$"];
+
+/// Whether one path component (a file or directory name, never a whole path) contains `:`, the
+/// NTFS alternate-data-stream separator (NFR-7, `ub-b9z`).
+///
+/// Lexical and allocation-free: `:` is ASCII, so the platform's encoded bytes contain it exactly
+/// when the name does, also for a name that is not valid Unicode.
+#[must_use]
+pub fn has_stream_colon(name: &OsStr) -> bool {
+    name.as_encoded_bytes().contains(&b':')
+}
+
+/// The portability refusal for a file name used as a leaf (NFR-7, `ub-b9z`):
+/// [`PathReject::ColonInName`] if it contains `:`, else [`PathReject::ReservedDeviceName`] if it is
+/// a Windows reserved device name, else `None`. Platform-independent, lexical, allocation-free.
+/// `unblock-config` reuses it for the configured file names on `main` (`ub-gp0`).
+#[must_use]
+pub fn leaf_name_reject(name: &OsStr) -> Option<PathReject> {
+    if has_stream_colon(name) {
+        Some(PathReject::ColonInName)
+    } else if is_reserved_device_name(name) {
+        Some(PathReject::ReservedDeviceName)
+    } else {
+        None
+    }
+}
+
+/// The path-level refusal of step (1a) (NFR-7, `ub-b9z`): on Windows, any [`Component::Normal`]
+/// containing `:` → [`PathReject::ColonInName`]; on every platform, the last name that no later
+/// `..` cancels (a `..` above the first name cancels nothing), through [`leaf_name_reject`]. Prefix
+/// components (`C:`, `\\?\C:`) are never checked. Lexical (no filesystem access), allocation-free.
+/// `unblock-config` reuses it for `--db` on `main` (`ub-gp0`).
+#[must_use]
+pub fn unportable_name_reject(path: &Path) -> Option<PathReject> {
+    reject_unportable_names(path, cfg!(windows))
+}
+
+/// [`unportable_name_reject`] with its platform scope as an argument, so the Linux and macOS cells
+/// exercise the every-component branch.
+///
+/// - `every_component` (`cfg!(windows)` in [`unportable_name_reject`]): no [`Component::Normal`]
+///   of the RAW `path` may contain `:`. The raw path, because on Windows `PathBuf::push` of a
+///   component such as `d:s.jsonl` (a drive prefix) replaces the buffer and would hide the `:`
+///   from the normalized path. Prefix components (`C:`, `\\?\C:`) are never checked.
+/// - always: the leaf that the `..` normalization leaves must pass [`leaf_name_reject`].
+fn reject_unportable_names(path: &Path, every_component: bool) -> Option<PathReject> {
+    let colon_component = every_component
+        && path
+            .components()
+            .any(|c| matches!(c, Component::Normal(name) if has_stream_colon(name)));
+    if colon_component {
+        Some(PathReject::ColonInName)
+    } else {
+        lexical_leaf(path).and_then(leaf_name_reject)
+    }
+}
+
+/// Whether the leaf `name` is a Windows reserved device name: its stem (the bytes before the first
+/// `.`, trailing spaces removed) is `CON`/`PRN`/`AUX`/`NUL`, `COM`/`LPT` plus one port digit, or
+/// `CONIN$`/`CONOUT$`, in any ASCII case (`NUL.tar.gz` is `NUL`). Win32 also ends the stem at a
+/// `:`; a name holding one never gets here, because [`leaf_name_reject`] refuses it first.
+fn is_reserved_device_name(name: &OsStr) -> bool {
+    let mut stem = name
+        .as_encoded_bytes()
+        .split(|&b| b == b'.')
+        .next()
+        .unwrap_or_default();
+    while let [rest @ .., b' '] = stem {
+        stem = rest;
+    }
+    match stem {
+        [_, _, _] => DEVICE_NAMES
+            .iter()
+            .any(|device| stem.eq_ignore_ascii_case(device)),
+        [p0, p1, p2, digit @ ..] if is_port_digit(digit) => {
+            let port = [*p0, *p1, *p2];
+            port.eq_ignore_ascii_case(b"COM") || port.eq_ignore_ascii_case(b"LPT")
+        }
+        _ => CONSOLE_NAMES
+            .iter()
+            .any(|console| stem.eq_ignore_ascii_case(console)),
+    }
+}
+
+/// A COM/LPT port digit: one ASCII `0`–`9`, or a superscript `¹` (U+00B9), `²` (U+00B2) or `³`
+/// (U+00B3) in its UTF-8 (= WTF-8) encoding, which Windows also treats as a port digit.
+fn is_port_digit(digit: &[u8]) -> bool {
+    matches!(digit, [b'0'..=b'9'] | [0xC2, 0xB2 | 0xB3 | 0xB9])
+}
+
+/// The leaf [`normalize_lexically`] would leave, found without allocating: walk the components
+/// backwards, letting each `..` cancel the next `Normal` name. `None` when every name is
+/// cancelled; unlike [`normalize_lexically`], a `..` past the root is ignored rather than failing.
+fn lexical_leaf(path: &Path) -> Option<&OsStr> {
+    let mut pending_pops = 0_usize;
+    for component in path.components().rev() {
+        match component {
+            Component::ParentDir => pending_pops += 1,
+            Component::CurDir => {}
+            Component::Normal(name) if pending_pops == 0 => return Some(name),
+            Component::Normal(_) => pending_pops -= 1,
+            Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+    None
 }
 
 /// Purely-lexical `..` normalization: pop on `ParentDir`, drop `CurDir`. `None` if a `..` escapes
