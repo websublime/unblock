@@ -40,7 +40,7 @@ pub use conflict::{
     scan_conflict_markers,
 };
 pub use jsonl::{parse_issue_line, serialize_issue_line};
-pub use path::validate_sync_path;
+pub use path::{has_stream_colon, leaf_name_reject, unportable_name_reject, validate_sync_path};
 
 // The `SQLite` sidecar suffixes, owned here above L2 (PRD §4 D5 amendment, `ub-c15`); health and the
 // engine root re-export them.
