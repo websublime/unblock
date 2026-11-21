@@ -14,14 +14,16 @@
 
 mod fake;
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use fake::{FakeStorage, sample_issue};
 use unblock_error::ErrorCode;
 use unblock_sync::{
-    ExportOptions, ImportOptions, PathReject, SessionFiles, SyncError, export_jsonl, import_bd,
-    import_jsonl, serialize_issue_line,
+    ExportOptions, ImportOptions, PathReject, SessionFiles, SyncError, export_jsonl,
+    has_stream_colon, import_bd, import_jsonl, leaf_name_reject, serialize_issue_line,
+    unportable_name_reject,
 };
 
 /// The three sync actions of the MCP `sync` tool.
@@ -366,5 +368,37 @@ async fn symlinked_database_target_sidecars_are_session_files() {
             assert_refused(action, &ws, &alias, &target, PathReject::SessionDatabase).await;
             fs::remove_file(&alias).expect("remove alias");
         }
+    }
+}
+
+/// v1.0.4 (`ub-b9z`, NFR-7): a target whose name holds `:` (an NTFS stream of the db on Windows) or
+/// is a Windows reserved device name is refused by `validate_sync_path` step (1a) for every action,
+/// before any open. The lexical checks are public (`ub-gp0` reuses them on `main`).
+#[tokio::test]
+async fn colon_and_device_name_targets_are_refused_for_every_action() {
+    assert_eq!(
+        leaf_name_reject(OsStr::new("NUL.jsonl")),
+        Some(PathReject::ReservedDeviceName)
+    );
+    assert_eq!(
+        leaf_name_reject(OsStr::new("ab:c.jsonl")),
+        Some(PathReject::ColonInName)
+    );
+    assert!(has_stream_colon(OsStr::new("xy:z")));
+    assert!(!has_stream_colon(OsStr::new("issues.jsonl")));
+    assert_eq!(
+        unportable_name_reject(Path::new("/ws/xy:z/issues.jsonl")),
+        cfg!(windows).then_some(PathReject::ColonInName)
+    );
+    assert_eq!(
+        unportable_name_reject(Path::new("/ws/.unblock/NUL.jsonl")),
+        Some(PathReject::ReservedDeviceName)
+    );
+    for action in ACTIONS {
+        let ws = workspace("unblock.db");
+        let stream = ws.unblock.join("unblock.db:x.jsonl");
+        assert_refused(action, &ws, &stream, &ws.db, PathReject::ColonInName).await;
+        let device = ws.unblock.join("NUL.jsonl");
+        assert_refused(action, &ws, &device, &ws.db, PathReject::ReservedDeviceName).await;
     }
 }
