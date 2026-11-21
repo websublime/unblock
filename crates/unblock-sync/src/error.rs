@@ -374,6 +374,20 @@ mod tests {
     }
 
     #[test]
+    fn name_rejects_map_to_path_traversal_exit_6() {
+        // NFR-7 (`ub-b9z`): both name reasons reuse the existing code.
+        for reason in [PathReject::ColonInName, PathReject::ReservedDeviceName] {
+            let err = SyncError::PathTraversal {
+                path: PathBuf::from("/x/.unblock/NUL.jsonl"),
+                reason,
+            };
+            assert_eq!(err.code(), ErrorCode::PathTraversal);
+            assert_eq!(err.code().exit_code(), 6);
+            assert!(err.to_string().contains(&format!("{reason:?}")));
+        }
+    }
+
+    #[test]
     fn json_encode_maps_to_exit_8() {
         // Fabricate a serde error via a non-serializable-to-string map key is awkward; instead a
         // number-out-of-range parse error stands in for the JSON encode class code assertion.

@@ -17,6 +17,7 @@
 mod common;
 mod fake;
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -24,7 +25,8 @@ use fake::{FakeStorage, sample_issue};
 use unblock_error::ErrorCode;
 use unblock_sync::{
     ExportOptions, ImportOptions, PathReject, SIDECAR_SUFFIXES, SessionFiles, SyncError,
-    export_jsonl, import_bd, import_jsonl, serialize_issue_line, sidecar,
+    export_jsonl, has_stream_colon, import_bd, import_jsonl, leaf_name_reject,
+    serialize_issue_line, sidecar, unportable_name_reject,
 };
 
 /// The four sync actions of the MCP `sync` tool (`import` with and without `dry_run`).
@@ -496,5 +498,47 @@ async fn an_external_override_does_not_bypass_the_session_check() {
             Some("operator-approved external target"),
         )
         .await;
+    }
+}
+
+/// (`ub-b9z`, NFR-7) A target whose name holds `:` (an NTFS stream of the db on Windows) or is a
+/// Windows reserved device name is refused by `validate_sync_path` step (1a) for every action,
+/// before any open, and an external override never relaxes it. The lexical checks are public
+/// (`ub-gp0`).
+#[tokio::test]
+async fn colon_and_device_name_targets_are_refused_for_every_action() {
+    assert_eq!(
+        leaf_name_reject(OsStr::new("NUL.jsonl")),
+        Some(PathReject::ReservedDeviceName)
+    );
+    assert_eq!(
+        leaf_name_reject(OsStr::new("ab:c.jsonl")),
+        Some(PathReject::ColonInName)
+    );
+    assert!(has_stream_colon(OsStr::new("xy:z")));
+    assert!(!has_stream_colon(OsStr::new("issues.jsonl")));
+    assert_eq!(
+        unportable_name_reject(Path::new("/ws/xy:z/issues.jsonl")),
+        cfg!(windows).then_some(PathReject::ColonInName)
+    );
+    assert_eq!(
+        unportable_name_reject(Path::new("/ws/.unblock/NUL.jsonl")),
+        Some(PathReject::ReservedDeviceName)
+    );
+    for action in ACTIONS {
+        let ws = workspace("unblock.db");
+        let stream = ws.unblock.join("unblock.db:x.jsonl");
+        assert_refused(action, &ws, &stream, &ws.db, PathReject::ColonInName).await;
+        let device = ws.unblock.join("NUL.jsonl");
+        assert_refused(action, &ws, &device, &ws.db, PathReject::ReservedDeviceName).await;
+    }
+    let ws = workspace("unblock.db");
+    for (name, expected) in [
+        ("unblock.db:x.jsonl", PathReject::ColonInName),
+        ("NUL.jsonl", PathReject::ReservedDeviceName),
+    ] {
+        let target = ws.unblock.join(name);
+        let reason = Some("test override");
+        assert_refused_with(Action::Export, &ws, &target, &ws.db, expected, reason).await;
     }
 }
