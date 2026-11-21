@@ -770,11 +770,13 @@ fn is_allowed_jsonl_temp_name(file_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        JOURNAL_SUFFIX, PathReject, SHM_SUFFIX, WAL_SUFFIX, is_allowed_jsonl_temp_name,
-        normalize_lexically, reject_external_without_reason, sidecar, validate_sync_path,
+        JOURNAL_SUFFIX, PathReject, SHM_SUFFIX, SIDECAR_SUFFIXES, WAL_SUFFIX, has_stream_colon,
+        is_allowed_jsonl_temp_name, leaf_name_reject, lexical_leaf, normalize_lexically,
+        reject_external_without_reason, reject_unportable_names, sidecar, validate_sync_path,
         validate_temp_path,
     };
     use crate::error::SyncError;
+    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
     fn reason_of(err: &SyncError) -> PathReject {
@@ -826,6 +828,316 @@ mod tests {
         let path = root.path().join("notes.txt");
         let err = validate_sync_path(&path, root.path(), false).expect_err("ext");
         assert_eq!(reason_of(&err), PathReject::DisallowedExtension);
+    }
+
+    // ---- step (1a), `ub-b9z`: `:` and Windows reserved device names (NFR-7) ----
+    // Every test name puts at least two characters before a `:`: on Windows a single ASCII letter
+    // followed by `:` parses as a drive prefix, and `Path::join` would replace the whole path.
+
+    /// Leaves that cell `reserved_device_name_rejected` refuses.
+    const DEVICE_LEAVES: [&str; 18] = [
+        "nul.jsonl",
+        "NUL.jsonl",
+        "NUL .jsonl",
+        "NUL.x.jsonl",
+        "CON.x.jsonl",
+        "nul..jsonl",
+        "prn.jsonl",
+        "aux.jsonl",
+        "CONIN$.jsonl",
+        "conout$.jsonl",
+        "com¹.jsonl",
+        "LPT².jsonl",
+        "COM³.jsonl",
+        "COM0.jsonl",
+        "LPT0.jsonl",
+        "COM1.jsonl",
+        "lpt9.jsonl",
+        "con.txt",
+    ];
+
+    /// Device-like leaves that stay accepted.
+    const DEVICE_LIKE_LEAVES: [&str; 12] = [
+        " NUL.jsonl",
+        "NULL.jsonl",
+        "null.jsonl",
+        ".nul.jsonl",
+        "console.jsonl",
+        "CLOCK$.jsonl",
+        "COM10.jsonl",
+        "COM.jsonl",
+        "LPT.jsonl",
+        "issues.jsonl",
+        "COM½.jsonl",
+        "NUL\t.jsonl",
+    ];
+
+    #[test]
+    fn colon_in_leaf_rejected() {
+        let root = tmp_root();
+        let path = root.path().join("unblock.db:x.jsonl");
+        let err = validate_sync_path(&path, root.path(), false).expect_err("stream name");
+        assert_eq!(reason_of(&err), PathReject::ColonInName);
+    }
+
+    #[test]
+    fn colon_in_leaf_rejected_even_under_allow_external() {
+        let root = tmp_root();
+        let other = tmp_root();
+        for path in [
+            root.path().join("unblock.db:x.jsonl"),
+            other.path().join("unblock.db:x.jsonl"),
+        ] {
+            let err = validate_sync_path(&path, root.path(), true).expect_err("never relaxed");
+            assert_eq!(
+                reason_of(&err),
+                PathReject::ColonInName,
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn colon_in_sidecar_leaf_rejected() {
+        let root = tmp_root();
+        for suffix in SIDECAR_SUFFIXES {
+            let path = root.path().join(format!("unblock.db{suffix}:x.jsonl"));
+            let err = validate_sync_path(&path, root.path(), false).expect_err("sidecar stream");
+            assert_eq!(reason_of(&err), PathReject::ColonInName, "{suffix}");
+        }
+    }
+
+    #[test]
+    fn colon_in_temp_leaf_rejected() {
+        let root = tmp_root();
+        let final_path = root.path().join("issues.jsonl");
+        let temp = root.path().join("unblock.db:x.jsonl.123.tmp");
+        let err = validate_temp_path(&temp, &final_path, root.path()).expect_err("temp stream");
+        assert_eq!(reason_of(&err), PathReject::ColonInName);
+        let temp = root.path().join("unblock.db:x.jsonl.tmp");
+        let err = validate_sync_path(&temp, root.path(), false).expect_err("temp stream");
+        assert_eq!(reason_of(&err), PathReject::ColonInName);
+    }
+
+    #[test]
+    fn git_component_precedes_name_checks() {
+        let root = tmp_root();
+        for leaf in ["ab:c.jsonl", "NUL.jsonl"] {
+            let path = root.path().join(".git").join(leaf);
+            for allow_external in [false, true] {
+                let err = validate_sync_path(&path, root.path(), allow_external).expect_err("git");
+                assert_eq!(reason_of(&err), PathReject::GitComponent, "{leaf}");
+            }
+        }
+    }
+
+    /// Step (1a) runs before step 1 canonicalizes the existing ancestors (no probe touches a
+    /// refused name); the control row is the ancestor loop's own cell.
+    #[cfg(unix)]
+    #[test]
+    fn name_checks_precede_symlinked_git_ancestor() {
+        let root = tmp_root();
+        let elsewhere = tmp_root();
+        let git_dir = elsewhere.path().join(".git");
+        std::fs::create_dir(&git_dir).expect("mkdir .git");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&git_dir, &link).expect("symlink");
+        for (leaf, expected) in [
+            ("ab:c.jsonl", PathReject::ColonInName),
+            ("NUL.jsonl", PathReject::ReservedDeviceName),
+            ("issues.jsonl", PathReject::GitComponent),
+        ] {
+            for allow_external in [false, true] {
+                let path = link.join(leaf);
+                let err = validate_sync_path(&path, root.path(), allow_external).expect_err(leaf);
+                assert_eq!(reason_of(&err), expected, "{leaf}");
+            }
+        }
+    }
+
+    #[test]
+    fn colon_precedes_parent_escape_and_extension() {
+        let root = tmp_root();
+        for path in [
+            PathBuf::from("/../ab:c.jsonl"),
+            root.path().join("../ab:c.jsonl"),
+            root.path().join("ab:c.txt"),
+        ] {
+            let err = validate_sync_path(&path, root.path(), false).expect_err("name first");
+            assert_eq!(
+                reason_of(&err),
+                PathReject::ColonInName,
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn colon_precedes_containment_and_existence() {
+        let root = tmp_root();
+        let other = tmp_root();
+        let outside = other.path().join("ab:c.jsonl");
+        let err = validate_sync_path(&outside, root.path(), false).expect_err("outside");
+        assert_eq!(reason_of(&err), PathReject::ColonInName);
+        #[cfg(unix)]
+        {
+            let dir = root.path().join("ab:c.jsonl");
+            std::fs::create_dir(&dir).expect("mkdir");
+            let err = validate_sync_path(&dir, root.path(), false).expect_err("directory");
+            assert_eq!(reason_of(&err), PathReject::ColonInName);
+        }
+    }
+
+    #[test]
+    fn colon_leaf_reached_through_dotdot_rejected() {
+        let root = tmp_root();
+        let one = root.path().join("ab:c.jsonl").join("x").join("..");
+        let two = root
+            .path()
+            .join("ab:c.jsonl")
+            .join("x")
+            .join("y")
+            .join("..")
+            .join("..");
+        for path in [one, two] {
+            let err = validate_sync_path(&path, root.path(), false).expect_err("normalized leaf");
+            assert_eq!(reason_of(&err), PathReject::ColonInName);
+        }
+    }
+
+    /// Ruling: off Windows only the leaf is checked, so a `:` above or below the confine root in a
+    /// directory name is accepted.
+    #[cfg(unix)]
+    #[test]
+    fn colon_in_directory_accepted_on_unix() {
+        let base = tmp_root();
+        let root = base.path().join("ab:c").join(".unblock");
+        let dir = root.join("cd:e");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        validate_sync_path(&dir.join("issues.jsonl"), &root, false).expect("leaf-only off Windows");
+    }
+
+    /// The Windows half of the scope; no CI job runs it (no Windows test job).
+    #[cfg(windows)]
+    #[test]
+    fn colon_in_directory_rejected_on_windows() {
+        let root = tmp_root();
+        let path = root.path().join("ds:t").join("x.jsonl");
+        let err = validate_sync_path(&path, root.path(), false).expect_err("every component");
+        assert_eq!(reason_of(&err), PathReject::ColonInName);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_leaf_with_colon_rejected() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = tmp_root();
+        let path = root.path().join(OsStr::from_bytes(b"ab\xff:c.jsonl"));
+        let err = validate_sync_path(&path, root.path(), false).expect_err("non-UTF-8 stream");
+        assert_eq!(reason_of(&err), PathReject::ColonInName);
+    }
+
+    #[test]
+    fn colon_component_cases() {
+        assert!(has_stream_colon(OsStr::new("ab:c.jsonl")));
+        assert!(!has_stream_colon(OsStr::new("issues.jsonl")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(has_stream_colon(OsStr::from_bytes(b"ab\xff:c")));
+        }
+        let folder = Path::new("xy:z/issues.jsonl");
+        assert_eq!(reject_unportable_names(folder, false), None);
+        assert_eq!(
+            reject_unportable_names(folder, true),
+            Some(PathReject::ColonInName)
+        );
+        assert_eq!(
+            reject_unportable_names(Path::new("ab:c.jsonl"), false),
+            Some(PathReject::ColonInName)
+        );
+        assert_eq!(
+            reject_unportable_names(Path::new("issues.jsonl"), true),
+            None
+        );
+        // A drive or verbatim prefix is never checked (prefixes parse only on Windows).
+        #[cfg(windows)]
+        for prefixed in [r"C:\x\issues.jsonl", r"\\?\C:\x\issues.jsonl"] {
+            assert_eq!(reject_unportable_names(Path::new(prefixed), true), None);
+        }
+    }
+
+    #[test]
+    fn reserved_device_name_rejected() {
+        let root = tmp_root();
+        for leaf in DEVICE_LEAVES.into_iter().chain(["NUL"]) {
+            let path = root.path().join(leaf);
+            for allow_external in [false, true] {
+                let err = validate_sync_path(&path, root.path(), allow_external).expect_err(leaf);
+                assert_eq!(reason_of(&err), PathReject::ReservedDeviceName, "{leaf}");
+            }
+        }
+        let final_path = root.path().join("issues.jsonl");
+        let temp = root.path().join("LPT9.jsonl.123.tmp");
+        let err = validate_temp_path(&temp, &final_path, root.path()).expect_err("device temp");
+        assert_eq!(reason_of(&err), PathReject::ReservedDeviceName);
+    }
+
+    #[test]
+    fn device_like_names_accepted() {
+        let root = tmp_root();
+        for leaf in DEVICE_LIKE_LEAVES {
+            validate_sync_path(&root.path().join(leaf), root.path(), false).expect(leaf);
+        }
+    }
+
+    #[test]
+    fn leaf_name_reject_cases() {
+        for leaf in DEVICE_LEAVES.into_iter().chain(["NUL"]) {
+            let reason = leaf_name_reject(OsStr::new(leaf));
+            assert_eq!(reason, Some(PathReject::ReservedDeviceName), "{leaf}");
+        }
+        for leaf in DEVICE_LIKE_LEAVES {
+            assert_eq!(leaf_name_reject(OsStr::new(leaf)), None, "{leaf}");
+        }
+        for leaf in ["ab:c.jsonl", "NUL.x:y.jsonl"] {
+            let reason = leaf_name_reject(OsStr::new(leaf));
+            assert_eq!(reason, Some(PathReject::ColonInName), "{leaf}");
+        }
+    }
+
+    #[test]
+    fn colon_checked_before_device_name() {
+        let root = tmp_root();
+        let path = root.path().join("NUL.x:y.jsonl");
+        let err = validate_sync_path(&path, root.path(), false).expect_err("colon first");
+        assert_eq!(reason_of(&err), PathReject::ColonInName);
+    }
+
+    #[test]
+    fn issues_jsonl_still_accepted() {
+        let root = tmp_root();
+        let final_path = root.path().join("issues.jsonl");
+        validate_sync_path(&final_path, root.path(), false).expect("issues.jsonl");
+        let temp = root.path().join("issues.jsonl.123.tmp");
+        validate_temp_path(&temp, &final_path, root.path()).expect("its temp");
+    }
+
+    #[test]
+    fn lexical_leaf_cases() {
+        let leaf = |p: &str| lexical_leaf(Path::new(p)).map(OsStr::to_os_string);
+        assert_eq!(leaf("a/b/.."), Some("a".into()));
+        assert_eq!(leaf("a/./b"), Some("b".into()));
+        assert_eq!(leaf("ab:c.jsonl/x/.."), Some("ab:c.jsonl".into()));
+        assert_eq!(leaf("ab:c.jsonl/x/y/../.."), Some("ab:c.jsonl".into()));
+        assert_eq!(leaf("a/b/c/../.."), Some("a".into()));
+        assert_eq!(leaf("x/.."), None);
+        assert_eq!(leaf("/.."), None);
+        assert_eq!(leaf("/"), None);
+        // Deliberately differs from `normalize_lexically`, which returns `None` here.
+        assert_eq!(leaf("/../a"), Some("a".into()));
     }
 
     #[test]
