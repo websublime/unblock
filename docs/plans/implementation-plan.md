@@ -596,7 +596,11 @@
   branch back. *(AC: the `ub-b9z` cells pass on Linux on both lines and on macOS on `main`, and the end-to-end
   cell on macOS on both lines; the branch `windows-check` job is green; `v1.0.4-rc.1` then `v1.0.4` are published
   from `release/v1.0.x` with `--package=unblock-cli` in every build log; the live `v1.0.3 → v1.0.4` update smoke
-  passes on all five triples before any v1.1.0 is published.)*
+  passes on all five triples before any v1.1.0 is published. **Result (2026-11-23):** met — the release-line
+  push run 45189353262 on `8f97a9bd` was green, `windows-check` and the macOS exclusivity job included (that job
+  on its second attempt, after the first got no runner), `v1.0.4-rc.1` (run 45197807823) and `v1.0.4` (run
+  45202123968) published green with `--package=unblock-cli` in all five build logs, and the `v1.0.3 → v1.0.4`
+  smoke (run 45204278325) passed on all five triples.)*
 
 ## 5a. v1.1 — locked slices  *(tasks land just-in-time as v1.1 slices are decided — `docs/PROCESS.md` §2)*
 

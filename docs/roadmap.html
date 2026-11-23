@@ -296,11 +296,11 @@
           <div class="thm">Maintenance patch — <span class="mono">unblock doctor</span> keeps its SQLite lock (released 2026-11-19)</div>
           <span class="tag">Patch · released</span>
         </div>
-        <div class="stn future">
+        <div class="stn done">
           <span class="node"></span>
           <div class="ver">v1.0.4</div>
-          <div class="thm">Maintenance patch — sync paths refuse NTFS stream and Windows device names</div>
-          <span class="tag">Patch</span>
+          <div class="thm">Maintenance patch — sync paths refuse NTFS stream and Windows device names (released 2026-11-23)</div>
+          <span class="tag">Patch · released</span>
         </div>
         <div class="stn locked">
           <span class="node"></span>
@@ -472,12 +472,12 @@
       </div>
 
       <div class="card">
-        <div class="ch"><span class="cv">v1.0.4</span><span class="status st-locked">Patch · planned</span></div>
+        <div class="ch"><span class="cv">v1.0.4</span><span class="status st-locked">Patch · released</span></div>
         <div class="thm">Maintenance patch</div>
         <p class="desc">A fourth patch on the 1.0 line, cut from the <span class="mono">release/v1.0.x</span> maintenance branch &mdash; a Windows sync-path hole found under <span class="mono">ub-c15</span>.</p>
         <ul>
           <li>Fix: an MCP <span class="mono">sync</span> path whose file name contains <span class="mono">:</span> (an NTFS alternate data stream on Windows) or is a Windows reserved device name (<span class="mono">NUL.jsonl</span>, <span class="mono">COM1.jsonl</span>) is refused on every platform before any filesystem probe (<span class="mono">ub-b9z</span>, NFR-7); on Linux and macOS such names were accepted before</li>
-          <li>Released from <span class="mono">release/v1.0.x</span>: <span class="mono">v1.0.4-rc.1</span>, then <span class="mono">v1.0.4</span>; the live <span class="mono">v1.0.3 → v1.0.4</span> <span class="mono">unblock update</span> smoke runs before any v1.1.0 is published; the branch is never merged back</li>
+          <li>Released from <span class="mono">release/v1.0.x</span> on 2026-11-23: <span class="mono">v1.0.4-rc.1</span>, then <span class="mono">v1.0.4</span>; the live <span class="mono">v1.0.3 → v1.0.4</span> <span class="mono">unblock update</span> smoke passed on all five triples, 2026-11-23; the branch is never merged back</li>
         </ul>
         <div class="crates"><b>touches</b> sync</div>
       </div>
