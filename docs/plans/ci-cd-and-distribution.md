@@ -1179,7 +1179,9 @@ automates that step behind a strict, human-operated safety model.
   query GitHub received from a token-sending binary, exited 0. No `RATE_LIMITED` or `CONFIG_ERROR` path was
   hit, so the D55 refusal mapping was not exercised live. The `v1.0.2 → v1.0.3` run on 2026-11-19 (workflow
   run 44537692027, `ub-kpe`) passed on every triple, all five legs in CI, with no `403` or `429` at any step,
-  so the D55 refusal mapping was again not exercised live.
+  so the D55 refusal mapping was again not exercised live. The `v1.0.3 → v1.0.4` run on 2026-11-23 (workflow
+  run 45204278325, `ub-b9z`) passed on every triple, all five legs in CI, with no `403` or `429` at any step, so
+  the D55 refusal mapping was still not exercised live.
 
 ## 5. Mapping to PRD NFRs
 
