@@ -4,7 +4,7 @@ description: The release/v1.0.x backport of the sync-path name guard (tracker ub
 type: run
 date: 2026-11-21
 branch: ub-b9z-v1-0-4-record
-pr: pending
+pr: '487'
 issues: [ub-b9z]
 ---
 
